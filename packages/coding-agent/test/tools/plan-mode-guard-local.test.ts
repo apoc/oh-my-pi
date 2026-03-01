@@ -26,7 +26,7 @@ describe("resolvePlanPath local:// support", () => {
 	it("resolves local:// paths under session artifacts local root", () => {
 		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", sessionId: "abc" });
 		expect(resolvePlanPath(session, "local://handoffs/result.json")).toBe(
-			path.join("/tmp/agent-artifacts", "local", "handoffs", "result.json"),
+			path.resolve("/tmp/agent-artifacts", "local", "handoffs", "result.json"),
 		);
 	});
 
