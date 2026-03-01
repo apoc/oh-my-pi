@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { glob } from "@oh-my-pi/pi-natives";
+import { fuzzyMatch } from "@oh-my-pi/pi-utils";
 import { formatHashLines } from "../patch/hashline";
 import type { FileMentionMessage } from "../session/messages";
 import {
@@ -19,7 +20,6 @@ import {
 } from "../session/streaming-output";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatAge, formatBytes } from "../tools/render-utils";
-import { fuzzyMatch } from "./fuzzy";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 import { detectSupportedImageMimeTypeFromFile } from "./mime";
 

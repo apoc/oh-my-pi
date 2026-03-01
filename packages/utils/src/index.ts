@@ -5,6 +5,7 @@ export * from "./dirs";
 export * from "./env";
 export * from "./format";
 export * from "./fs-error";
+export * from "./fuzzy";
 export * from "./glob";
 export * from "./indent";
 export * from "./json";

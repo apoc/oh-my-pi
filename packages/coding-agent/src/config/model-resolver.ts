@@ -3,10 +3,10 @@
  */
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, DEFAULT_MODEL_PER_PROVIDER, type KnownProvider, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
+import { fuzzyMatch } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { isValidThinkingLevel } from "../cli/args";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { fuzzyMatch } from "../utils/fuzzy";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "./model-registry";
 import type { Settings } from "./settings";
 

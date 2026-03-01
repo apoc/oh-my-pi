@@ -1,5 +1,8 @@
 // Core TUI interfaces and classes
 
+export type { FuzzyMatch } from "@oh-my-pi/pi-utils";
+// Fuzzy matching (re-exported from pi-utils)
+export { fuzzyFilter, fuzzyMatch } from "@oh-my-pi/pi-utils";
 // Autocomplete support
 export * from "./autocomplete";
 // Components
@@ -18,8 +21,6 @@ export * from "./components/text";
 export * from "./components/truncated-text";
 // Editor component interface (for custom editors)
 export type * from "./editor-component";
-// Fuzzy matching
-export * from "./fuzzy";
 // Keybindings
 export * from "./keybindings";
 // Kitty keyboard protocol helpers
