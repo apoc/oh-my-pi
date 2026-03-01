@@ -1,55 +1,16 @@
 /**
  * Generate session titles using a smol, fast model.
  */
-import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { parseModelString } from "../config/model-resolver";
 import { renderPromptTemplate } from "../config/prompt-templates";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import { getSmolModelCandidates } from "./model-candidates";
 
 const TITLE_SYSTEM_PROMPT = renderPromptTemplate(titleSystemPrompt);
 
 const MAX_INPUT_CHARS = 2000;
-
-function getTitleModelCandidates(registry: ModelRegistry, savedSmolModel?: string): Model<Api>[] {
-	const availableModels = registry.getAvailable();
-	if (availableModels.length === 0) return [];
-
-	const candidates: Model<Api>[] = [];
-	const addCandidate = (model?: Model<Api>): void => {
-		if (!model) return;
-		const exists = candidates.some(candidate => candidate.provider === model.provider && candidate.id === model.id);
-		if (!exists) {
-			candidates.push(model);
-		}
-	};
-
-	if (savedSmolModel) {
-		const parsed = parseModelString(savedSmolModel);
-		if (parsed) {
-			const match = availableModels.find(model => model.provider === parsed.provider && model.id === parsed.id);
-			addCandidate(match);
-		}
-	}
-
-	for (const pattern of MODEL_PRIO.smol) {
-		const needle = pattern.toLowerCase();
-		const exactMatch = availableModels.find(model => model.id.toLowerCase() === needle);
-		addCandidate(exactMatch);
-
-		const fuzzyMatch = availableModels.find(model => model.id.toLowerCase().includes(needle));
-		addCandidate(fuzzyMatch);
-	}
-
-	for (const model of availableModels) {
-		addCandidate(model);
-	}
-
-	return candidates;
-}
 
 /**
  * Generate a title for a session based on the first user message.
@@ -65,7 +26,7 @@ export async function generateSessionTitle(
 	savedSmolModel?: string,
 	sessionId?: string,
 ): Promise<string | null> {
-	const candidates = getTitleModelCandidates(registry, savedSmolModel);
+	const candidates = getSmolModelCandidates(registry, savedSmolModel);
 	if (candidates.length === 0) {
 		logger.debug("title-generator: no smol model found");
 		return null;

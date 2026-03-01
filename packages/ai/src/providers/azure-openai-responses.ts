@@ -1,5 +1,4 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import type OpenAI from "openai";
 import { AzureOpenAI } from "openai";
 import type {
 	Tool as OpenAITool,
@@ -16,7 +15,6 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
-	StopReason,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -29,7 +27,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
-import { convertResponsesMessages } from "./shared";
+import { convertResponsesMessages, mapStopReason } from "./shared";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 
@@ -534,25 +532,4 @@ function convertTools(tools: Tool[]): OpenAITool[] {
 		parameters: tool.parameters as Record<string, unknown>,
 		strict: false,
 	}));
-}
-
-function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {
-	if (!status) return "stop";
-	switch (status) {
-		case "completed":
-			return "stop";
-		case "incomplete":
-			return "length";
-		case "failed":
-		case "cancelled":
-			return "error";
-		// These two are wonky ...
-		case "in_progress":
-		case "queued":
-			return "stop";
-		default: {
-			const _exhaustive: never = status;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
-	}
 }

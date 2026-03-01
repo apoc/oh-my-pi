@@ -1,3 +1,4 @@
+import type OpenAI from "openai";
 import type {
 	ResponseInput,
 	ResponseInputContent,
@@ -5,7 +6,7 @@ import type {
 	ResponseInputText,
 	ResponseOutputMessage,
 } from "openai/resources/responses/responses";
-import type { Api, AssistantMessage, Context, ImageContent, Model, TextContent, ToolCall } from "../types";
+import type { Api, AssistantMessage, Context, ImageContent, Model, StopReason, TextContent, ToolCall } from "../types";
 import { normalizeResponsesToolCallId, normalizeToolCallId } from "../utils";
 import { transformMessages } from "./transform-messages";
 
@@ -34,7 +35,7 @@ export function createErrorMessage(model: Model<Api>, err: unknown) {
  * Used by both openai-responses and azure-openai-responses.
  */
 export function convertResponsesMessages(
-	model: Model<Api>,
+	model: Model<"openai-responses"> | Model<"azure-openai-responses">,
 	context: Context,
 	strictResponsesPairing: boolean,
 ): ResponseInput {
@@ -201,4 +202,25 @@ export function convertResponsesMessages(
 	}
 
 	return messages;
+}
+
+export function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {
+	if (!status) return "stop";
+	switch (status) {
+		case "completed":
+			return "stop";
+		case "incomplete":
+			return "length";
+		case "failed":
+		case "cancelled":
+			return "error";
+		// These two are wonky ...
+		case "in_progress":
+		case "queued":
+			return "stop";
+		default: {
+			const _exhaustive: never = status;
+			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
+		}
+	}
 }

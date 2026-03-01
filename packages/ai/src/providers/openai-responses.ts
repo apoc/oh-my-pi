@@ -16,7 +16,6 @@ import type {
 	CacheRetention,
 	Context,
 	Model,
-	StopReason,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -36,7 +35,7 @@ import {
 	getCopilotInitiatorOverride,
 	hasCopilotVisionInput,
 } from "./github-copilot-headers";
-import { convertResponsesMessages } from "./shared";
+import { convertResponsesMessages, mapStopReason } from "./shared";
 
 /**
  * Get prompt cache retention based on cacheRetention and base URL.
@@ -526,25 +525,4 @@ function convertTools(tools: Tool[], strictMode: boolean): OpenAITool[] {
 			...(effectiveStrict && { strict: true }),
 		} as OpenAITool;
 	});
-}
-
-function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): StopReason {
-	if (!status) return "stop";
-	switch (status) {
-		case "completed":
-			return "stop";
-		case "incomplete":
-			return "length";
-		case "failed":
-		case "cancelled":
-			return "error";
-		// These two are wonky ...
-		case "in_progress":
-		case "queued":
-			return "stop";
-		default: {
-			const _exhaustive: never = status;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
-	}
 }

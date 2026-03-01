@@ -2,14 +2,12 @@
  * Generate commit messages from diffs using a smol, fast model.
  * Follows the same pattern as title-generator.ts.
  */
-import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { parseModelString } from "../config/model-resolver";
 import { renderPromptTemplate } from "../config/prompt-templates";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
+import { getSmolModelCandidates } from "./model-candidates";
 
 const COMMIT_SYSTEM_PROMPT = renderPromptTemplate(commitSystemPrompt);
 const MAX_DIFF_CHARS = 4000;
@@ -30,38 +28,6 @@ function filterDiffNoise(diff: string): string {
 		if (!skip) filtered.push(line);
 	}
 	return filtered.join("\n");
-}
-
-function getSmolModelCandidates(registry: ModelRegistry, savedSmolModel?: string): Model<Api>[] {
-	const availableModels = registry.getAvailable();
-	if (availableModels.length === 0) return [];
-
-	const candidates: Model<Api>[] = [];
-	const addCandidate = (model?: Model<Api>): void => {
-		if (!model) return;
-		if (candidates.some(c => c.provider === model.provider && c.id === model.id)) return;
-		candidates.push(model);
-	};
-
-	if (savedSmolModel) {
-		const parsed = parseModelString(savedSmolModel);
-		if (parsed) {
-			const match = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
-			addCandidate(match);
-		}
-	}
-
-	for (const pattern of MODEL_PRIO.smol) {
-		const needle = pattern.toLowerCase();
-		addCandidate(availableModels.find(m => m.id.toLowerCase() === needle));
-		addCandidate(availableModels.find(m => m.id.toLowerCase().includes(needle)));
-	}
-
-	for (const model of availableModels) {
-		addCandidate(model);
-	}
-
-	return candidates;
 }
 
 /**
