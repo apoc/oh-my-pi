@@ -1,7 +1,6 @@
 /**
  * Shared utilities for edit tool TUI rendering.
  */
-import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -10,9 +9,11 @@ import { renderDiff as renderDiffColored } from "../modes/components/diff";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import type { OutputMeta } from "../tools/output-meta";
 import {
+	countLines,
 	formatDiagnostics,
 	formatDiffStats,
 	formatExpandHint,
+	formatMetadataLine,
 	formatStatusIcon,
 	formatTitle,
 	getDiffStats,
@@ -21,29 +22,14 @@ import {
 	shortenPath,
 	truncateDiffByHunk,
 } from "../tools/render-utils";
+
+export { getLspBatchRequest } from "../tools/render-utils";
+
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, truncateToWidth } from "../tui";
 import type { HashlineToolEdit } from "./index";
 import type { DiffError, DiffResult, Operation } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// LSP Batching
-// ═══════════════════════════════════════════════════════════════════════════
-
-const LSP_BATCH_TOOLS = new Set(["edit", "write"]);
-
-export function getLspBatchRequest(toolCall: ToolCallContext | undefined): { id: string; flush: boolean } | undefined {
-	if (!toolCall) {
-		return undefined;
-	}
-	const hasOtherWrites = toolCall.toolCalls.some(
-		(call, index) => index !== toolCall.index && LSP_BATCH_TOOLS.has(call.name),
-	);
-	if (!hasOtherWrites) {
-		return undefined;
-	}
-	const hasLaterWrites = toolCall.toolCalls.slice(toolCall.index + 1).some(call => LSP_BATCH_TOOLS.has(call.name));
-	return { id: toolCall.batchId, flush: !hasLaterWrites };
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool Details Types
@@ -96,11 +82,6 @@ export interface EditRenderContext {
 }
 
 const EDIT_STREAMING_PREVIEW_LINES = 12;
-
-function countLines(text: string): number {
-	if (!text) return 0;
-	return text.split("\n").length;
-}
 
 function formatStreamingDiff(diff: string, rawPath: string, uiTheme: Theme, label = "streaming"): string {
 	if (!diff) return "";
@@ -172,13 +153,6 @@ function formatStreamingHashlineEdits(edits: Partial<HashlineToolEdit>[], uiThem
 		}
 		return { srcLabel: `\u2022 ${op} (file-level)`, dst: contentLines };
 	}
-}
-function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
-	const icon = uiTheme.getLangIcon(language);
-	if (lineCount !== null) {
-		return uiTheme.fg("dim", `${icon} ${lineCount} lines`);
-	}
-	return uiTheme.fg("dim", `${icon}`);
 }
 
 function renderDiffSection(

@@ -13,14 +13,14 @@ const CALLBACK_PATH = "/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 
-type JwtPayload = {
+export type JwtPayload = {
 	[JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: string;
 	};
 	[key: string]: unknown;
 };
 
-function decodeJwt(token: string): JwtPayload | null {
+export function decodeJwt(token: string): JwtPayload | null {
 	try {
 		const parts = token.split(".");
 		if (parts.length !== 3) return null;

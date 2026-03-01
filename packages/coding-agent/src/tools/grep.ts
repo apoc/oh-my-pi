@@ -17,7 +17,13 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { hasGlobPathChars, parseSearchPath, resolveToCwd } from "./path-utils";
-import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
+import {
+	formatCount,
+	formatEmptyMessage,
+	formatErrorMessage,
+	getCollapsedMatchLimit,
+	PREVIEW_LIMITS,
+} from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -503,19 +509,6 @@ export const grepToolRenderer = {
 				matchGroups.push(nonEmpty);
 			}
 		}
-
-		const getCollapsedMatchLimit = (groups: string[][], maxLines: number): number => {
-			if (groups.length === 0) return 0;
-			let usedLines = 0;
-			let count = 0;
-			for (const group of groups) {
-				if (count > 0 && usedLines + group.length > maxLines) break;
-				usedLines += group.length;
-				count += 1;
-				if (usedLines >= maxLines) break;
-			}
-			return count;
-		};
 
 		const truncationReasons: string[] = [];
 		if (limits?.matchLimit) truncationReasons.push(`limit ${limits.matchLimit.reached} matches`);

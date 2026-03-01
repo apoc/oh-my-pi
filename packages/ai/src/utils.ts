@@ -24,8 +24,20 @@ export function toBoolean(value: unknown): boolean | undefined {
 }
 
 export function normalizeToolCallId(id: string): string {
-	const sanitized = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-	return sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+	if (!id.includes("|")) return id;
+	const [callId, itemId] = id.split("|");
+	const sanitizedCallId = callId.replace(/[^a-zA-Z0-9_-]/g, "_");
+	let sanitizedItemId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_");
+	// OpenAI Responses API requires item id to start with "fc"
+	if (!sanitizedItemId.startsWith("fc")) {
+		sanitizedItemId = `fc_${sanitizedItemId}`;
+	}
+	// Truncate to 64 chars and strip trailing underscores (OpenAI Codex rejects them)
+	let normalizedCallId = sanitizedCallId.length > 64 ? sanitizedCallId.slice(0, 64) : sanitizedCallId;
+	let normalizedItemId = sanitizedItemId.length > 64 ? sanitizedItemId.slice(0, 64) : sanitizedItemId;
+	normalizedCallId = normalizedCallId.replace(/_+$/, "");
+	normalizedItemId = normalizedItemId.replace(/_+$/, "");
+	return `${normalizedCallId}|${normalizedItemId}`;
 }
 
 export function normalizeResponsesToolCallId(id: string): { callId: string; itemId: string } {

@@ -12,6 +12,7 @@ import { validateAnalysis } from "../../../commit/analysis/validation";
 import type { ControlledGit } from "../../../commit/git";
 import type { CommitType, ConventionalAnalysis, ConventionalDetail } from "../../../commit/types";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
+import { normalizeDetails } from "../utils";
 import { commitTypeSchema, detailSchema } from "./schemas.js";
 
 const proposeCommitSchema = Type.Object({
@@ -33,20 +34,6 @@ interface ProposalResponse {
 		details: ConventionalDetail[];
 		issue_refs: string[];
 	};
-}
-
-function normalizeDetails(
-	details: Array<{
-		text: string;
-		changelog_category?: ConventionalDetail["changelogCategory"];
-		user_visible?: boolean;
-	}>,
-): ConventionalDetail[] {
-	return details.map(detail => ({
-		text: detail.text.trim(),
-		changelogCategory: detail.user_visible ? detail.changelog_category : undefined,
-		userVisible: detail.user_visible ?? false,
-	}));
 }
 
 export function createProposeCommitTool(

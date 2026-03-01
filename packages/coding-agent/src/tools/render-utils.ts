@@ -5,6 +5,7 @@
  * tool renderers to ensure a unified TUI experience.
  */
 import * as os from "node:os";
+import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { type Ellipsis, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { getIndentation, pluralize } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../modes/theme/theme";
@@ -49,6 +50,18 @@ export const TRUNCATE_LENGTHS = {
 	/** Very short (task previews, badges) */
 	SHORT: 40,
 } as const;
+
+/** Maximum characters per line in execution output displays. */
+export const MAX_DISPLAY_LINE_CHARS = 4000;
+
+/** Clamp a single display line to MAX_DISPLAY_LINE_CHARS. */
+export function clampDisplayLine(line: string): string {
+	if (line.length <= MAX_DISPLAY_LINE_CHARS) {
+		return line;
+	}
+	const omitted = line.length - MAX_DISPLAY_LINE_CHARS;
+	return `${line.slice(0, MAX_DISPLAY_LINE_CHARS)}… [${omitted} chars omitted]`;
+}
 
 /** Standard expand hint text */
 export const EXPAND_HINT = "(Ctrl+O for more)";
@@ -529,4 +542,50 @@ export function shortenPath(filePath: string, homeDir?: string): string {
 
 export function wrapBrackets(text: string, theme: Theme): string {
 	return `${theme.format.bracketLeft}${text}${theme.format.bracketRight}`;
+}
+
+// =============================================================================
+// LSP Batching
+// =============================================================================
+
+export const LSP_BATCH_TOOLS = new Set(["edit", "write"]);
+
+export function getLspBatchRequest(toolCall: ToolCallContext | undefined): { id: string; flush: boolean } | undefined {
+	if (!toolCall) {
+		return undefined;
+	}
+	const hasOtherWrites = toolCall.toolCalls.some(
+		(call, index) => index !== toolCall.index && LSP_BATCH_TOOLS.has(call.name),
+	);
+	if (!hasOtherWrites) {
+		return undefined;
+	}
+	const hasLaterWrites = toolCall.toolCalls.slice(toolCall.index + 1).some(call => LSP_BATCH_TOOLS.has(call.name));
+	return { id: toolCall.batchId, flush: !hasLaterWrites };
+}
+
+export function countLines(text: string): number {
+	if (!text) return 0;
+	return text.split("\n").length;
+}
+
+export function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
+	const icon = uiTheme.getLangIcon(language);
+	if (lineCount !== null) {
+		return uiTheme.fg("dim", `${icon} ${lineCount} lines`);
+	}
+	return uiTheme.fg("dim", `${icon}`);
+}
+
+export function getCollapsedMatchLimit(groups: string[][], maxLines: number): number {
+	if (groups.length === 0) return 0;
+	let usedLines = 0;
+	let count = 0;
+	for (const group of groups) {
+		if (count > 0 && usedLines + group.length > maxLines) break;
+		usedLines += group.length;
+		count += 1;
+		if (usedLines >= maxLines) break;
+	}
+	return count;
 }

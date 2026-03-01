@@ -1,10 +1,4 @@
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolCallContext,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { untilAborted } from "@oh-my-pi/pi-utils";
@@ -20,11 +14,14 @@ import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import {
+	countLines,
 	formatDiagnostics,
 	formatExpandHint,
+	formatMetadataLine,
 	formatMoreItems,
 	formatStatusIcon,
 	formatTitle,
+	getLspBatchRequest,
 	replaceTabs,
 	shortenPath,
 } from "./render-utils";
@@ -40,22 +37,6 @@ export type WriteToolInput = Static<typeof writeSchema>;
 export interface WriteToolDetails {
 	diagnostics?: FileDiagnosticsResult;
 	meta?: OutputMeta;
-}
-
-const LSP_BATCH_TOOLS = new Set(["edit", "write"]);
-
-function getLspBatchRequest(toolCall: ToolCallContext | undefined): { id: string; flush: boolean } | undefined {
-	if (!toolCall) {
-		return undefined;
-	}
-	const hasOtherWrites = toolCall.toolCalls.some(
-		(call, index) => index !== toolCall.index && LSP_BATCH_TOOLS.has(call.name),
-	);
-	if (!hasOtherWrites) {
-		return undefined;
-	}
-	const hasLaterWrites = toolCall.toolCalls.slice(toolCall.index + 1).some(call => LSP_BATCH_TOOLS.has(call.name));
-	return { id: toolCall.batchId, flush: !hasLaterWrites };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -138,19 +119,6 @@ interface WriteRenderArgs {
 
 const WRITE_PREVIEW_LINES = 6;
 const WRITE_STREAMING_PREVIEW_LINES = 12;
-
-function countLines(text: string): number {
-	if (!text) return 0;
-	return text.split("\n").length;
-}
-
-function formatMetadataLine(lineCount: number | null, language: string | undefined, uiTheme: Theme): string {
-	const icon = uiTheme.getLangIcon(language);
-	if (lineCount !== null) {
-		return uiTheme.fg("dim", `${icon} ${lineCount} lines`);
-	}
-	return uiTheme.fg("dim", `${icon}`);
-}
 
 function formatStreamingContent(content: string, uiTheme: Theme): string {
 	if (!content) return "";

@@ -17,7 +17,7 @@ import { ensureTool } from "../utils/tools-manager";
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
-import { convertWithMarkitdown, fetchBinary } from "../web/scrapers/utils";
+import { convertWithMarkitdown, fetchBinary, looksLikeHtml } from "../web/scrapers/utils";
 import type { ToolSession } from ".";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
@@ -143,19 +143,6 @@ function isConvertible(mime: string, extensionHint: string): boolean {
 	if (mime === "application/octet-stream" && CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	if (CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	return false;
-}
-
-/**
- * Check if content looks like HTML
- */
-function looksLikeHtml(content: string): boolean {
-	const trimmed = content.trim().toLowerCase();
-	return (
-		trimmed.startsWith("<!doctype") ||
-		trimmed.startsWith("<html") ||
-		trimmed.startsWith("<head") ||
-		trimmed.startsWith("<body")
-	);
 }
 
 /**

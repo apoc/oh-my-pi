@@ -1,13 +1,9 @@
-import { isRecord, ptree, TempDir } from "@oh-my-pi/pi-utils";
-export { isRecord };
+import { asRecord, isRecord, ptree, TempDir } from "@oh-my-pi/pi-utils";
+export { asRecord, isRecord };
 
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ensureTool } from "../../utils/tools-manager";
 import { MAX_BYTES } from "./types";
-
-export function asRecord(value: unknown): Record<string, unknown> | null {
-	return isRecord(value) ? value : null;
-}
 
 export function asString(value: unknown): string | null {
 	if (typeof value !== "string") return null;
@@ -17,6 +13,17 @@ export function asString(value: unknown): string | null {
 
 export function asNumber(value: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Check if content looks like HTML */
+export function looksLikeHtml(content: string): boolean {
+	const trimmed = content.trim().toLowerCase();
+	return (
+		trimmed.startsWith("<!doctype") ||
+		trimmed.startsWith("<html") ||
+		trimmed.startsWith("<head") ||
+		trimmed.startsWith("<body")
+	);
 }
 
 export interface BinaryFetchSuccess {

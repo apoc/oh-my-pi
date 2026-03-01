@@ -7,11 +7,11 @@ import { sanitizeText } from "@oh-my-pi/pi-natives";
 import { Container, Loader, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getSymbolTheme, highlightCode, theme } from "../../modes/theme/theme";
 import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
+import { clampDisplayLine } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
 const PREVIEW_LINES = 20;
-const MAX_DISPLAY_LINE_CHARS = 4000;
 
 export class PythonExecutionComponent extends Container {
 	#outputLines: string[] = [];
@@ -74,9 +74,9 @@ export class PythonExecutionComponent extends Container {
 	appendOutput(chunk: string): void {
 		const clean = sanitizeText(chunk);
 
-		const newLines = clean.split("\n").map(line => this.#clampDisplayLine(line));
+		const newLines = clean.split("\n").map(line => clampDisplayLine(line));
 		if (this.#outputLines.length > 0 && newLines.length > 0) {
-			this.#outputLines[this.#outputLines.length - 1] = this.#clampDisplayLine(
+			this.#outputLines[this.#outputLines.length - 1] = clampDisplayLine(
 				`${this.#outputLines[this.#outputLines.length - 1]}${newLines[0]}`,
 			);
 			this.#outputLines.push(...newLines.slice(1));
@@ -159,17 +159,9 @@ export class PythonExecutionComponent extends Container {
 		}
 	}
 
-	#clampDisplayLine(line: string): string {
-		if (line.length <= MAX_DISPLAY_LINE_CHARS) {
-			return line;
-		}
-		const omitted = line.length - MAX_DISPLAY_LINE_CHARS;
-		return `${line.slice(0, MAX_DISPLAY_LINE_CHARS)}… [${omitted} chars omitted]`;
-	}
-
 	#setOutput(output: string): void {
 		const clean = sanitizeText(output);
-		this.#outputLines = clean ? clean.split("\n").map(line => this.#clampDisplayLine(line)) : [];
+		this.#outputLines = clean ? clean.split("\n").map(line => clampDisplayLine(line)) : [];
 	}
 
 	getOutput(): string {

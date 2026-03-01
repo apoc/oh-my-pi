@@ -13,12 +13,13 @@
  * 8. No trailing newline at EOF
  * 9. Bold RFC 2119 keywords (MUST, SHOULD, MAY, etc.) in prompt content
  */
+import * as path from "node:path";
 import { Glob } from "bun";
 import { formatPromptContent } from "../src/utils/prompt-format";
 
-const PROMPTS_DIR = new URL("../src/prompts/", import.meta.url).pathname;
-const COMMIT_PROMPTS_DIR = new URL("../src/commit/prompts/", import.meta.url).pathname;
-const AGENTIC_PROMPTS_DIR = new URL("../src/commit/agentic/prompts/", import.meta.url).pathname;
+const PROMPTS_DIR = path.resolve(import.meta.dir, "../src/prompts");
+const COMMIT_PROMPTS_DIR = path.resolve(import.meta.dir, "../src/commit/prompts");
+const AGENTIC_PROMPTS_DIR = path.resolve(import.meta.dir, "../src/commit/agentic/prompts");
 
 const PROMPT_DIRS = [PROMPTS_DIR, COMMIT_PROMPTS_DIR, AGENTIC_PROMPTS_DIR];
 
@@ -35,8 +36,8 @@ async function main() {
 	const check = process.argv.includes("--check");
 
 	for (const dir of PROMPT_DIRS) {
-		for await (const path of glob.scan(dir)) {
-			files.push(`${dir}${path}`);
+		for await (const file of glob.scan(dir)) {
+			files.push(`${dir}/${file}`);
 		}
 	}
 
