@@ -172,6 +172,7 @@ export interface AgentState {
 	systemPrompt: string;
 	model: Model;
 	thinkingLevel?: Effort;
+	contextBudget?: number;
 	tools: AgentTool<any>[];
 	messages: AgentMessage[]; // Can include attachments + custom message types
 	isStreaming: boolean;

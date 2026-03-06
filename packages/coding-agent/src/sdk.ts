@@ -6,7 +6,13 @@ import {
 	INTENT_FIELD,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type { Message, Model } from "@oh-my-pi/pi-ai";
+import {
+	clampContextBudget,
+	type Message,
+	type Model,
+	resetOverageCache,
+	updateOverageDisabledReason,
+} from "@oh-my-pi/pi-ai";
 
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -1350,11 +1356,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
 	const serviceTierSetting = settings.get("serviceTier");
 
+	// Determine initial context budget from session restore or settings.
+	let _contextBudget: number | undefined;
+	if (model) {
+		if (hasExistingSession && existingSession.contextBudget != null) {
+			// Restore from session log (/resume).
+			_contextBudget = clampContextBudget(existingSession.contextBudget, model);
+		} else {
+			// Check settings for saved budget.
+			const savedBudget = settings.getContextBudget(`${model.provider}/${model.id}`);
+			if (savedBudget != null) {
+				_contextBudget = clampContextBudget(savedBudget, model);
+			}
+		}
+	}
+	// Register response-header callback so entitlement check fires on first streaming response.
+	// Reset entitlement cache so the first streaming response re-checks the header.
+	resetOverageCache();
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt,
 			model,
 			thinkingLevel: toReasoningEffort(thinkingLevel),
+			contextBudget: _contextBudget,
 			tools: initialTools,
 		},
 		convertToLlm: convertToLlmFinal,
@@ -1400,6 +1425,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return result;
 		},
 		intentTracing: !!intentField,
+		onResponseHeaders: h => updateOverageDisabledReason(h),
 		getToolChoice: () => {
 			if (pendingActionStore.hasPending) {
 				return { type: "function", name: "resolve" };

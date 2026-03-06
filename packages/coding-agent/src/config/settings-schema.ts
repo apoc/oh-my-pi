@@ -314,6 +314,7 @@ export const SETTINGS_SCHEMA = {
 	disabledProviders: { type: "array", default: [] as string[] },
 	disabledExtensions: { type: "array", default: [] as string[] },
 	modelRoles: { type: "record", default: {} as Record<string, string> },
+	contextBudgets: { type: "record", default: {} as Record<string, number> },
 	"contextPromotion.enabled": {
 		type: "boolean",
 		default: true,
@@ -1448,6 +1449,7 @@ export interface GroupTypeMap {
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
 	modelRoles: Record<string, string>;
+	contextBudgets: Record<string, number>;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

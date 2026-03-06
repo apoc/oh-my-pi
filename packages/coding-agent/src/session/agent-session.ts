@@ -42,6 +42,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	calculateRateLimitBackoffMs,
+	clampContextBudget,
 	getSupportedEfforts,
 	isContextOverflow,
 	modelsAreEqual,
@@ -403,6 +404,7 @@ export class AgentSession {
 	#pendingRewindReport: string | undefined = undefined;
 	#promptGeneration = 0;
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	#contextBudget = 0;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -444,6 +446,8 @@ export class AgentSession {
 			});
 		});
 		this.#syncTodoPhasesFromBranch();
+		// Initialize context budget from agent state (set during SDK init).
+		this.#contextBudget = this.agent.state.contextBudget ?? this.agent.state.model?.contextWindow ?? 0;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
@@ -1533,6 +1537,26 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
+	}
+
+	/** Current context budget (defaults to model.contextWindow) */
+	get contextBudget(): number {
+		return this.#contextBudget ?? this.model?.contextWindow ?? 0;
+	}
+
+	/** Set context budget, clamped to [model.contextWindow, model.maxContextWindow]. Persists to settings and session log. */
+	setContextBudget(budget: number): void {
+		const model = this.model;
+		if (!model) return;
+		this.#contextBudget = clampContextBudget(budget, model);
+		const modelKey = `${model.provider}/${model.id}`;
+		if (this.#contextBudget === model.contextWindow) {
+			this.settings.clearContextBudget(modelKey);
+		} else {
+			this.settings.setContextBudget(modelKey, this.#contextBudget);
+		}
+		this.sessionManager.appendContextBudgetChange(this.#contextBudget);
+		this.agent.setContextBudget(this.#contextBudget);
 	}
 
 	#applySessionModelOverrides(model: Model): Model {
@@ -2655,6 +2679,10 @@ export class AgentSession {
 		}
 
 		this.#setModelWithProviderSessionReset(model);
+		// Reset context budget for new model (restore from settings if saved).
+		const savedBudget = this.settings.getContextBudget(`${model.provider}/${model.id}`);
+		this.#contextBudget = savedBudget != null ? clampContextBudget(savedBudget, model) : model.contextWindow;
+		this.agent.setContextBudget(this.#contextBudget);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
 		this.settings.setModelRole(role, this.#formatRoleModelValue(role, model));
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
@@ -2675,6 +2703,9 @@ export class AgentSession {
 		}
 
 		this.#setModelWithProviderSessionReset(model);
+		// Reset context budget for temporary model (no settings persistence).
+		this.#contextBudget = model.contextWindow;
+		this.agent.setContextBudget(this.#contextBudget);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
@@ -2799,6 +2830,11 @@ export class AgentSession {
 
 		// Apply model
 		this.#setModelWithProviderSessionReset(next.model);
+		// Reset context budget for new model (restore from settings if saved).
+		const savedBudgetScoped = this.settings.getContextBudget(`${next.model.provider}/${next.model.id}`);
+		this.#contextBudget =
+			savedBudgetScoped != null ? clampContextBudget(savedBudgetScoped, next.model) : next.model.contextWindow;
+		this.agent.setContextBudget(this.#contextBudget);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.settings.setModelRole("default", this.#formatRoleModelValue("default", next.model));
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
@@ -2827,6 +2863,11 @@ export class AgentSession {
 		}
 
 		this.#setModelWithProviderSessionReset(nextModel);
+		// Reset context budget for new model (restore from settings if saved).
+		const savedBudgetAvail = this.settings.getContextBudget(`${nextModel.provider}/${nextModel.id}`);
+		this.#contextBudget =
+			savedBudgetAvail != null ? clampContextBudget(savedBudgetAvail, nextModel) : nextModel.contextWindow;
+		this.agent.setContextBudget(this.#contextBudget);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.settings.setModelRole("default", this.#formatRoleModelValue("default", nextModel));
 		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
@@ -3350,7 +3391,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	async #checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<void> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return;
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this.contextBudget;
 		const generation = this.#promptGeneration;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -3589,9 +3630,11 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		if (!currentModel) return false;
 		if (assistantMessage.provider !== currentModel.provider || assistantMessage.model !== currentModel.id)
 			return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
-		const targetModel = await this.#resolveContextPromotionTarget(currentModel, contextWindow);
+		// Use contextBudget: if the user has extended context active (e.g. 1M),
+		// promotion should only trigger for models with even larger windows.
+		const effectiveWindow = this.contextBudget;
+		if (effectiveWindow <= 0) return false;
+		const targetModel = await this.#resolveContextPromotionTarget(currentModel, effectiveWindow);
 		if (!targetModel) return false;
 
 		try {
@@ -4110,9 +4153,9 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	#isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		// Context overflow is handled by compaction, not retry
-		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
+		// Context overflow is handled by compaction, not retry.
+		// Use contextBudget so extended context (e.g. 1M) is respected.
+		if (isContextOverflow(message, this.contextBudget)) return false;
 
 		const err = message.errorMessage;
 		return this.#isRetryableErrorMessage(err);
@@ -4625,6 +4668,20 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			}
 		}
 
+		// Restore context budget: use session log entry if present, otherwise fall back to
+		// per-model saved preference or the model baseline. Must always write — the previous
+		// session's budget must not leak into this session.
+		if (this.model) {
+			if (sessionContext.contextBudget != null) {
+				this.#contextBudget = clampContextBudget(sessionContext.contextBudget, this.model);
+			} else {
+				const modelKey = `${this.model.provider}/${this.model.id}`;
+				const savedBudget = this.settings.getContextBudget(modelKey);
+				this.#contextBudget =
+					savedBudget != null ? clampContextBudget(savedBudget, this.model) : this.model.contextWindow;
+			}
+			this.agent.setContextBudget(this.#contextBudget);
+		}
 		const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 		const hasServiceTierEntry = this.sessionManager.getBranch().some(entry => entry.type === "service_tier_change");
 		const defaultThinkingLevel = this.settings.get("defaultThinkingLevel");
@@ -4992,7 +5049,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		const model = this.model;
 		if (!model) return undefined;
 
-		const contextWindow = model.contextWindow ?? 0;
+		const contextWindow = this.contextBudget;
 		if (contextWindow <= 0) return undefined;
 
 		// After compaction, the last assistant usage reflects pre-compaction context size.

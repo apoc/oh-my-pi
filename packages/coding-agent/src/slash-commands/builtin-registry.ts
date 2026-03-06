@@ -1,4 +1,4 @@
-import { getOAuthProviders } from "@oh-my-pi/pi-ai";
+import { getOAuthProviders, hasExtendedContextAccess, supportsExtendedContext } from "@oh-my-pi/pi-ai";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import type { InteractiveModeContext } from "../modes/types";
@@ -439,6 +439,86 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
+		name: "context",
+		description: "Set context window budget",
+		inlineHint: "[reset|max|<number>k|<number>m]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const session = runtime.ctx.session;
+			const model = session.model;
+			if (!model) {
+				runtime.ctx.showWarning("No model selected");
+				return;
+			}
+
+			const baseline = model.contextWindow;
+			const max = model.maxContextWindow ?? baseline;
+			const current = session.contextBudget;
+			const arg = command.args.trim().toLowerCase();
+
+			// No args: show current state
+			if (!arg) {
+				const lines: string[] = [];
+				lines.push(`Context: ${formatTokens(current)} / ${formatTokens(max)} max (${model.name ?? model.id})`);
+				lines.push(`Baseline: ${formatTokens(baseline)} (normal pricing)`);
+				if (max > baseline) {
+					lines.push(`Extended: >${formatTokens(baseline)} (long-context pricing)`);
+					const extended = current > baseline;
+					lines.push(`Status: ${extended ? "Extended context active" : "Standard context"}`);
+				} else {
+					lines.push("This model does not support extended context");
+				}
+				runtime.ctx.showStatus(lines.join("\n"));
+				return;
+			}
+
+			// Parse target budget
+			let target: number;
+			if (arg === "reset") {
+				target = baseline;
+			} else if (arg === "max") {
+				target = max;
+			} else {
+				const parsed = parseContextSize(arg);
+				if (parsed == null) {
+					runtime.ctx.showWarning(
+						`Invalid context size: "${command.args.trim()}". Use a number like 500k, 1m, or 350000.`,
+					);
+					return;
+				}
+				target = parsed;
+			}
+
+			// Validate range
+			if (target > max) {
+				runtime.ctx.showWarning(`Maximum context for ${model.name ?? model.id} is ${formatTokens(max)}`);
+				return;
+			}
+			if (target < baseline) {
+				runtime.ctx.showWarning(`Minimum context is ${formatTokens(baseline)} (model baseline)`);
+				return;
+			}
+
+			// Entitlement check for extended context
+			if (target > baseline && supportsExtendedContext(model)) {
+				const isOAuth = runtime.ctx.session.modelRegistry.isUsingOAuth(model);
+				if (!hasExtendedContextAccess(isOAuth)) {
+					runtime.ctx.showWarning(
+						"Extended context not available for your account. API key users or Max/Team plan required.",
+					);
+					return;
+				}
+			}
+
+			session.setContextBudget(target);
+			const label = target === baseline ? "reset to baseline" : formatTokens(target);
+			runtime.ctx.showStatus(`Context budget set to ${label}`);
+			runtime.ctx.updateEditorTopBorder();
+			runtime.ctx.ui.requestRender();
+		},
+	},
+	{
 		name: "handoff",
 		description: "Hand off session context to a new session",
 		inlineHint: "[focus instructions]",
@@ -553,4 +633,26 @@ export async function executeBuiltinSlashCommand(text: string, runtime: BuiltinS
 
 	await command.handle(parsed, runtime);
 	return true;
+}
+
+/** Parse a context size string like '500k', '1m', '350000' to a number. @internal Exported for testing */
+export function parseContextSize(input: string): number | null {
+	const match = input.match(/^(\d+(?:\.\d+)?)(k|m)?$/);
+	if (!match) return null;
+	const num = Number.parseFloat(match[1]);
+	if (Number.isNaN(num) || num <= 0) return null;
+	const suffix = match[2];
+	if (suffix === "m") return Math.round(num * 1_000_000);
+	if (suffix === "k") return Math.round(num * 1_000);
+	return Math.round(num);
+}
+
+/** Format a token count for display (e.g. 200000 -> '200K', 1000000 -> '1M'). @internal Exported for testing */
+export function formatTokens(tokens: number): string {
+	if (tokens >= 1_000_000) {
+		const m = tokens / 1_000_000;
+		return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1).replace(/\.0$/, "")}M`;
+	}
+	if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+	return String(tokens);
 }

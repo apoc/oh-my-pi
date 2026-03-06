@@ -775,9 +775,16 @@ export class CommandController {
 				customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
 					? customInstructionsOrOptions
 					: undefined;
-			await this.ctx.session.compact(instructions, options);
+			const result = await this.ctx.session.compact(instructions, options);
 
 			this.ctx.rebuildChatFromMessages();
+			this.ctx.addMessageToChat({
+				role: "compactionSummary",
+				tokensBefore: result.tokensBefore,
+				summary: result.summary,
+				shortSummary: result.shortSummary,
+				timestamp: Date.now(),
+			});
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();

@@ -159,6 +159,12 @@ export interface AgentOptions {
 	 * Cursor tool result callback for exec tool responses.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+
+	/**
+	 * Optional hook to observe HTTP response headers from the LLM provider.
+	 * Fired once per streaming request after the first successful response.
+	 */
+	onResponseHeaders?: (headers: Record<string, string>) => void;
 }
 
 export interface AgentPromptOptions {
@@ -207,6 +213,7 @@ export class Agent {
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
 	#cursorOnToolResult?: CursorToolResultHandler;
+	#onResponseHeaders?: (headers: Record<string, string>) => void;
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
@@ -244,6 +251,7 @@ export class Agent {
 		this.#getToolContext = opts.getToolContext;
 		this.#cursorExecHandlers = opts.cursorExecHandlers;
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
+		this.#onResponseHeaders = opts.onResponseHeaders;
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
@@ -418,6 +426,10 @@ export class Agent {
 
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
+	}
+
+	setContextBudget(n: number | undefined) {
+		this.#state.contextBudget = n;
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
@@ -726,6 +738,8 @@ export class Agent {
 			transformToolCallArguments: this.#transformToolCallArguments,
 			intentTracing: this.#intentTracing,
 			getToolChoice: this.#getToolChoice,
+			onResponseHeaders: this.#onResponseHeaders,
+			contextBudget: this.#state.contextBudget,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;

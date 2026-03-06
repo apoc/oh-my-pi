@@ -288,9 +288,17 @@ function applyAnthropicCatalogPolicy(model: ApiModel<Api>, parsedModel: Anthropi
 		model.cost.cacheWrite = 6.25;
 	}
 
-	// Opus 4.6 / Sonnet 4.6: 1M context is beta; clamp to 200K.
+	// Opus 4.6 / Sonnet 4.6: baseline context is 200K across all providers.
+	// 1M extended context is available only on providers that support the activation
+	// mechanism (Anthropic beta header, Bedrock additionalModelRequestFields).
 	if (semverEqual(parsedModel.version, "4.6")) {
-		model.contextWindow = 200000;
+		model.contextWindow = 200_000;
+		const supportsExtended = model.provider === "anthropic" || model.provider === "amazon-bedrock";
+		if (supportsExtended) {
+			model.maxContextWindow = 1_000_000;
+		} else {
+			delete model.maxContextWindow;
+		}
 	}
 
 	// OpenCode variants: Claude Sonnet 4/4.5 listed with 1M context, actual limit is 200K.

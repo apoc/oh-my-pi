@@ -42,6 +42,7 @@ import type {
 } from "../types";
 import { normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { CONTEXT_1M_BETA, needsExtendedContext } from "../utils/extended-context";
 import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump, withHttpStatus } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import { transformMessages } from "./transform-messages";
@@ -595,18 +596,23 @@ function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
 ): Record<string, any> | undefined {
+	// Whether the 1M context beta is required for this request.
+	const needsContextBeta = options.contextBudget != null && needsExtendedContext(model, options.contextBudget);
+
 	const reasoning = options.reasoning;
 	if (!reasoning || !model.reasoning) {
-		return undefined;
+		return needsContextBeta ? { anthropic_beta: [CONTEXT_1M_BETA] } : undefined;
 	}
 
 	const mode = model.thinking?.mode;
 	if (mode === "anthropic-adaptive") {
 		const effort = mapEffortToAnthropicAdaptiveEffort(model, reasoning);
-		return {
+		const result: Record<string, any> = {
 			thinking: { type: "adaptive" },
 			output_config: { effort },
 		};
+		if (needsContextBeta) result.anthropic_beta = [CONTEXT_1M_BETA];
+		return result;
 	}
 
 	const level = requireSupportedEffort(model, reasoning);
@@ -619,17 +625,18 @@ function buildAdditionalModelRequestFields(
 	};
 	const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
 
-	const result: Record<string, any> = {
-		thinking: {
-			type: "enabled",
-			budget_tokens: budget,
-		},
-	};
-
+	const betas: string[] = [];
 	if (options.interleavedThinking) {
-		result.anthropic_beta = ["interleaved-thinking-2025-05-14"];
+		betas.push("interleaved-thinking-2025-05-14");
+	}
+	if (needsContextBeta) {
+		betas.push(CONTEXT_1M_BETA);
 	}
 
+	const result: Record<string, any> = {
+		thinking: { type: "enabled", budget_tokens: budget },
+	};
+	if (betas.length > 0) result.anthropic_beta = betas;
 	return result;
 }
 

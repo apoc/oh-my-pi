@@ -32,6 +32,7 @@ import type {
 } from "../types";
 import { isAnthropicOAuthToken, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { CONTEXT_1M_BETA, needsExtendedContext } from "../utils/extended-context";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import {
@@ -597,7 +598,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			const { client, isOAuthToken } = createClient(model, {
 				model,
 				apiKey,
-				extraBetas: normalizeExtraBetas(options?.betas),
+				extraBetas: injectContextBetas(normalizeExtraBetas(options?.betas), model, options?.contextBudget),
 				stream: true,
 				interleavedThinking: options?.interleavedThinking ?? true,
 				headers: options?.headers,
@@ -628,6 +629,26 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			// Truncated JSON: also after content starts (partial response is unusable).
 			let providerRetryAttempt = 0;
 			let started = false;
+			// headersFired is hoisted outside the do-while so a single fire survives across retries.
+			// fireHeaders is called either from message_start (success) or catch (API error before any SSE event).
+			let headersFired = false;
+			const fireHeaders = (stream: {
+				response?: { headers: { forEach(cb: (value: string, key: string) => void): void } } | null;
+			}) => {
+				if (headersFired || !options?.onResponseHeaders) return;
+				try {
+					const resp = stream.response;
+					if (!resp?.headers) return; // No HTTP response yet — don't consume the flag so retries can fire.
+					headersFired = true;
+					const h: Record<string, string> = {};
+					resp.headers.forEach((v, k) => {
+						h[k] = v;
+					});
+					options.onResponseHeaders(h);
+				} catch {
+					// Ignore — never block streaming or error handling
+				}
+			};
 			do {
 				const anthropicStream = client.messages.stream({ ...params, stream: true }, { signal: options?.signal });
 				if (copilotDynamicHeaders && output.usage.premiumRequests === undefined) {
@@ -648,6 +669,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							output.usage.totalTokens =
 								output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 							calculateCost(model, output.usage);
+							fireHeaders(anthropicStream);
 						} else if (event.type === "content_block_start") {
 							if (!firstTokenTime) firstTokenTime = Date.now();
 							if (event.content_block.type === "text") {
@@ -806,6 +828,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					}
 					break; // Stream completed successfully
 				} catch (streamError) {
+					// Fire onResponseHeaders on the error path: when the API rejects the request before
+					// sending any SSE events, the SDK throws here and message_start never fires.
+					fireHeaders(anthropicStream);
 					// Transient stream parse errors (truncated JSON) are retryable even after content
 					// has started streaming, since the partial response is unusable anyway.
 					// Rate-limit/overload errors are only retried before content starts.
@@ -906,6 +931,17 @@ export function normalizeExtraBetas(betas?: string[] | string): string[] {
 	if (!betas) return [];
 	const raw = Array.isArray(betas) ? betas : betas.split(",");
 	return raw.map(beta => beta.trim()).filter(beta => beta.length > 0);
+}
+
+/**
+ * Conditionally inject the context-1m beta header when the model uses an extended context window.
+ * The beta is required by the Anthropic API to unlock 1M token contexts.
+ */
+function injectContextBetas(betas: string[], model: Model, contextBudget?: number): string[] {
+	if (contextBudget != null && needsExtendedContext(model, contextBudget) && !betas.includes(CONTEXT_1M_BETA)) {
+		return [...betas, CONTEXT_1M_BETA];
+	}
+	return betas;
 }
 
 export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): AnthropicClientOptionsResult {

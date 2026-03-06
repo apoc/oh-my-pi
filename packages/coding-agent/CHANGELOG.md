@@ -24,6 +24,8 @@
 - Added fast mode indicator (⚡) to model segment in status line when priority service tier is active
 - Added context usage threshold levels (normal, warning, purple, error) with token-aware thresholds for better context awareness
 - Added `isFastModeEnabled()`, `setFastMode()`, and `toggleFastMode()` methods to AgentSession for fast mode control
+- Added `/context` command for inspecting and adjusting the active token budget (syntax: `reset | max | Nk | Nm | <tokens>`); extended context (up to 1M tokens) is supported on Anthropic direct API and Amazon Bedrock
+- Context budget persists per model across sessions and survives `/resume`
 
 ### Changed
 
@@ -41,6 +43,7 @@
 - Changed session context to include `serviceTier` field for tracking active service tier across session branches
 - Changed `compact()` function to accept `remoteInstructions` option for custom remote compaction prompts
 - Changed model registry to apply hardcoded policies (gpt-5.4 context window) consistently across all model loading paths
+- Model switch resets context budget to the new model's baseline, restoring persisted preference if available
 
 ### Fixed
 

@@ -418,6 +418,8 @@ function mapOptionsForApi<TApi extends Api>(
 		providerSessionState: options?.providerSessionState,
 		onPayload: options?.onPayload,
 		execHandlers: options?.execHandlers,
+		onResponseHeaders: options?.onResponseHeaders,
+		contextBudget: options?.contextBudget,
 	};
 
 	switch (model.api) {

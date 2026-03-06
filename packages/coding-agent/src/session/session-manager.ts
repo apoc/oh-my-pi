@@ -159,6 +159,12 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+/** Context budget change entry - tracks /context command changes for session restore. */
+export interface ContextBudgetChangeEntry extends SessionEntryBase {
+	type: "context_budget_change";
+	budget: number;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -194,7 +200,8 @@ export type SessionEntry =
 	| LabelEntry
 	| TtsrInjectionEntry
 	| SessionInitEntry
-	| ModeChangeEntry;
+	| ModeChangeEntry
+	| ContextBudgetChangeEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -209,7 +216,7 @@ export interface SessionTreeNode {
 
 export interface SessionContext {
 	messages: AgentMessage[];
-	thinkingLevel?: string;
+	thinkingLevel: string;
 	serviceTier?: ServiceTier;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
@@ -219,6 +226,8 @@ export interface SessionContext {
 	mode: string;
 	/** Mode-specific data from the last mode_change entry */
 	modeData?: Record<string, unknown>;
+	/** Context budget from last context_budget_change entry */
+	contextBudget?: number;
 }
 
 export interface SessionInfo {
@@ -475,6 +484,7 @@ export function buildSessionContext(
 	const injectedTtsrRulesSet = new Set<string>();
 	let mode = "none";
 	let modeData: Record<string, unknown> | undefined;
+	let contextBudget: number | undefined;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
@@ -485,6 +495,10 @@ export function buildSessionContext(
 				const role = entry.role ?? "default";
 				models[role] = entry.model;
 			}
+			// Context budget is model-specific. Reset so a stale budget from a previous
+			// model doesn't bleed into the resumed session. If the user set a budget for
+			// this model it will appear as a context_budget_change entry after this one.
+			contextBudget = undefined;
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = entry.serviceTier ?? undefined;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -500,6 +514,8 @@ export function buildSessionContext(
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
+		} else if (entry.type === "context_budget_change") {
+			contextBudget = entry.budget;
 		}
 	}
 
@@ -583,7 +599,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, serviceTier, models, injectedTtsrRules, mode, modeData };
+	return { messages, thinkingLevel, serviceTier, models, injectedTtsrRules, mode, modeData, contextBudget };
 }
 
 /**
@@ -1862,6 +1878,21 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			mode,
 			data,
+		};
+		this.#appendEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Append a context budget change entry.
+	 */
+	appendContextBudgetChange(budget: number): string {
+		const entry: ContextBudgetChangeEntry = {
+			type: "context_budget_change",
+			id: generateId(this.#byId),
+			parentId: this.#leafId,
+			timestamp: new Date().toISOString(),
+			budget,
 		};
 		this.#appendEntry(entry);
 		return entry.id;

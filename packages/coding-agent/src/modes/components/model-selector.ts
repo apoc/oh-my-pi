@@ -107,9 +107,6 @@ export class ModelSelectorComponent extends Container {
 		this.#temporaryOnly = options?.temporaryOnly ?? false;
 		const initialSearchInput = options?.initialSearchInput;
 
-		// Load current role assignments from settings
-		this.#loadRoleModels();
-
 		// Add top border
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -158,8 +155,16 @@ export class ModelSelectorComponent extends Container {
 
 		// Load models and do initial render
 		this.#loadModels().then(() => {
+			// Resolve role assignments against the full list (including [1m] variants).
+			this.#loadRoleModels();
+			// Re-sort now that role assignments are known (sort inside #loadModels ran
+			// before #roles was populated, so role-pinned models were not ranked yet).
+			this.#sortModels(this.#allModels);
+			this.#filteredModels = [...this.#allModels];
 			this.#buildProviderTabs();
 			this.#updateTabBar();
+			// Pre-select the current default model.
+			this.#selectCurrentModel();
 			// Always apply the current search query — the user may have typed
 			// while models were loading asynchronously.
 			const currentQuery = this.#searchInput.getValue();
@@ -192,6 +197,13 @@ export class ModelSelectorComponent extends Container {
 				};
 			}
 		}
+	}
+
+	#selectCurrentModel(): void {
+		const defaultModel = this.#roles.default;
+		if (!defaultModel) return;
+		const idx = this.#filteredModels.findIndex(m => modelsAreEqual(m.model, defaultModel.model));
+		if (idx !== -1) this.#selectedIndex = idx;
 	}
 
 	#sortModels(models: ModelItem[]): void {

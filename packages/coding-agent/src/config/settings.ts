@@ -384,6 +384,31 @@ export class Settings {
 	}
 
 	/**
+	 * Get saved context budget for a model key (provider/modelId).
+	 */
+	getContextBudget(modelKey: string): number | undefined {
+		const budgets = this.get("contextBudgets");
+		return budgets[modelKey];
+	}
+
+	/**
+	 * Save context budget for a model key (provider/modelId).
+	 */
+	setContextBudget(modelKey: string, budget: number): void {
+		const current = this.get("contextBudgets");
+		this.set("contextBudgets", { ...current, [modelKey]: budget });
+	}
+
+	/**
+	 * Clear saved context budget for a model key (resets to baseline).
+	 */
+	clearContextBudget(modelKey: string): void {
+		const current = { ...this.get("contextBudgets") };
+		delete current[modelKey];
+		this.set("contextBudgets", current);
+	}
+
+	/**
 	 * Set disabled providers (for compatibility with discovery system).
 	 */
 	setDisabledProviders(ids: string[]): void {

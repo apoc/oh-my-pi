@@ -74,6 +74,21 @@
 - Fixed type safety in OpenAI responses by removing unsafe type casts on image content blocks
 - Fixed credential purging to respect disabled credentials when deduplicating by email
 
+### Added
+
+- Added `maxContextWindow` and `longContextPricing` fields to `Model` type for per-model extended context configuration
+- Added `needsExtendedContext(model, budget)` helper and `hasExtendedContextAccess(isOAuth)` entitlement check in `extended-context.ts`
+- Added `EXTENDED_CONTEXT_PROVIDERS` set in model-policies to scope 1M context activation to Anthropic and Amazon Bedrock; `maxContextWindow=1_000_000` for Opus 4.6 and Sonnet 4.6
+
+### Changed
+
+- `supportsExtendedContext()` now takes a `Model` object instead of a string model ID
+- `calculateCost()` reads long-context pricing multipliers from `model.longContextPricing` instead of hardcoded constants
+
+### Fixed
+
+- Fixed `mapOptionsForApi()` silently dropping `onResponseHeaders` and `contextBudget`, preventing beta header injection and entitlement caching from ever reaching the Anthropic provider
+
 ## [13.9.2] - 2026-03-05
 
 ### Added

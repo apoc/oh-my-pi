@@ -28,6 +28,12 @@ export interface ModelsDevModel {
 		output?: number;
 		cache_read?: number;
 		cache_write?: number;
+		context_over_200k?: {
+			input?: number;
+			output?: number;
+			cache_read?: number;
+			cache_write?: number;
+		};
 	};
 	modalities?: {
 		input?: string[];
@@ -1685,6 +1691,18 @@ export function mapModelsDevToModels(
 				...(desc.compat && { compat: desc.compat }),
 				...(desc.headers && { headers: { ...desc.headers } }),
 			};
+
+			// Map context_over_200k pricing tier directly to longContextPricing (absolute prices).
+			const o200k = m.cost?.context_over_200k;
+			if (o200k?.input != null || o200k?.output != null) {
+				mapped.longContextPricing = {
+					inputThreshold: 200_000,
+					input: toNumber(o200k.input) ?? mapped.cost.input,
+					output: toNumber(o200k.output) ?? mapped.cost.output,
+					...(o200k.cache_read != null && { cacheRead: toNumber(o200k.cache_read) }),
+					...(o200k.cache_write != null && { cacheWrite: toNumber(o200k.cache_write) }),
+				};
+			}
 
 			// Apply per-model transform
 			if (desc.transformModel) {

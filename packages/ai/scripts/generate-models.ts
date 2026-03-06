@@ -303,9 +303,6 @@ async function generateModels() {
 		}
 	}
 
-	applyGeneratedModelPolicies(allModels);
-	linkSparkPromotionTargets(allModels);
-
 	// Merge previous models.json entries as fallback for any provider/model
 	// not fetched dynamically. This replaces all hardcoded fallback lists —
 	// static-only providers (vertex, gemini-cli), auth-gated providers when
@@ -322,6 +319,11 @@ async function generateModels() {
 			}
 		}
 	}
+
+	// Apply policies after all sources (including fallback) are merged so every
+	// model gets normalized context windows, extended-context fields, and promotion links.
+	applyGeneratedModelPolicies(allModels);
+	linkSparkPromotionTargets(allModels);
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
@@ -355,7 +357,7 @@ async function generateModels() {
 	}
 
 	// Generate JSON file
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "	"));
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "\t"));
 	console.log("Generated src/models.json");
 
 	// Print statistics

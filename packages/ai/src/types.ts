@@ -194,6 +194,8 @@ export interface StreamOptions {
 	 * session-aware features. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
+	/** Client-side context budget. When set and exceeds model baseline, providers may activate extended context mode. */
+	contextBudget?: number;
 	/**
 	 * Provider-scoped mutable state store for this agent session.
 	 * Providers can use this to persist transport/session state between turns.
@@ -204,6 +206,13 @@ export interface StreamOptions {
 	 * The payload format is provider-specific.
 	 */
 	onPayload?: (payload: unknown) => void;
+	/**
+	 * Optional hook to observe HTTP response headers from the provider.
+	 * Fired once after the first successful response is received.
+	 * Used to extract rate-limit and entitlement signals without coupling
+	 * the provider to higher-level business logic.
+	 */
+	onResponseHeaders?: (headers: Record<string, string>) => void;
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
 }
@@ -489,6 +498,18 @@ export interface Model<TApi extends Api = any> {
 	contextWindow: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
+	/** Maximum context window (tokens). When set, model supports extended context up to this ceiling (baseline is `contextWindow`). */
+	maxContextWindow?: number;
+	/** Long-context pricing: premium rates when total input (input + cacheRead + cacheWrite) exceeds the threshold. */
+	longContextPricing?: {
+		/** Token count threshold above which premium rates apply. */
+		inputThreshold: number;
+		/** Per-MTok prices when the threshold is exceeded (absolute values, not multipliers). */
+		input: number;
+		output: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+	};
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */

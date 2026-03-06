@@ -740,6 +740,10 @@ export class ModelRegistry {
 					this.#models.find(candidate => candidate.provider === model.provider);
 				return existing
 					? {
+							// Spread order matters: existing provides defaults (e.g. maxContextWindow,
+							// longContextPricing from bundled models), discovery results override.
+							// baseUrl/headers are always pinned to existing config.
+							...existing,
 							...model,
 							baseUrl: existing.baseUrl,
 							headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
