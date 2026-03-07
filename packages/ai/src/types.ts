@@ -334,6 +334,8 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** HTTP status code of the error response, if applicable. */
+	errorStatus?: number;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds

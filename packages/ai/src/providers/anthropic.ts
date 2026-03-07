@@ -34,6 +34,7 @@ import { isAnthropicOAuthToken, normalizeToolCallId, resolveCacheRetention } fro
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { CONTEXT_1M_BETA, needsExtendedContext } from "../utils/extended-context";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import { extractHttpStatusFromError } from "../utils/retry";
 import { parseStreamingJson } from "../utils/json-parse";
 import {
 	buildCopilotDynamicHeaders,
@@ -546,6 +547,8 @@ function isTransientStreamParseError(error: unknown): boolean {
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	const msg = error.message;
+	// "Extra usage is required for long context" is a permanent account restriction, not transient.
+	if (/extra usage is required for long context/i.test(msg)) return false;
 	return (
 		/rate.?limit|too many requests|overloaded|service.?unavailable|1302/i.test(msg) ||
 		isTransientStreamParseError(error)
@@ -862,6 +865,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			for (const block of output.content) delete (block as any).index;
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
+			output.errorStatus = extractHttpStatusFromError(error);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
