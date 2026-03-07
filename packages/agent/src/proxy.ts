@@ -7,6 +7,7 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	extractHttpStatusFromError,
 	type Model,
 	type SimpleStreamOptions,
 	type StopReason,
@@ -177,6 +178,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
+			partial.errorStatus = extractHttpStatusFromError(error);
 			stream.push({
 				type: "error",
 				reason,

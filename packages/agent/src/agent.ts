@@ -6,6 +6,7 @@ import {
 	type CursorExecHandlers,
 	type CursorToolResultHandler,
 	type Effort,
+	extractHttpStatusFromError,
 	getBundledModel,
 	type ImageContent,
 	type Message,
@@ -845,6 +846,7 @@ export class Agent {
 				},
 				stopReason: this.#abortController?.signal.aborted ? "aborted" : "error",
 				errorMessage: err?.message || String(err),
+				errorStatus: extractHttpStatusFromError(err),
 				timestamp: Date.now(),
 			} as AgentMessage;
 
