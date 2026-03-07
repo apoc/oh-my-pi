@@ -780,6 +780,30 @@ export class AgentSession {
 				return;
 			}
 
+			// Long-context account restriction: the contextBudget was set above the model's
+			// standard window, which triggers the context-1m beta header. If the account
+			// doesn't have "Extra usage" enabled, Anthropic returns a 429 with this specific
+			// message. Fix: reset budget to the standard contextWindow and re-run immediately.
+			// This is not a transient error and must not be counted against the retry budget.
+			if (this.#isLongContextAccountError(msg)) {
+				const model = this.model;
+				if (model && this.contextBudget > model.contextWindow) {
+					logger.warn("Long-context account restriction detected, resetting contextBudget", {
+						from: this.contextBudget,
+						to: model.contextWindow,
+						errorMessage: msg.errorMessage,
+					});
+					this.setContextBudget(model.contextWindow);
+					const messages = this.agent.state.messages;
+					if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+						this.agent.replaceMessages(messages.slice(0, -1));
+					}
+					this.#scheduleAgentContinue({ delayMs: 0, generation: this.#promptGeneration });
+					return;
+				}
+				// Budget already at standard window — cannot fix, fall through to normal retry/abort
+			}
+
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			if (this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(msg);
@@ -4159,6 +4183,11 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		const err = message.errorMessage;
 		return this.#isRetryableErrorMessage(err);
+	}
+
+	#isLongContextAccountError(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error" || !message.errorMessage) return false;
+		return /extra usage is required for long context/i.test(message.errorMessage);
 	}
 
 	#isRetryableErrorMessage(errorMessage: string): boolean {

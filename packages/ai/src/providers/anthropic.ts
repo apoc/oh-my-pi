@@ -546,6 +546,8 @@ function isTransientStreamParseError(error: unknown): boolean {
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	const msg = error.message;
+	// "Extra usage is required for long context" is a permanent account restriction, not transient.
+	if (/extra usage is required for long context/i.test(msg)) return false;
 	return (
 		/rate.?limit|too many requests|overloaded|service.?unavailable|1302/i.test(msg) ||
 		isTransientStreamParseError(error)
