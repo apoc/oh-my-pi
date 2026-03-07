@@ -792,7 +792,6 @@ export class AgentSession {
 					logger.warn("Long-context account restriction detected, resetting contextBudget", {
 						from: this.contextBudget,
 						to: model.contextWindow,
-						errorStatus: msg.errorStatus,
 						errorMessage: msg.errorMessage,
 					});
 					this.setContextBudget(model.contextWindow);
@@ -4189,7 +4188,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 	#isLongContextAccountError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		return message.errorStatus === 429 && /extra usage is required for long context/i.test(message.errorMessage);
+		return /extra usage is required for long context/i.test(message.errorMessage);
 	}
 
 	#isRetryableErrorMessage(errorMessage: string): boolean {
