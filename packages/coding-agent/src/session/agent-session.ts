@@ -109,6 +109,7 @@ import { extractFileMentions, generateFileMentionMessages } from "../utils/file-
 import {
 	type CompactionResult,
 	calculateContextTokens,
+	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	compact,
 	estimateTokens,
@@ -5133,7 +5134,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			};
 		}
 
-		const usageTokens = calculateContextTokens(lastUsage);
+		const usageTokens = calculatePromptTokens(lastUsage);
 		let trailingTokens = 0;
 		for (let i = lastUsageIndex + 1; i < messages.length; i++) {
 			trailingTokens += estimateTokens(messages[i]);
