@@ -43857,5 +43857,103 @@
 				"maxLevel": "high"
 			}
 		}
+	},
+	"anthropic-vertex": {
+		"claude-opus-4-6": {
+			"id": "claude-opus-4-6",
+			"name": "Claude Opus 4.6",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25},
+			"contextWindow": 200000,
+			"maxTokens": 128000,
+			"thinking": {"mode": "anthropic-adaptive", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-sonnet-4-6": {
+			"id": "claude-sonnet-4-6",
+			"name": "Claude Sonnet 4.6",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {"mode": "anthropic-adaptive", "minLevel": "minimal", "maxLevel": "high"}
+		},
+		"claude-sonnet-4-5@20250929": {
+			"id": "claude-sonnet-4-5@20250929",
+			"name": "Claude Sonnet 4.5",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {"mode": "budget", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-sonnet-4@20250514": {
+			"id": "claude-sonnet-4@20250514",
+			"name": "Claude Sonnet 4",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {"mode": "budget", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-opus-4-5@20251101": {
+			"id": "claude-opus-4-5@20251101",
+			"name": "Claude Opus 4.5",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {"mode": "anthropic-budget-effort", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-opus-4-1@20250805": {
+			"id": "claude-opus-4-1@20250805",
+			"name": "Claude Opus 4.1",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 15, "output": 75, "cacheRead": 1.5, "cacheWrite": 18.75},
+			"contextWindow": 200000,
+			"maxTokens": 32000,
+			"thinking": {"mode": "budget", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-opus-4@20250514": {
+			"id": "claude-opus-4@20250514",
+			"name": "Claude Opus 4",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 15, "output": 75, "cacheRead": 1.5, "cacheWrite": 18.75},
+			"contextWindow": 200000,
+			"maxTokens": 32000,
+			"thinking": {"mode": "budget", "minLevel": "minimal", "maxLevel": "xhigh"}
+		},
+		"claude-haiku-4-5@20251001": {
+			"id": "claude-haiku-4-5@20251001",
+			"name": "Claude Haiku 4.5",
+			"api": "anthropic-vertex-messages",
+			"provider": "anthropic-vertex",
+			"reasoning": true,
+			"input": ["text", "image"],
+			"cost": {"input": 1, "output": 5, "cacheRead": 0.1, "cacheWrite": 1.25},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {"mode": "budget", "minLevel": "minimal", "maxLevel": "xhigh"}
+		}
 	}
 }

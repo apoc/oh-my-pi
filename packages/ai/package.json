@@ -38,6 +38,7 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.78",
+		"@anthropic-ai/vertex-sdk": "0.14.4",
 		"@aws-sdk/client-bedrock-runtime": "^3",
 		"@bufbuild/protobuf": "^2.11",
 		"@google/genai": "^1.43",

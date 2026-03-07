@@ -11,6 +11,7 @@ import {
 } from "./model-thinking";
 import { type BedrockOptions, streamBedrock } from "./providers/amazon-bedrock";
 import { type AnthropicOptions, streamAnthropic } from "./providers/anthropic";
+import { type AnthropicVertexOptions, streamAnthropicVertex } from "./providers/anthropic-vertex";
 import { streamAzureOpenAIResponses } from "./providers/azure-openai-responses";
 import { type CursorOptions, streamCursor } from "./providers/cursor";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
@@ -91,9 +92,18 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 			? $pickenv("ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 			: $pickenv("ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
 	"gitlab-duo": "GITLAB_TOKEN",
-	// Vertex AI uses Application Default Credentials, not API keys.
+	// Vertex AI (Google) uses Application Default Credentials, not API keys.
 	// Auth is configured via `gcloud auth application-default login`.
 	"google-vertex": () => {
+		const hasCredentials = hasVertexAdcCredentials();
+		const hasProject = !!($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT);
+		const hasLocation = !!$env.GOOGLE_CLOUD_LOCATION;
+		if (hasCredentials && hasProject && hasLocation) {
+			return "<authenticated>";
+		}
+	},
+	// Anthropic Vertex AI uses the same Google Cloud ADC as google-vertex.
+	"anthropic-vertex": () => {
 		const hasCredentials = hasVertexAdcCredentials();
 		const hasProject = !!($env.GOOGLE_CLOUD_PROJECT || $env.GCLOUD_PROJECT);
 		const hasLocation = !!$env.GOOGLE_CLOUD_LOCATION;
@@ -175,9 +185,15 @@ export function stream<TApi extends Api>(
 		});
 	}
 
-	// Vertex AI uses Application Default Credentials, not API keys
+	// Vertex AI (Google) uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
 		return streamGoogleVertex(model as Model<"google-vertex">, context, options as GoogleVertexOptions);
+	} else if (model.api === "anthropic-vertex-messages") {
+		return streamAnthropicVertex(
+			model as Model<"anthropic-vertex-messages">,
+			context,
+			options as AnthropicVertexOptions,
+		);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, (options || {}) as BedrockOptions);
@@ -246,6 +262,9 @@ export function streamSimple<TApi extends Api>(
 
 	// Vertex AI uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
+		const providerOptions = mapOptionsForApi(model, options, undefined);
+		return stream(model, context, providerOptions);
+	} else if (model.api === "anthropic-vertex-messages") {
 		const providerOptions = mapOptionsForApi(model, options, undefined);
 		return stream(model, context, providerOptions);
 	} else if (model.api === "bedrock-converse-stream") {
@@ -486,6 +505,56 @@ function mapOptionsForApi<TApi extends Api>(
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				});
 			}
+		}
+
+		case "anthropic-vertex-messages": {
+			// Same thinking logic as anthropic-messages — Vertex supports the same extended thinking modes.
+			const reasoning = options?.reasoning;
+			if (!reasoning) {
+				return castApi<"anthropic-vertex-messages">({
+					...base,
+					thinkingEnabled: false,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+				});
+			}
+
+			let thinkingBudget = options.thinkingBudgets?.[reasoning] ?? ANTHROPIC_THINKING[reasoning];
+			if (thinkingBudget <= 0) {
+				return castApi<"anthropic-vertex-messages">({
+					...base,
+					thinkingEnabled: false,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+				});
+			}
+
+			if (model.thinking?.mode === "anthropic-adaptive") {
+				const effort = mapEffortToAnthropicAdaptiveEffort(model, reasoning);
+				return castApi<"anthropic-vertex-messages">({
+					...base,
+					thinkingEnabled: true,
+					effort,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+				});
+			}
+
+			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
+			if (maxTokens <= thinkingBudget) {
+				thinkingBudget = maxTokens - MIN_OUTPUT_TOKENS;
+			}
+			if (thinkingBudget <= 0) {
+				return castApi<"anthropic-vertex-messages">({
+					...base,
+					thinkingEnabled: false,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+				});
+			}
+			return castApi<"anthropic-vertex-messages">({
+				...base,
+				maxTokens,
+				thinkingEnabled: true,
+				thinkingBudgetTokens: thinkingBudget,
+				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+			});
 		}
 
 		case "bedrock-converse-stream": {

@@ -13,6 +13,9 @@
 
 ### Added
 
+- Added `anthropic-vertex` provider: Claude models via Google Cloud Vertex AI using Application Default Credentials (`gcloud auth application-default login`)
+- Added `anthropic-vertex-messages` API type with full support for streaming, extended thinking, prompt caching, and tool use
+- Added 8 model entries for `anthropic-vertex` covering Opus 4.6, Sonnet 4.6, Sonnet 4.5, Sonnet 4, Opus 4.5, Opus 4.1, Opus 4, and Haiku 4.5 (Vertex API model IDs)
 - Added `incremental` flag to `OpenAIResponsesHistoryPayload` to support building conversation history from multiple assistant messages instead of replacing it
 - Added `dt` flag to `OpenAIResponsesHistoryPayload` for transport-level metadata
 - Added `ThinkingConfig` interface to models for canonical thinking transport metadata with min/max effort levels and provider-specific mode

@@ -1,6 +1,7 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AnthropicVertexOptions } from "./providers/anthropic-vertex";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
 import type {
@@ -36,6 +37,7 @@ export type KnownApi =
 	| "openai-codex-responses"
 	| "azure-openai-responses"
 	| "anthropic-messages"
+	| "anthropic-vertex-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
 	| "google-gemini-cli"
@@ -44,6 +46,7 @@ export type KnownApi =
 export type Api = KnownApi | (string & {});
 export interface ApiOptionsMap {
 	"anthropic-messages": AnthropicOptions;
+	"anthropic-vertex-messages": AnthropicVertexOptions;
 	"bedrock-converse-stream": BedrockOptions;
 	"openai-completions": OpenAICompletionsOptions;
 	"openai-responses": OpenAIResponsesOptions;
@@ -85,8 +88,10 @@ export interface ThinkingConfig {
 }
 
 export type KnownProvider =
+	| "alibaba-coding-plan"
 	| "amazon-bedrock"
 	| "anthropic"
+	| "anthropic-vertex"
 	| "google"
 	| "google-gemini-cli"
 	| "google-antigravity"

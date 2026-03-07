@@ -152,7 +152,7 @@ type AnthropicSamplingParams = MessageCreateParamsStreaming & {
 	top_p?: number;
 	top_k?: number;
 };
-function getCacheControl(
+export function getCacheControl(
 	baseUrl: string,
 	cacheRetention?: CacheRetention,
 ): { retention: CacheRetention; cacheControl?: AnthropicCacheControl } {
@@ -526,8 +526,8 @@ function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]):
 	return merged;
 }
 
-const PROVIDER_MAX_RETRIES = 3;
-const PROVIDER_BASE_DELAY_MS = 2000;
+export const PROVIDER_MAX_RETRIES = 3;
+export const PROVIDER_BASE_DELAY_MS = 2000;
 
 /**
  * Check if an error from the Anthropic SDK is a rate-limit/transient error that
@@ -537,7 +537,7 @@ const PROVIDER_BASE_DELAY_MS = 2000;
  * Anthropic-compatible proxy endpoints.
  */
 /** Transient stream corruption errors where the response was truncated mid-JSON. */
-function isTransientStreamParseError(error: unknown): boolean {
+export function isTransientStreamParseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	return /json parse error|unterminated string|unexpected end of json input/i.test(error.message);
 }
@@ -987,7 +987,7 @@ function createClient(
 	return { client, isOAuthToken: oauthToken };
 }
 
-function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming): void {
+export function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming): void {
 	const toolChoice = params.tool_choice;
 	if (!toolChoice) return;
 	if (toolChoice.type === "any" || toolChoice.type === "tool") {
@@ -996,7 +996,10 @@ function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming)
 	}
 }
 
-function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, model: Model<"anthropic-messages">): void {
+export function ensureMaxTokensForThinking(
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+): void {
 	const thinking = params.thinking;
 	if (!thinking || thinking.type !== "enabled") return;
 
@@ -1037,7 +1040,7 @@ function applyCacheControlToLastTextBlock(
 	applyCacheControlToLastBlock(blocks, cacheControl);
 }
 
-function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
+export function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?: AnthropicCacheControl): void {
 	if (!cacheControl) return;
 
 	// Skip if cache_control breakpoints were already placed externally on messages.
@@ -1126,7 +1129,7 @@ function normalizeCacheControlBlockTtl(block: CacheControlBlock, seenFiveMinute:
 	}
 }
 
-function normalizeCacheControlTtlOrdering(params: MessageCreateParamsStreaming): void {
+export function normalizeCacheControlTtlOrdering(params: MessageCreateParamsStreaming): void {
 	const seenFiveMinute = { value: false };
 	if (params.tools) {
 		for (const tool of params.tools as Array<Anthropic.Messages.Tool & CacheControlBlock>) {
@@ -1212,7 +1215,7 @@ function countCacheControlBreakpoints(params: MessageCreateParamsStreaming): num
 	return total;
 }
 
-function enforceCacheControlLimit(params: MessageCreateParamsStreaming, maxBreakpoints: number): void {
+export function enforceCacheControlLimit(params: MessageCreateParamsStreaming, maxBreakpoints: number): void {
 	const total = countCacheControlBreakpoints(params);
 	if (total <= maxBreakpoints) return;
 	const excessCounter = { value: total - maxBreakpoints };
@@ -1489,7 +1492,7 @@ export function convertAnthropicMessages(
 	return params;
 }
 
-function convertTools(tools: Tool[], isOAuthToken: boolean): Anthropic.Messages.Tool[] {
+export function convertTools(tools: Tool[], isOAuthToken: boolean): Anthropic.Messages.Tool[] {
 	if (!tools) return [];
 
 	return tools.map(tool => {
@@ -1507,7 +1510,7 @@ function convertTools(tools: Tool[], isOAuthToken: boolean): Anthropic.Messages.
 	});
 }
 
-function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReason {
+export function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReason {
 	switch (reason) {
 		case "end_turn":
 			return "stop";
