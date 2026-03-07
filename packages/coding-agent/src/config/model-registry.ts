@@ -735,20 +735,28 @@ export class ModelRegistry {
 		const merged = this.#mergeCustomModels(
 			this.#models,
 			discovered.map(model => {
-				const existing =
-					this.find(model.provider, model.id) ??
-					this.#models.find(candidate => candidate.provider === model.provider);
-				return existing
-					? {
-							// Spread order matters: existing provides defaults (e.g. maxContextWindow,
-							// longContextPricing from bundled models), discovery results override.
-							// baseUrl/headers are always pinned to existing config.
-							...existing,
-							...model,
-							baseUrl: existing.baseUrl,
-							headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
-						}
-					: model;
+				const exactMatch = this.find(model.provider, model.id);
+				if (exactMatch) {
+					// Exact provider+id match: inherit all bundled metadata as defaults,
+					// discovery results override. baseUrl/headers pinned to existing config.
+					return {
+						...exactMatch,
+						...model,
+						baseUrl: exactMatch.baseUrl,
+						headers: exactMatch.headers ? { ...exactMatch.headers, ...model.headers } : model.headers,
+					};
+				}
+				// Provider-only fallback: only inherit connection fields, not model-specific
+				// metadata (maxContextWindow, longContextPricing, cost, etc.).
+				const providerFallback = this.#models.find(candidate => candidate.provider === model.provider);
+				if (providerFallback) {
+					return {
+						...model,
+						baseUrl: providerFallback.baseUrl,
+						headers: providerFallback.headers ? { ...providerFallback.headers, ...model.headers } : model.headers,
+					};
+				}
+				return model;
 			}),
 		);
 		this.#models = this.#applyHardcodedModelPolicies(this.#applyModelOverrides(merged, this.#modelOverrides));
