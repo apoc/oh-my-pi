@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
-import { kNoAuth, MODEL_ROLES, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, MODEL_ROLE_IDS, MODEL_ROLES, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { hookFetch, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -15,6 +15,15 @@ describe("ModelRegistry", () => {
 	test("commit role includes a visible badge tag", () => {
 		expect(MODEL_ROLES.commit.tag).toBe("COMMIT");
 		expect(MODEL_ROLES.commit.color).toBe("dim");
+	});
+
+	test("compaction role includes a visible badge tag", () => {
+		expect(MODEL_ROLES.compaction.tag).toBe("COMPACT");
+		expect(MODEL_ROLES.compaction.color).toBe("dim");
+	});
+
+	test("compaction role is first in MODEL_ROLE_IDS", () => {
+		expect(MODEL_ROLE_IDS[0]).toBe("compaction");
 	});
 
 	beforeEach(async () => {

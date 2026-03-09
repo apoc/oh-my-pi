@@ -686,6 +686,54 @@ describe("remote compaction setting", () => {
 	});
 });
 
+describe("reasoning gate", () => {
+	function makeEntries(): SessionEntry[] {
+		return [
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("Answer 1", createMockUsage(0, 100, 5000, 0))),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantMessage("Answer 2", createMockUsage(0, 100, 5000, 0))),
+		];
+	}
+
+	const compactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1000, remoteEnabled: false };
+
+	it("does not pass reasoning to completeSimple for non-thinking models", async () => {
+		const model = getBundledModel("openai", "gpt-4o");
+		if (!model) throw new Error("Expected openai/gpt-4o to exist");
+		expect(model.reasoning).toBeFalsy();
+
+		completeSimpleMock.mockResolvedValue(createAssistantMessage("summary"));
+
+		const preparation = prepareCompaction(makeEntries(), compactionSettings);
+		if (!preparation) throw new Error("Expected preparation");
+
+		await compact(preparation, model, "test-api-key");
+
+		for (const [, , options] of completeSimpleMock.mock.calls) {
+			expect(options?.reasoning).toBeUndefined();
+		}
+	});
+
+	it("passes Effort.High reasoning to completeSimple for thinking models", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 to exist");
+		expect(model.reasoning).toBeTruthy();
+
+		completeSimpleMock.mockResolvedValue(createAssistantMessage("summary"));
+
+		const preparation = prepareCompaction(makeEntries(), compactionSettings);
+		if (!preparation) throw new Error("Expected preparation");
+
+		await compact(preparation, model, "test-api-key");
+
+		// Effort.High === "high" (const enum inlined at compile time)
+		for (const [, , options] of completeSimpleMock.mock.calls) {
+			expect(options?.reasoning).toBe("high");
+		}
+	});
+});
+
 describe("findCutPoint", () => {
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
