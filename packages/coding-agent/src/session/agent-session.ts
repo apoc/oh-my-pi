@@ -3682,7 +3682,11 @@ export class AgentSession {
 		};
 
 		const currentModel = this.model;
+		// Dedicated compaction role is the explicit primary candidate.
+		// Resolve it first so its priority is visible here, not implicit in MODEL_ROLE_IDS ordering.
+		addCandidate(this.#resolveRoleModel("compaction", availableModels, currentModel));
 		for (const role of MODEL_ROLE_IDS) {
+			if (role === "compaction") continue; // already resolved above
 			addCandidate(this.#resolveRoleModel(role, availableModels, currentModel));
 		}
 

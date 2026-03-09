@@ -22,8 +22,8 @@ describe("ModelRegistry", () => {
 		expect(MODEL_ROLES.compaction.color).toBe("dim");
 	});
 
-	test("compaction role is first in MODEL_ROLE_IDS", () => {
-		expect(MODEL_ROLE_IDS[0]).toBe("compaction");
+	test("compaction role is present in MODEL_ROLE_IDS", () => {
+		expect(MODEL_ROLE_IDS).toContain("compaction");
 	});
 
 	beforeEach(async () => {
