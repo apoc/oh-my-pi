@@ -107,6 +107,7 @@ import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import {
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	calculatePromptTokens,
@@ -2983,11 +2984,6 @@ export class AgentSession {
 			}
 
 			const compactionSettings = this.settings.getGroup("compaction");
-			const compactionModel = this.model;
-			const apiKey = await this.#modelRegistry.getApiKey(compactionModel, this.sessionId);
-			if (!apiKey) {
-				throw new Error(`No API key for ${compactionModel.provider}`);
-			}
 
 			const pathEntries = this.sessionManager.getBranch();
 
@@ -3054,11 +3050,8 @@ export class AgentSession {
 				details = hookCompaction.details;
 				preserveData ??= hookCompaction.preserveData;
 			} else {
-				// Generate compaction result
-				const result = await compact(
+				const result = await this.#executeCompaction(
 					preparation,
-					compactionModel,
-					apiKey,
 					customInstructions,
 					this.#compactionAbortController.signal,
 					{ promptOverride: hookPrompt, extraContext: hookContext, remoteInstructions: this.#baseSystemPrompt },
@@ -3705,6 +3698,102 @@ export class AgentSession {
 	}
 
 	/**
+	 * Shared compaction execution: resolves candidates, applies retry+fallback logic.
+	 * Used by both manual compact() and auto-compaction.
+	 */
+	async #executeCompaction(
+		preparation: CompactionPreparation,
+		customInstructions: string | undefined,
+		signal: AbortSignal,
+		summaryOptions: { promptOverride?: string; extraContext?: string[]; remoteInstructions?: string },
+	): Promise<CompactionResult> {
+		const availableModels = this.#modelRegistry.getAvailable();
+		const candidates = this.#getCompactionModelCandidates(availableModels);
+		const retrySettings = this.settings.getGroup("retry");
+		let compactResult: CompactionResult | undefined;
+		let lastError: unknown;
+
+		for (const candidate of candidates) {
+			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+			if (!apiKey) continue;
+
+			let attempt = 0;
+			while (true) {
+				try {
+					compactResult = await compact(
+						preparation,
+						candidate,
+						apiKey,
+						customInstructions,
+						signal,
+						summaryOptions,
+					);
+					break;
+				} catch (error) {
+					if (signal.aborted) {
+						throw error;
+					}
+
+					const message = error instanceof Error ? error.message : String(error);
+					const retryAfterMs = this.#parseRetryAfterMsFromError(message);
+					const shouldRetry =
+						retrySettings.enabled &&
+						attempt < retrySettings.maxRetries &&
+						(retryAfterMs !== undefined || this.#isRetryableErrorMessage(message));
+					if (!shouldRetry) {
+						lastError = error;
+						break;
+					}
+
+					const baseDelayMs = retrySettings.baseDelayMs * 2 ** attempt;
+					const delayMs = retryAfterMs !== undefined ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs;
+
+					// If retry delay is too long (>30s), try next candidate instead of waiting
+					const maxAcceptableDelayMs = 30_000;
+					if (delayMs > maxAcceptableDelayMs) {
+						const hasMoreCandidates = candidates.indexOf(candidate) < candidates.length - 1;
+						if (hasMoreCandidates) {
+							logger.warn("Compaction retry delay too long, trying next model", {
+								delayMs,
+								retryAfterMs,
+								error: message,
+								model: `${candidate.provider}/${candidate.id}`,
+							});
+							lastError = error;
+							break;
+						}
+						// No more candidates — wait out the delay
+					}
+
+					attempt++;
+					logger.warn("Compaction failed, retrying", {
+						attempt,
+						maxRetries: retrySettings.maxRetries,
+						delayMs,
+						retryAfterMs,
+						error: message,
+						model: `${candidate.provider}/${candidate.id}`,
+					});
+					await abortableSleep(delayMs, signal);
+				}
+			}
+
+			if (compactResult) {
+				break;
+			}
+		}
+
+		if (!compactResult) {
+			if (lastError) {
+				throw lastError;
+			}
+			throw new Error("Compaction failed: no available model");
+		}
+
+		return compactResult;
+	}
+
+	/**
 	 * Internal: Run auto-compaction with events.
 	 */
 	async #runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean, deferred = false): Promise<void> {
@@ -3779,8 +3868,7 @@ export class AgentSession {
 				return;
 			}
 
-			const availableModels = this.#modelRegistry.getAvailable();
-			if (availableModels.length === 0) {
+			if (this.#modelRegistry.getAvailable().length === 0) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3872,85 +3960,11 @@ export class AgentSession {
 				details = hookCompaction.details;
 				preserveData ??= hookCompaction.preserveData;
 			} else {
-				const candidates = this.#getCompactionModelCandidates(availableModels);
-				const retrySettings = this.settings.getGroup("retry");
-				let compactResult: CompactionResult | undefined;
-				let lastError: unknown;
-
-				for (const candidate of candidates) {
-					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
-					if (!apiKey) continue;
-
-					let attempt = 0;
-					while (true) {
-						try {
-							compactResult = await compact(preparation, candidate, apiKey, undefined, autoCompactionSignal, {
-								promptOverride: hookPrompt,
-								extraContext: hookContext,
-								remoteInstructions: this.#baseSystemPrompt,
-							});
-							break;
-						} catch (error) {
-							if (autoCompactionSignal.aborted) {
-								throw error;
-							}
-
-							const message = error instanceof Error ? error.message : String(error);
-							const retryAfterMs = this.#parseRetryAfterMsFromError(message);
-							const shouldRetry =
-								retrySettings.enabled &&
-								attempt < retrySettings.maxRetries &&
-								(retryAfterMs !== undefined || this.#isRetryableErrorMessage(message));
-							if (!shouldRetry) {
-								lastError = error;
-								break;
-							}
-
-							const baseDelayMs = retrySettings.baseDelayMs * 2 ** attempt;
-							const delayMs = retryAfterMs !== undefined ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs;
-
-							// If retry delay is too long (>30s), try next candidate instead of waiting
-							const maxAcceptableDelayMs = 30_000;
-							if (delayMs > maxAcceptableDelayMs) {
-								const hasMoreCandidates = candidates.indexOf(candidate) < candidates.length - 1;
-								if (hasMoreCandidates) {
-									logger.warn("Auto-compaction retry delay too long, trying next model", {
-										delayMs,
-										retryAfterMs,
-										error: message,
-										model: `${candidate.provider}/${candidate.id}`,
-									});
-									lastError = error;
-									break; // Exit retry loop, continue to next candidate
-								}
-								// No more candidates - we have to wait
-							}
-
-							attempt++;
-							logger.warn("Auto-compaction failed, retrying", {
-								attempt,
-								maxRetries: retrySettings.maxRetries,
-								delayMs,
-								retryAfterMs,
-								error: message,
-								model: `${candidate.provider}/${candidate.id}`,
-							});
-							await abortableSleep(delayMs, autoCompactionSignal);
-						}
-					}
-
-					if (compactResult) {
-						break;
-					}
-				}
-
-				if (!compactResult) {
-					if (lastError) {
-						throw lastError;
-					}
-					throw new Error("Compaction failed: no available model");
-				}
-
+				const compactResult = await this.#executeCompaction(preparation, undefined, autoCompactionSignal, {
+					promptOverride: hookPrompt,
+					extraContext: hookContext,
+					remoteInstructions: this.#baseSystemPrompt,
+				});
 				summary = compactResult.summary;
 				shortSummary = compactResult.shortSummary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;

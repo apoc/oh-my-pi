@@ -990,7 +990,7 @@ export async function generateSummary(
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: model.reasoning ? Effort.High : undefined },
 	);
 
 	if (response.stopReason === "error") {
@@ -1039,7 +1039,7 @@ async function generateShortSummary(
 			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 		},
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: model.reasoning ? Effort.High : undefined },
 	);
 
 	if (response.stopReason === "error") {
@@ -1344,7 +1344,7 @@ async function generateTurnPrefixSummary(
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: model.reasoning ? Effort.High : undefined },
 	);
 
 	if (response.stopReason === "error") {
