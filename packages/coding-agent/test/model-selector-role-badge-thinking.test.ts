@@ -72,4 +72,37 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(menuRendered).toContain("Set as PLAN (Architect)");
 		expect(menuRendered).toContain("Set as COMMIT (Commit)");
 	});
+
+	test("opens role menu with default selected before compaction", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
+
+		const settings = Settings.isolated();
+		const modelRegistry = {
+			getAll: () => [model],
+			getDiscoverableProviders: () => [],
+		} as unknown as ModelRegistry;
+		const ui = {
+			requestRender: vi.fn(),
+		} as unknown as TUI;
+
+		const selector = new ModelSelectorComponent(
+			ui,
+			model,
+			settings,
+			modelRegistry,
+			[{ model, thinkingLevel: "off" }],
+			() => {},
+			() => {},
+		);
+
+		await Bun.sleep(0);
+
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+
+		const thinkingRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(thinkingRendered).toContain("Thinking for: Default");
+		expect(thinkingRendered).not.toContain("Thinking for: Compaction");
+	});
 });

@@ -1,5 +1,5 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { MODEL_ROLE_IDS } from "../config/model-registry";
+import { MODEL_ROLE_IDS, type ModelRole } from "../config/model-registry";
 import {
 	expandRoleAlias,
 	parseModelPattern,
@@ -19,7 +19,7 @@ export async function resolvePrimaryModel(
 ): Promise<{ model: Model<Api>; apiKey: string }> {
 	const available = modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings.getStorage()?.getModelUsageOrder() };
-	const roleOrder = ["commit", "smol", ...MODEL_ROLE_IDS] as const;
+	const roleOrder: ModelRole[] = ["commit", "smol", ...MODEL_ROLE_IDS.filter(r => r !== "compaction")];
 	const model = override
 		? resolveModelFromString(expandRoleAlias(override, settings), available, matchPreferences)
 		: resolveModelFromSettings({

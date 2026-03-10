@@ -55,7 +55,7 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	compaction: { tag: "COMPACT", name: "Compaction", color: "dim" },
 };
 
-export const MODEL_ROLE_IDS: ModelRole[] = ["compaction", "default", "smol", "slow", "vision", "plan", "commit"];
+export const MODEL_ROLE_IDS: ModelRole[] = ["default", "smol", "slow", "vision", "plan", "commit", "compaction"];
 
 const OpenRouterRoutingSchema = Type.Object({
 	only: Type.Optional(Type.Array(Type.String())),
