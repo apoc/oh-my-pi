@@ -26,7 +26,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 } from "@oh-my-pi/pi-ai/utils";
-import { getOverflowPatterns } from "@oh-my-pi/pi-ai/utils/overflow";
+import { isContextOverflowMessage } from "@oh-my-pi/pi-ai/utils/overflow";
 import { logger } from "@oh-my-pi/pi-utils";
 import { renderPromptTemplate } from "../../config/prompt-templates";
 import compactionShortSummaryPrompt from "../../prompts/compaction/compaction-short-summary.md" with { type: "text" };
@@ -1212,29 +1212,52 @@ const MAX_SUMMARIZATION_RETRIES = 2;
 // ============================================================================
 
 /**
- * Groups messages by user-turn boundaries.
+ * Returns true when a message role represents a turn boundary — i.e. a new
+ * user-initiated (or effectively user-initiated) unit of conversation.
  *
- * A new group starts on each user message. Any leading non-user messages (e.g.
- * a system prompt or an orphan assistant message) form the first group.
+ * Mirrors the predicate in `findTurnStartIndex`: plain `user` messages,
+ * inline `bashExecution` (!command), `branchSummary` (post-branch-switch
+ * continuation marker), and extension-injected `custom` messages. Any change
+ * here MUST be reflected in `findTurnStartIndex` so both helpers agree on
+ * what a turn is.
+ */
+function isTurnStart(msg: AgentMessage): boolean {
+	switch (msg.role) {
+		case "user":
+		case "bashExecution":
+		case "branchSummary":
+		case "custom":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Groups messages by turn boundaries (see `isTurnStart`).
  *
- * Each group represents a complete user→response cycle:
- *   [user message + subsequent assistant/tool/developer messages until the next user]
+ * A new group starts on each turn-boundary message. Any leading non-boundary
+ * messages (e.g. a system prompt or an orphan assistant message) form the
+ * first group.
+ *
+ * Each group represents a complete turn→response cycle:
+ *   [boundary message + subsequent assistant/tool/developer messages until the next boundary]
  *
  * This preserves the invariant that dropping oldest groups removes complete
- * user→response cycles — a user's prompt is never separated from its triggered
+ * turn→response cycles — a prompt is never separated from its triggered
  * response, and a response is never kept without the prompt that produced it.
  *
- * Limitation: a session with a single user prompt and many tool calls produces
- * one group, which cannot be partially dropped. The retry wrapper will give up
- * for such sessions rather than corrupt the narrative by severing a response
- * from its prompt.
+ * Limitation: a session with a single boundary and many tool calls produces
+ * one group, which cannot be partially dropped. The retry wrapper will give
+ * up for such sessions rather than corrupt the narrative by severing a
+ * response from its prompt.
  */
 export function groupByUserTurn(messages: AgentMessage[]): AgentMessage[][] {
 	const groups: AgentMessage[][] = [];
 	let current: AgentMessage[] = [];
 
 	for (const msg of messages) {
-		if (msg.role === "user" && current.length > 0) {
+		if (isTurnStart(msg) && current.length > 0) {
 			groups.push(current);
 			current = [msg];
 		} else {
@@ -1254,15 +1277,16 @@ export function groupByUserTurn(messages: AgentMessage[]): AgentMessage[][] {
  * Returns `undefined` if:
  * - fewer than 2 groups exist (nothing to drop), or
  * - dropping would leave zero messages, or
- * - the remainder would not start with a user message (invariant violation,
+ * - the remainder would not start with a turn boundary (invariant violation,
  *   see below).
  *
- * With user-boundary grouping, every group after the first starts with a user
- * message, so slicing off `dropCount >= 1` leading groups normally yields a
- * user-first remainder. A non-user-first remainder can only arise from a
- * malformed history or a future change to `groupByUserTurn`; in that case we
- * give up on this retry rather than fabricate a synthetic user prompt that
- * would lie to the summarizer about the conversation's true origin.
+ * With turn-boundary grouping, every group after the first starts with a
+ * turn-start message (see `isTurnStart`), so slicing off `dropCount >= 1`
+ * leading groups normally yields a boundary-first remainder. A non-boundary
+ * remainder can only arise from a malformed history or a future change to
+ * `groupByUserTurn`; in that case we give up on this retry rather than
+ * fabricate a synthetic boundary that would lie to the summarizer about the
+ * conversation's true origin.
  */
 export function dropOldestGroups(
 	messages: AgentMessage[],
@@ -1279,17 +1303,18 @@ export function dropOldestGroups(
 	if (result.length === 0) return undefined;
 
 	// Invariant check — see doc comment above. Normally unreachable.
-	if (result[0].role !== "user") return undefined;
+	if (!isTurnStart(result[0])) return undefined;
 
 	return result;
 }
 
 /**
  * Returns true when an error indicates the summarization prompt exceeded the
- * model's context window.
+ * model's context window. Delegates to the shared pi-ai helper so detection
+ * stays in lockstep with `isContextOverflow`.
  */
 function isContextOverflowError(err: Error): boolean {
-	return getOverflowPatterns().some(p => p.test(err.message));
+	return isContextOverflowMessage(err.message);
 }
 
 /**

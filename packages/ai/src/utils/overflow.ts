@@ -51,6 +51,22 @@ const OVERFLOW_PATTERNS = [
 	/\b413\b.*\b(request|payload|entity)\b.*\btoo large\b/i, // "413 Request Entity Too Large" variants
 ];
 /**
+ * Check if a raw error message string indicates context overflow.
+ *
+ * Mirrors the string-level detection in `isContextOverflow`: pattern match
+ * against known provider error shapes, plus the bare-4xx-no-body fallback for
+ * Cerebras / Mistral. Exposed as a standalone helper so callers that catch
+ * `Error` objects directly (e.g. compaction retry) can share the single source
+ * of truth.
+ */
+export function isContextOverflowMessage(message: string): boolean {
+	if (OVERFLOW_PATTERNS.some(p => p.test(message))) return true;
+	// Cerebras and Mistral return 400/413 with no body for context overflow.
+	// 429 is rate limiting, not overflow — keep the regex scoped to 400/413.
+	return /^4(00|13)\s*(status code)?\s*\(no body\)/i.test(message);
+}
+
+/**
  * Check if an assistant message represents a context overflow error.
  *
  * This handles two cases:
@@ -101,14 +117,7 @@ const OVERFLOW_PATTERNS = [
 export function isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
 	// Case 1: Check error message patterns
 	if (message.stopReason === "error" && message.errorMessage) {
-		// Check known patterns
-		if (OVERFLOW_PATTERNS.some(p => p.test(message.errorMessage!))) {
-			return true;
-		}
-
-		// Cerebras and Mistral return 400/413 with no body for context overflow
-		// Note: 429 is rate limiting (requests/tokens per time), NOT context overflow
-		if (/^4(00|13)\s*(status code)?\s*\(no body\)/i.test(message.errorMessage)) {
+		if (isContextOverflowMessage(message.errorMessage)) {
 			return true;
 		}
 	}
@@ -125,7 +134,9 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 }
 
 /**
- * Get the overflow patterns for testing purposes.
+ * Returns the overflow regex list. Primarily used by the pi-ai test suite to
+ * assert new provider coverage; production callers should prefer
+ * `isContextOverflowMessage` so the bare-4xx-no-body branch is included.
  */
 export function getOverflowPatterns(): RegExp[] {
 	return [...OVERFLOW_PATTERNS];

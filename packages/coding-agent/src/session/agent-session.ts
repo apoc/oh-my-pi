@@ -4499,6 +4499,11 @@ export class AgentSession {
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
 
+		// Tracks whether the primary work (handoff result or appendCompaction) has
+		// been durably committed. Once true, a throw in post-success work (event
+		// emits, hook runners, display refresh) MUST NOT count toward the circuit-
+		// breaker budget — the compaction succeeded; the failure is downstream.
+		let didPersist = false;
 		try {
 			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
@@ -4525,6 +4530,7 @@ export class AgentSession {
 				}
 				if (handoffResult) {
 					this.#compactionFailureCount = 0;
+					didPersist = true;
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -4753,6 +4759,11 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			// Persistence succeeded — from this point on, a throw in the remaining
+			// post-persistence work (hook emits, event bus, etc.) MUST NOT count
+			// toward the circuit-breaker failure budget. The catch block uses
+			// `didPersist` to skip the increment.
+			didPersist = true;
 			this.#compactionFailureCount = 0;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
@@ -4839,7 +4850,7 @@ export class AgentSession {
 			// Overflow failures are exempt from the breaker check, but if they
 			// still incremented the counter they'd disable threshold-triggered
 			// compaction after overflow incidents.
-			if (reason !== "overflow") {
+			if (reason !== "overflow" && !didPersist) {
 				this.#compactionFailureCount++;
 			}
 			await this.#emitSessionEvent({

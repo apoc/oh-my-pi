@@ -4,9 +4,9 @@
 ### Added
 
 - Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
-- Added pre-send context thinning: clears old tool outputs before each LLM call to reduce context pressure and delay compaction
-- Added compaction circuit breaker: stops auto-compaction retries after 3 consecutive failures to prevent wasted API calls in pathological sessions
-- Added summarization retry with head truncation: when compaction itself exceeds the context window, drops oldest message groups and retries
+- Added pre-send context thinning: replaces old tool outputs with lightweight stubs before each LLM call to reduce context size and delay compaction. Controlled by `thinning.enabled` and `thinning.keepRecent` (default 5). `read` results for `skill://`, `rule://`, and `memory://` URIs are always kept in full — they carry binding context the model must follow for the rest of the session.
+- Added compaction circuit breaker: auto-compaction stops after 3 consecutive non-overflow failures. Manual `/compact` always bypasses the breaker.
+- Added summarization retry with head truncation: when the compaction summary call itself exceeds the model's context window, the oldest conversation groups are dropped and the summary is retried up to 2 times.
 - Added `onExternalEditor` callback to extension UI dialog options for handling external editor shortcut in select dialogs
 - Added external editor shortcut support in plan review selector, allowing users to open and edit the plan in their configured editor
 - Added `matchesAppExternalEditor` keybinding matcher to detect external editor shortcut (Ctrl+G or configured binding)
@@ -16,6 +16,12 @@
 - Added comprehensive git utility module (`utils/git`) with organized namespaces for common git operations (branch, commit, diff, log, patch, ref, stage, status, head, repository)
 
 ### Changed
+
+- `thinning.keepRecent` defaults to 5: the 5 most recent tool results are always sent in full; older results are replaced with token-count stubs
+- `web_search`, `browser`, and `inspect_image` results are not thinned: their content cannot be reliably reproduced on re-invocation
+- All tool results are eligible for pruning by default; only `read` results are excluded. MCP server tools, `task` subagent outputs, `generate_image` blobs, and other unrecognised tools are pruned once they fall outside the recent-token protection window
+- Pruning protection budget is 20% of the active model's context window (capped at 80K tokens), so the protected zone scales correctly from small local models to large-context providers
+- Pruning minimum-savings gate is 5K tokens
 
 - Changed idle compaction settings (`compaction.idleThresholdTokens` and `compaction.idleTimeoutSeconds`) from enum to numeric type for flexible configuration
 - Modified secret obfuscation to deobfuscate restored session messages for local display while keeping outbound LLM messages obfuscated

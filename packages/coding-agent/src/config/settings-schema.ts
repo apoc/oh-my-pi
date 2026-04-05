@@ -195,11 +195,24 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
  * The model reads the output, acts on it, carries the understanding forward in its own messages,
  * and if it ever needs the raw data again it can re-invoke the tool at negligible additional cost.
  *
- * Excluded from this list (always preserved) — and why:
+ * Note on `read`: it is included here but has **per-invocation protection** in the thinning
+ * logic for URIs that load binding context (skill://, rule://, memory://). Those reads carry
+ * instructions or constraints the model committed to follow — losing them mid-task causes silent
+ * violations. Regular file path reads, agent://, artifact://, and other re-fetchable URIs are
+ * thinnable as normal. See `BINDING_URI_SCHEMES` in context-thinning.ts.
+ *
+ * Excluded from this list entirely (always preserved) — and why:
  * - `ask`: user decisions are ground truth the agent cannot reconstruct.
  * - `checkpoint` / `rewind`: state transitions that alter session history.
  * - `submit_result` / `exit_plan_mode`: terminal actions whose outcome drives control flow.
  * - `generate_image`: non-reproducible creative output.
+ * - `web_search`: live web content; results drift between calls (ranking, page churn) and
+ *   each re-invocation has real $ cost against a third-party search provider. Cited sources
+ *   would be lost on thinning and could not be reliably re-fetched.
+ * - `browser`: fetches live pages; same reproducibility gap as web_search, plus stateful
+ *   behavior (cookies, bot-detection, CAPTCHAs) that can flip the response on a re-fetch.
+ * - `inspect_image`: delegates to a stochastic vision model — re-invocation is neither free
+ *   nor byte-identical, and the natural-language description is the model's own reasoning.
  * - `todo_write`: between turns, the agent's only view of its own task list is the last
  *   `todo_write` result in history. Losing it breaks task tracking (the todo-completion
  *   reminder only re-injects state when the agent stops with incomplete items, not during
@@ -215,6 +228,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
  * This is the single source of truth for the thinning allowlist. Both the `thinning.thinnableTools`
  * setting default and the runtime `DEFAULT_THINNING_CONFIG` derive from it.
  */
+
 export const DEFAULT_THINNABLE_TOOLS: readonly string[] = [
 	"read",
 	"bash",
@@ -225,9 +239,6 @@ export const DEFAULT_THINNABLE_TOOLS: readonly string[] = [
 	"find",
 	"ast_grep",
 	"ast_edit",
-	"web_search",
-	"browser",
-	"inspect_image",
 	"notebook",
 	"lsp",
 	"ssh",
@@ -911,7 +922,7 @@ export const SETTINGS_SCHEMA = {
 
 	"thinning.keepRecent": {
 		type: "number",
-		default: 10,
+		default: 5,
 		ui: {
 			tab: "context",
 			label: "Keep Recent Results",

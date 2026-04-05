@@ -1,9 +1,20 @@
 /**
  * Tool output pruning utilities for compaction.
+ *
+ * Pruning is DESTRUCTIVE: it replaces tool-result content in the persistent
+ * session history with a short notice. Unlike ephemeral thinning (see
+ * context-thinning.ts) the mutation lands in the session file and is visible
+ * to the user on reload.
+ *
+ * Eligibility is a denylist, not an allowlist: by default every tool result
+ * is prunable once it falls out of the recent-tokens protection window. Only
+ * tools whose raw content the user must retain to understand the session
+ * are added to the protected set. This keeps `task` subagent outputs,
+ * `generate_image` blobs, and all MCP / extension tool results prunable,
+ * because those are the largest space offenders in heavy sessions.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { DEFAULT_THINNABLE_TOOLS } from "../../config/settings-schema";
 import type { SessionEntry, SessionMessageEntry } from "../session-manager";
 import { estimateTokens } from "./compaction";
 
@@ -16,43 +27,40 @@ export interface PruneConfig {
 	/** Skip pruning unless estimated savings exceed this token count. */
 	minimumSavings: number;
 	/**
-	 * Allowlist of tool names eligible for permanent pruning from session history.
-	 * This is a strict SUBSET of the thinning allowlist — some reproducible tools
-	 * (notably `read`) are thinnable in ephemeral sends but kept in session history
-	 * so checkpoint/rewind and user inspection remain faithful to what the model saw.
+	 * Denylist of tool names NEVER subject to pruning, regardless of age.
+	 * Every other tool — including unknown MCP / extension tools and subagent
+	 * `task` results — is eligible once outside the protection window.
 	 */
-	prunableTools: string[];
+	protectedTools: string[];
 }
 
 /**
- * Tools that produce reproducible output (so they can be THINNED from ephemeral
- * LLM sends) but whose raw content must REMAIN in the persistent session history.
- * - `read`: users rely on scrolling back to see what the model read from their files.
- * - `skill`: skill instructions are the model's working context; removing them from
- *   history would erase the rationale for subsequent actions.
+ * Tools whose raw content must remain in the persistent session history.
+ * - `read`: users rely on scrolling back to see what the model read from their
+ *   files. A pruned `read` hides the file contents that drove subsequent edits
+ *   and breaks checkpoint/rewind semantics.
  */
-const PRUNE_PROTECTED_TOOLS = new Set(["read", "skill"]);
-
-const DEFAULT_PRUNABLE_TOOLS: readonly string[] = DEFAULT_THINNABLE_TOOLS.filter(t => !PRUNE_PROTECTED_TOOLS.has(t));
+const PRUNE_PROTECTED_TOOLS: readonly string[] = ["read"];
 
 export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 	// 20% of context window — protects the last ~1–2 heavy turns regardless of model size.
 	protectFraction: 0.2,
 	minimumSavings: 5_000,
-	prunableTools: [...DEFAULT_PRUNABLE_TOOLS],
+	protectedTools: [...PRUNE_PROTECTED_TOOLS],
 };
 
 // Cap prevents runaway budget on large-context models (1M+).
-// Without this, 20% of 1M = 200K protected — more than an entire 128K context.
+// Without this, 20% of 1M = 200K protected — larger than the 80K cap itself.
 const MAX_PROTECT_TOKENS = 80_000;
 
 /**
- * Conservative fallback context window used when the active model's metadata is
- * unavailable. Matches the historical assumption for Claude Sonnet class models.
- * Exported so callers can pass `model?.contextWindow ?? 0` and let
- * `resolveProtectTokens` decide the fallback — avoiding magic numbers at call sites.
+ * Conservative fallback context window for models whose metadata is unavailable.
+ * 200K matches the minimum context size across current Anthropic, OpenAI, and Google
+ * frontier models. Callers pass `model?.contextWindow ?? 0` and let
+ * `resolveProtectTokens` substitute this fallback rather than producing a zero
+ * protection budget.
  */
-export const DEFAULT_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 export function resolveProtectTokens(config: PruneConfig, contextWindow: number): number {
 	// Treat 0/negative as "unknown" and fall back to the default. Without this
@@ -90,6 +98,7 @@ export function pruneToolOutputs(
 ): PruneResult {
 	// Compute once — the protection budget does not change across entries.
 	const protectTokens = resolveProtectTokens(config, contextWindow);
+	const protectedSet = new Set(config.protectedTools);
 
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
@@ -103,7 +112,9 @@ export function pruneToolOutputs(
 		if (!message) continue;
 
 		const tokens = estimateTokens(message as AgentMessage);
-		const isEligible = config.prunableTools.includes(message.toolName);
+		// Denylist: prune anything not explicitly protected. Unknown MCP /
+		// extension tools are prunable by default so large sessions can recover.
+		const isEligible = !protectedSet.has(message.toolName);
 
 		if (message.prunedAt !== undefined) {
 			accumulatedTokens += tokens;

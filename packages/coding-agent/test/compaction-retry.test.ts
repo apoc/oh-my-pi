@@ -178,6 +178,43 @@ describe("groupByUserTurn", () => {
 		expect(groups).toHaveLength(1);
 		expect(groups[0]).toHaveLength(messages.length);
 	});
+
+	it("treats bashExecution / branchSummary / custom as turn boundaries (aligned with findTurnStartIndex)", () => {
+		// Regression test: before the alignment fix, only `role === user` was a
+		// turn boundary. Sessions starting with `!bash` or a branch-switch marker
+		// collapsed into an undroppable prelude group, so the retry wrapper could
+		// not trim bash-heavy early history when summarization itself overflowed.
+		const bashExec = {
+			role: "bashExecution",
+			command: "ls",
+			output: "x",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: Date.now(),
+		} as unknown as AgentMessage;
+		const branchSum = {
+			role: "branchSummary",
+			summary: "prior branch",
+			fromId: "b1",
+			timestamp: Date.now(),
+		} as unknown as AgentMessage;
+		const customMsg = {
+			role: "custom",
+			customType: "ext",
+			content: "hello",
+			display: true,
+			timestamp: Date.now(),
+		} as unknown as AgentMessage;
+
+		const messages = [bashExec, assistant("a1"), branchSum, assistant("a2"), customMsg, assistant("a3")];
+
+		const groups = groupByUserTurn(messages);
+		expect(groups).toHaveLength(3);
+		expect(groups[0][0].role).toBe("bashExecution");
+		expect(groups[1][0].role).toBe("branchSummary");
+		expect(groups[2][0].role).toBe("custom");
+	});
 });
 
 // ============================================================================
