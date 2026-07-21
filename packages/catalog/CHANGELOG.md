@@ -50,6 +50,10 @@
 - Fixed a regression where the context window for openai-codex GPT-5.6 models (Luna, Sol, Terra) incorrectly fell back to 272,000 instead of preserving its 372,000 capacity.
 - Fixed Umans PAYG models incorrectly displaying as "Free" in /models by correctly sourcing their published per-token rates.
 - Fixed native moonshot/kimi-k3 capabilities and pricing, ensuring it correctly reflects its official pricing, 1M context window, image input support, reasoning capabilities, and 128k output token limit.
+### Fixed
+
+- Cursor discovery now advertises the native 1M/128k context window for GPT-5.6 (Sol, Terra, Luna) models when no bundled reference is found. Unlike GPT-5.4/5.5 where 1M is an opt-in MAX-mode window, GPT-5.6 ships 1M as its base — so `extendedContext` is not set and MAX-mode toggling has no effect on these models. Prevents the context bar and compaction logic from treating a 1M-context model as a 200k one.
+- Added `extendedContext` field to `ModelSpec<"cursor-agent">` (catalog `types.ts`) describing the opt-in larger context window unlocked by a provider-specific flag (`{ contextWindow; maxTokens; baseContextWindow; baseMaxTokens }`). Cursor discovery populates it for GPT-5.4/5.5 1M variants; non-cursor providers leave it unset.
 
 ## [17.0.1] - 2026-07-16
 
@@ -78,7 +82,6 @@
 - Fixed GitHub Copilot `mai-code-1-flash-picker` (and other `mai-*` models) to route through the `/responses` endpoint instead of `/chat/completions`, which rejected them with `400 unsupported_api_for_model` ([#5612](https://github.com/can1357/oh-my-pi/issues/5612)).
 - Extended the reasoning `streamIdleTimeoutMs` floor (300s) to native Kimi K2.7 Code (`kimi-k2.7-code` / `kimi-k2.7-code-highspeed`), which previously fell through to the 120s default and aborted on long reasoning turns ([#4836](https://github.com/can1357/oh-my-pi/issues/4836)).
 - Fixed GLM-5.x coding-plan streams via the OpenCode Go/Zen gateways (`opencode.ai/zen/…`) timing out with `OpenAI completions stream stalled while waiting for the next event` during slow plan-writing/reasoning phases. The 600s idle-timeout floor for GLM coding-plan SKUs was gated to the native Z.AI/Zhipu hosts only, so OpenCode-fronted GLM fell back to the 120s default watchdog. ([#4758](https://github.com/can1357/oh-my-pi/issues/4758))
-
 ## [16.5.2] - 2026-07-14
 
 ### Fixed

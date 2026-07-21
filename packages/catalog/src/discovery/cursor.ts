@@ -12,6 +12,13 @@ const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
+// Cursor's GPT-5.4 / GPT-5.5 1M variants stream up to 272k by default and
+// unlock the full 1M only when the request flips MAX mode. Advertise the base
+// (no-MAX) window on `contextWindow` and the MAX window via `extendedContext`.
+const CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW = 272_000;
+const CURSOR_ONE_MILLION_BASE_MAX_TOKENS = 64_000;
+const CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW = 1_000_000;
+const CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS = 128_000;
 
 /**
  * Model-id families whose native catalogs (anthropic, openai/openai-codex,
@@ -264,7 +271,7 @@ function normalizeCursorModels(
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function normalizeCursorModel(
+export function normalizeCursorModel(
 	model: unknown,
 	baseUrlOverride: string | undefined,
 	references: Map<string, ModelSpec<"cursor-agent">>,
@@ -285,16 +292,20 @@ function normalizeCursorModel(
 	const reasoning = Boolean(details.thinkingDetails) || reference?.reasoning === true;
 
 	if (reference) {
-		return {
+		return applyCursorDiscoveredModelPolicy({
 			...reference,
 			id,
 			name,
 			baseUrl: baseUrlOverride ?? reference.baseUrl,
 			reasoning,
 			cursorMaxMode: details.maxMode,
-		};
+		});
 	}
-	return {
+	// Reference-less discovery rows start from the generic Cursor defaults;
+	// `applyCursorDiscoveredModelPolicy` promotes MAX-capable (GPT-5.4/5.5) and
+	// native-1M (GPT-5.6) families to their real windows, so the correction lives
+	// in one place and also runs on cache reads / offline fallback.
+	const spec: ModelSpec<"cursor-agent"> = {
 		id,
 		name,
 		api: "cursor-agent",
@@ -307,6 +318,94 @@ function normalizeCursorModel(
 		maxTokens: DEFAULT_MAX_TOKENS,
 		cursorMaxMode: details.maxMode,
 	};
+	return applyCursorDiscoveredModelPolicy(spec);
+}
+
+export function isCursorAgent<TApi extends string>(model: Model<TApi>): model is Model<"cursor-agent"> & Model<TApi> {
+	return model.api === "cursor-agent";
+}
+
+export function isCursorMaxCapable<TApi extends string>(model: Model<TApi>): boolean {
+	return isCursorAgent(model) && !!model.extendedContext;
+}
+
+export function applyCursorDiscoveredModelPolicy<
+	T extends Pick<Model<"cursor-agent">, "id" | "contextWindow" | "maxTokens" | "extendedContext">,
+>(model: T): T {
+	if (/\bgpt-5\.6\b/.test(model.id)) {
+		// GPT-5.6 (Sol/Terra/Luna) ship 1M/128k as their native base window with
+		// no MAX-mode unlock. Correct only the values we know are wrong — the
+		// generic discovery default or null (stale static/cache rows written
+		// before this family was recognized) — and never set `extendedContext`,
+		// since there is no larger window to gate.
+		const contextWindow =
+			model.contextWindow == null || model.contextWindow === DEFAULT_CONTEXT_WINDOW
+				? CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW
+				: model.contextWindow;
+		const maxTokens =
+			model.maxTokens == null || model.maxTokens === DEFAULT_MAX_TOKENS
+				? CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS
+				: model.maxTokens;
+		if (
+			model.contextWindow === contextWindow &&
+			model.maxTokens === maxTokens &&
+			model.extendedContext === undefined
+		) {
+			return model;
+		}
+		return { ...model, contextWindow, maxTokens, extendedContext: undefined };
+	}
+	if (!isCursorMaxCapableModel(model)) {
+		return model;
+	}
+	// Derive the base (no-MAX) window. Only correct the two values we know are
+	// wrong: the generic discovery default, stale static/cache entries that
+	// advertised the 1M MAX window as the normal context window, and null
+	// (absent from models.dev / stale cache). Any other explicit window is
+	// preserved as the real base so a future Cursor variant shipping a different
+	// base isn't silently clobbered to 272k.
+	const baseContextWindow =
+		model.contextWindow == null ||
+		model.contextWindow === DEFAULT_CONTEXT_WINDOW ||
+		model.contextWindow === CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW
+			? CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW
+			: model.contextWindow;
+	const baseMaxTokens =
+		model.maxTokens == null ||
+		model.maxTokens === DEFAULT_MAX_TOKENS ||
+		model.maxTokens === CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS
+			? CURSOR_ONE_MILLION_BASE_MAX_TOKENS
+			: model.maxTokens;
+	// Already correctly decorated — return the same reference so repeated calls
+	// (e.g. `#applyRuntimeProviderOverrides` on every registry mutation, or
+	// `modelPostProcess` on every resolveProviderModels call) don't allocate.
+	if (
+		model.contextWindow === baseContextWindow &&
+		model.maxTokens === baseMaxTokens &&
+		model.extendedContext !== undefined &&
+		model.extendedContext.baseContextWindow === baseContextWindow &&
+		model.extendedContext.baseMaxTokens === baseMaxTokens
+	) {
+		return model;
+	}
+	return {
+		...model,
+		contextWindow: baseContextWindow,
+		maxTokens: baseMaxTokens,
+		extendedContext: {
+			contextWindow: CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW,
+			maxTokens: CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS,
+			baseContextWindow,
+			baseMaxTokens,
+		},
+	};
+}
+
+// All GPT-5.4 and GPT-5.5 cursor-agent models support MAX mode (272k base,
+// 1M when max_mode=true). The family is identified purely by model id —
+// Cursor no longer advertises "1M" in display names.
+function isCursorMaxCapableModel(model: Pick<Model<"cursor-agent">, "id">): boolean {
+	return /\bgpt-5\.(?:4|5)\b/.test(model.id);
 }
 
 function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string): string {

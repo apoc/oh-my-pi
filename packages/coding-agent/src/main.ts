@@ -9,6 +9,7 @@ import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { isCursorAgent } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import {
 	$env,
 	directoryExists,
@@ -34,6 +35,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	formatModelSelectorValue,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -893,9 +895,9 @@ export async function buildSessionOptions(
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
-				// Model not found in built-in registry — defer resolution to after extensions load
-				// (extensions may register additional providers/models via registerProvider)
+			if (!parsed.provider) {
+				// Model not found in the initial registry. Defer resolution until after
+				// extension/dynamic providers load; selector flags like :max are parsed there.
 				options.modelPattern = parsed.model;
 			} else {
 				process.stderr.write(`${chalk.red(resolved.error)}\n`);
@@ -903,8 +905,13 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			options.cursorMaxMode = isCursorAgent(resolved.model) ? resolved.maxMode : undefined;
 			activeSettings.overrideModelRoles({
-				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+				default: formatModelSelectorValue(
+					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					undefined,
+					isCursorAgent(resolved.model) ? resolved.maxMode : undefined,
+				),
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
@@ -931,6 +938,7 @@ export async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
+				options.cursorMaxMode = rememberedModel.maxMode;
 				// Apply explicit thinking level from remembered role value
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
@@ -938,6 +946,18 @@ export async function buildSessionOptions(
 			}
 		}
 		if (!options.model) options.model = scopedModels[0].model;
+		if (options.cursorMaxMode === undefined) {
+			const m = options.model;
+			// `addScopedModel` (model-resolver.ts) dedupes scoped entries by model
+			// identity, keeping only the first pattern's value — so at most one
+			// scoped entry can ever name this model. Its maxMode flag (if any) is
+			// authoritative; there is no "conflicting :max variants" case to
+			// reconcile here.
+			const match = m
+				? scopedModels.find(sm => sm.model.provider === m.provider && sm.model.id === m.id)
+				: undefined;
+			options.cursorMaxMode = match?.maxMode;
+		}
 	}
 
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
@@ -1005,6 +1025,7 @@ export async function buildSessionOptions(
 			thinkingLevel: scopedModel.explicitThinkingLevel
 				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
 				: defaultThinkingLevel,
+			maxMode: scopedModel.maxMode,
 		}));
 	}
 

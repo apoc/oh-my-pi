@@ -1323,6 +1323,7 @@ async function streamAssistantResponse(
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
+	const effectiveCursorMaxMode = config.getCursorMaxMode?.() ?? config.cursorMaxMode;
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
@@ -1375,6 +1376,7 @@ async function streamAssistantResponse(
 				toolChoice: effectiveToolChoice,
 				reasoning: effectiveReasoning,
 				disableReasoning: effectiveDisableReasoning,
+				cursorMaxMode: effectiveCursorMaxMode,
 				temperature: effectiveTemperature,
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,

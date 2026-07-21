@@ -15,11 +15,19 @@
  *   C3  isTtsrAbortPending = true + aborted
  *       → `updateContent` receives a message with `stopReason: "stop"`;
  *         `errorMessage` is NOT set (TTSR existing behavior unchanged).
+ *
+ * Implementation note: `AssistantMessageComponent.prototype.updateContent` is
+ * replaced with a spy so the TUI rendering stack (theme, settings, markdown) is
+ * never invoked. This makes `#lastMessage` stay unset, which prevents the
+ * indirect re-calls from `setContentRange` / `setIsFinalSegment` / `setUsageInfo`.
+ * The only explicit calls are: (0) from `startMessage`, (1) from `finalize` — the
+ * latter carries the `renderableMessage` the tests assert on.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -46,15 +54,8 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): Assist
 	};
 }
 
-function createFixture(opts: {
-	streamingMessage: AssistantMessage;
-	isTtsrAbortPending?: boolean;
-	retryAttempt?: number;
-}) {
-	const updateContent = vi.fn();
-	const setComplete = vi.fn();
-	const markTranscriptBlockFinalized = vi.fn();
-	const streamingComponent = { updateContent, setComplete, markTranscriptBlockFinalized };
+function createFixture(opts: { isTtsrAbortPending?: boolean; retryAttempt?: number }) {
+	const chatContainer = { addChild: vi.fn(), removeChild: vi.fn() };
 	const requestRender = vi.fn();
 
 	const ctxBase = {
@@ -63,9 +64,12 @@ function createFixture(opts: {
 		ui: { requestRender },
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
-		streamingComponent,
-		streamingMessage: opts.streamingMessage,
+		chatContainer,
+		hideThinkingBlock: false,
+		streamingComponent: undefined,
+		streamingMessage: undefined,
 		pendingTools: new Map(),
+		settings: { get: () => false },
 		noteDisplayableThinkingContent: vi.fn(() => false),
 	};
 	const sessionMock = {
@@ -76,11 +80,32 @@ function createFixture(opts: {
 		...ctxBase,
 		session: sessionMock,
 		viewSession: sessionMock,
-		clearTransientSessionUi: () => {},
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
-	return { controller, ctx, streamingComponent, requestRender };
+	return { controller, ctx };
+}
+
+/**
+ * Initialise the segment builder (via `message_start`) with rendering mocked out,
+ * then return a spy that captures only the calls made during `message_end`.
+ */
+async function initStream(
+	controller: EventController,
+	_ctx: InteractiveModeContext,
+	message: AssistantMessage,
+): Promise<Mock<(message: AssistantMessage) => void>> {
+	// Replace updateContent on the prototype so AssistantMessageComponent can be
+	// constructed and `startMessage` can run without the theme/settings stack.
+	// Because `#lastMessage` is never set by this mock, the indirect re-calls from
+	// setContentRange / setIsFinalSegment / setUsageInfo are suppressed.
+	const spy = vi.spyOn(AssistantMessageComponent.prototype, "updateContent").mockImplementation(() => {});
+	await controller.handleEvent({
+		type: "message_start",
+		message,
+	} as Extract<AgentSessionEvent, { type: "message_start" }>);
+	spy.mockClear(); // discard the call from startMessage — only message_end calls matter
+	return spy;
 }
 
 describe("EventController #handleMessageEnd abort labeling", () => {
@@ -89,6 +114,7 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 	});
 	afterEach(() => {
 		resetSettingsForTest();
+		vi.restoreAllMocks();
 	});
 
 	it("C1: SILENT_ABORT_MARKER + aborted -> updateContent stopReason='stop', errorMessage NOT overwritten", async () => {
@@ -96,27 +122,22 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 			stopReason: "aborted",
 			errorMessage: SILENT_ABORT_MARKER,
 		});
-		const { controller, ctx, streamingComponent } = createFixture({ streamingMessage: message });
+		const { controller, ctx } = createFixture({});
+		const updateContentSpy = await initStream(controller, ctx, message);
 
-		const event: Extract<AgentSessionEvent, { type: "message_end" }> = {
-			type: "message_end",
-			message,
-		};
-		await controller.handleEvent(event);
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
 
-		// `updateContent` was called once with a copy whose `stopReason` is "stop".
-		// The marker on errorMessage is preserved unchanged on that display copy.
-		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
-		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		// `finalize` calls `updateContent` exactly once with the renderable copy.
+		expect(updateContentSpy).toHaveBeenCalledTimes(1);
+		const arg = updateContentSpy.mock.calls[0]![0] as AssistantMessage;
 		expect(arg.stopReason).toBe("stop");
 		expect(arg.errorMessage).toBe(SILENT_ABORT_MARKER);
 
-		// Per the silent-abort contract: the controller must NOT overwrite errorMessage
-		// with the operator-facing string. The marker is what drives replay-side
-		// suppression, so it has to survive on the persisted message.
+		// The controller must NOT overwrite errorMessage on the persisted message.
 		expect(message.errorMessage).toBe(SILENT_ABORT_MARKER);
-		// And the streamingMessage on ctx was cleared after the handler ran (lifecycle
-		// guard — kept for completeness).
 		expect(ctx.streamingMessage).toBeUndefined();
 	});
 
@@ -126,32 +147,34 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 			errorMessage: undefined,
 			errorId: AIError.create(AIError.Flag.SilentAbort),
 		});
-		const { controller, streamingComponent } = createFixture({ streamingMessage: message });
+		const { controller, ctx } = createFixture({});
+		const updateContentSpy = await initStream(controller, ctx, message);
 
-		await controller.handleEvent({ type: "message_end", message });
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
 
 		expect(message.errorMessage).toBeUndefined();
-		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
-		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		expect(updateContentSpy).toHaveBeenCalledTimes(1);
+		const arg = updateContentSpy.mock.calls[0]![0] as AssistantMessage;
 		expect(arg.stopReason).toBe("stop");
 		expect(arg.errorMessage).toBeUndefined();
 	});
 
 	it("C2: errorMessage undefined (no threaded reason) + aborted + no TTSR -> errorMessage='Operation aborted', updateContent receives original ref", async () => {
 		const message = makeAssistantMessage({ stopReason: "aborted", errorMessage: undefined });
-		const { controller, streamingComponent } = createFixture({
-			streamingMessage: message,
-			isTtsrAbortPending: false,
-		});
+		const { controller, ctx } = createFixture({ isTtsrAbortPending: false });
+		const updateContentSpy = await initStream(controller, ctx, message);
 
 		await controller.handleEvent({ type: "message_end", message });
 
 		// No threaded reason -> generic operator-facing label stamped in-place.
 		expect(message.errorMessage).toBe("Operation aborted");
 
-		// `updateContent` saw the original streaming message ref (no `{...streamingMessage, stopReason:"stop"}` spread).
-		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
-		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		// `finalize` receives the original ref — no stopReason-cleared copy.
+		expect(updateContentSpy).toHaveBeenCalledTimes(1);
+		const arg = updateContentSpy.mock.calls[0]![0] as AssistantMessage;
 		expect(arg).toBe(message);
 		expect(arg.stopReason).toBe("aborted");
 		expect(arg.errorMessage).toBe("Operation aborted");
@@ -159,35 +182,29 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 
 	it("C2b: threaded user-interrupt reason on aborted message is preserved, not replaced by the generic label", async () => {
 		const message = makeAssistantMessage({ stopReason: "aborted", errorMessage: USER_INTERRUPT_LABEL });
-		const { controller, streamingComponent } = createFixture({
-			streamingMessage: message,
-			isTtsrAbortPending: false,
-		});
+		const { controller, ctx } = createFixture({ isTtsrAbortPending: false });
+		const updateContentSpy = await initStream(controller, ctx, message);
 
 		await controller.handleEvent({ type: "message_end", message });
 
 		// The Esc-interrupt reason rode the AbortController onto errorMessage; the
 		// controller must surface it verbatim instead of overwriting with "Operation aborted".
 		expect(message.errorMessage).toBe(USER_INTERRUPT_LABEL);
-		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		const arg = updateContentSpy.mock.calls[0]![0] as AssistantMessage;
 		expect(arg.errorMessage).toBe(USER_INTERRUPT_LABEL);
 		expect(arg.stopReason).toBe("aborted");
 	});
 
 	it("C3: isTtsrAbortPending=true + aborted -> updateContent stopReason='stop', errorMessage NOT set", async () => {
 		const message = makeAssistantMessage({ stopReason: "aborted", errorMessage: undefined });
-		const { controller, streamingComponent } = createFixture({
-			streamingMessage: message,
-			isTtsrAbortPending: true,
-		});
+		const { controller, ctx } = createFixture({ isTtsrAbortPending: true });
+		const updateContentSpy = await initStream(controller, ctx, message);
 
 		await controller.handleEvent({ type: "message_end", message });
 
-		// TTSR keeps its existing flag-only render path — `errorMessage` stays undefined,
-		// and the display copy gets `stopReason: "stop"`.
 		expect(message.errorMessage).toBeUndefined();
-		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
-		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		expect(updateContentSpy).toHaveBeenCalledTimes(1);
+		const arg = updateContentSpy.mock.calls[0]![0] as AssistantMessage;
 		expect(arg.stopReason).toBe("stop");
 		expect(arg.errorMessage).toBeUndefined();
 	});

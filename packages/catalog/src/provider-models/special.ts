@@ -1,5 +1,6 @@
 import { once } from "@oh-my-pi/pi-utils";
 import { fetchCodexModels } from "../discovery/codex";
+import { applyCursorDiscoveredModelPolicy, fetchCursorUsableModels } from "../discovery/cursor";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
@@ -51,18 +52,18 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	return {
 		providerId: "cursor",
 		cacheProviderId: CURSOR_CACHE_PROVIDER_ID,
+		// Apply MAX-mode metadata to every resolved model regardless of source so
+		// a stale cache written before the policy existed still sees extendedContext.
+		modelPostProcess: applyCursorDiscoveredModelPolicy,
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {
-						const { fetchCursorUsableModels } = await cursorDiscovery();
 						return fetchCursorUsableModels({ apiKey, baseUrl, clientVersion });
 					},
 				}
 			: undefined),
 	};
 }
-
-const cursorDiscovery = once(() => import("../discovery/cursor"));
 
 // ---------------------------------------------------------------------------
 // GitLab Duo Workflow

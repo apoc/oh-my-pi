@@ -18,6 +18,10 @@ const FIXTURE_MODEL_IDS = [
 	"claude-opus-4-8-99999999",
 	"gpt-5.5-codex-20991231",
 	"gemini-4-pro-exp",
+	// GPT-5.6 (Sol, Terra, Luna) — 1M/128k native, no extendedContext.
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 	// Reference-less ids from text-only families.
 	"composer-3",
 	"grok-code-fast-2",
@@ -98,6 +102,24 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(spec?.contextWindow).toBe(200_000);
 		expect(spec?.maxTokens).toBe(64_000);
 		expect(spec?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
+	it("advertises 1M/128k native context for GPT-5.6 models without extendedContext", async () => {
+		const byId = await discover();
+		for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+			const spec = byId.get(id);
+			expect(spec?.contextWindow).toBe(1_000_000);
+			expect(spec?.maxTokens).toBe(128_000);
+			expect(spec?.extendedContext).toBeUndefined();
+		}
+	});
+
+	it("does not apply 5.6 native-window rule to out-of-family ids", async () => {
+		const byId = await discover();
+		// gpt-5.5 gets the 272k MAX-capable base, not 1M native.
+		expect(byId.get("gpt-5.5-codex-20991231")?.contextWindow).toBe(272_000);
+		// A plain unknown model falls back to 200k.
+		expect(byId.get("claude-opus-4-8-99999999")?.contextWindow).toBe(200_000);
 	});
 });
 

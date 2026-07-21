@@ -10,6 +10,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	Api,
 	Context,
 	CredentialDisabledEvent,
 	Message,
@@ -22,6 +23,7 @@ import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isCursorAgent } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
@@ -42,8 +44,9 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	extractExplicitMaxMode,
+	formatModelSelector,
 	formatModelSelectorValue,
-	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelPattern,
@@ -392,10 +395,12 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/** Cursor MAX-mode selector state for explicit Cursor models (used by task/subagent sessions). */
+	cursorMaxMode?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
-	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
@@ -1233,9 +1238,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
-	if (!options.modelRegistry) {
-		modelRegistry.refreshInBackground();
-	}
+	const modelRefreshPromise = options.modelRegistry ? undefined : modelRegistry.refreshInBackground();
 	// Kick off workspace tree discovery early. The native workspace scan returns
 	// both the rendered-tree input and the AGENTS.md directory-context index, so
 	// startup does not perform a second recursive filesystem search. Subagents
@@ -1339,6 +1342,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// key is resolved lazily per request via ModelRegistry.resolver.
 	const hasModelAuth = (candidate: Model): boolean => modelRegistry.hasConfiguredAuth(candidate);
 
+	// Heavier async check for paths where resolving the real key (network round-trip
+	// for OAuth refresh / command-backed keys) is acceptable — the settings-default
+	// fallback below only runs once at startup, off the resume hot path `hasModelAuth` protects.
+	const hasModelApiKey = async (candidate: Model): Promise<boolean> => !!(await modelRegistry.getApiKey(candidate));
+
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
 	let obfuscator: SecretObfuscator | undefined;
@@ -1379,14 +1387,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const allowedModels = await logger.time("resolveAllowedModels", () =>
 		resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
 	);
-	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
-		resolveModelRoleValue(settings.getModelRole("default"), allowedModels, {
+	const resolveDefaultRoleSpec = (roleValue: string | undefined) => {
+		// Use getAll() (not getAvailable()) so hidden Cursor models that have an explicit default
+		// role can be restored — see the #1022 pattern: getAvailable()'s auth-availability check
+		// can filter out a model whose credential state hasn't caught up yet, and getAll()
+		// intentionally bypasses that for this fallback. `disabledProviders` is a different,
+		// unconditional block (never bypassed regardless of credentials — see
+		// ModelRegistry#createAvailabilityCheck / docs/providers.md), so it is filtered out of
+		// the getAll() set explicitly rather than by routing through the auth-filtered
+		// allowedModels. When enabledModels is configured we fall back to the already-resolved
+		// allow-list instead, so that scope stays enforced too.
+		const enabledPatterns = settings.get("enabledModels");
+		if (enabledPatterns?.length) {
+			return resolveModelRoleValue(roleValue, allowedModels, { settings, matchPreferences: modelMatchPreferences });
+		}
+		const disabledProviders = new Set(settings.get("disabledProviders"));
+		const candidates = disabledProviders.size
+			? modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider))
+			: modelRegistry.getAll();
+		return resolveModelRoleValue(roleValue, candidates, {
 			settings,
 			matchPreferences: modelMatchPreferences,
-		}),
+		});
+	};
+	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
+		resolveDefaultRoleSpec(settings.getModelRole("default")),
 	);
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
+	let restoredCursorMaxMode: boolean | undefined;
 	// Identify session model strings to restore in fallback order. We do an
 	// initial pass here so model-dependent setup (thinking-level resolution,
 	// host preconnect) can use the restored model; extension-registered
@@ -1417,7 +1446,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (restoredModel && hasModelAuth(restoredModel)) {
 					model = restoredModel;
 					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+					if (isCursorAgent(restoredModel)) {
+						// Record MAX state explicitly (including `false`) so a session
+						// saved with MAX off short-circuits the default-role `:max`
+						// fallback below instead of leaving `restoredCursorMaxMode`
+						// undefined and silently re-enabling MAX on resume.
+						restoredCursorMaxMode = parsedModel.maxMode === true;
+						restoredSessionThinkingLevel = parsedModel.maxMode ? undefined : parsedModel.thinkingLevel;
+					} else {
+						restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+					}
 					break;
 				}
 				failedSessionModel ??= sessionModelStr;
@@ -1432,11 +1470,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Skip settings fallback when an explicit model was requested.
 	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
 		const settingsDefaultModel = defaultRoleSpec.model;
-		logger.time("resolveSettingsDefaultModel", () => {
-			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
-			// so re-validating auth here just repeats the expensive lookup path.
-			model = settingsDefaultModel;
-		});
+		const settingsDefaultHasApiKey = await hasModelApiKey(settingsDefaultModel);
+		if (settingsDefaultHasApiKey) {
+			logger.time("resolveSettingsDefaultModel", () => {
+				model = settingsDefaultModel;
+			});
+		}
 	}
 
 	const taskDepth = options.taskDepth ?? 0;
@@ -1488,6 +1527,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// api.anthropic.com from a residential IP. Every mode benefits
 		// (interactive, print, rpc, acp).
 		preconnectModelHost(model.baseUrl);
+	}
+
+	// Resolve Cursor MAX mode from the default role selector (e.g.
+	// `cursor/gpt-5.5-extra-high:max`). Only relevant for cursor-agent models;
+	// non-cursor providers ignore the agent's max-mode flag.
+	let cursorMaxMode = false;
+	if (model && isCursorAgent(model)) {
+		cursorMaxMode =
+			options.cursorMaxMode ??
+			restoredCursorMaxMode ??
+			(!hasExplicitModel && extractExplicitMaxMode(settings.getModelRole("default"), settings) === true);
 	}
 
 	let skills: Skill[];
@@ -1632,10 +1682,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
 	try {
+		const formatActiveModelString = (activeModel: Model): string =>
+			formatModelSelector(activeModel, undefined, agent?.getCursorMaxMode() ?? cursorMaxMode);
 		const getActiveModelString = (): string | undefined => {
 			const activeModel = agent?.state.model;
-			if (activeModel) return formatModelString(activeModel);
-			if (model) return formatModelString(model);
+			if (activeModel) return formatActiveModelString(activeModel);
+			if (model) return formatActiveModelString(model);
 			return undefined;
 		};
 		// Per-path mutation counter shared across edit/write tools. Late-diagnostics
@@ -1693,7 +1745,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			getSessionSpawns: () => options.spawns ?? "*",
-			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
+			getModelString: () => (hasExplicitModel && model ? formatActiveModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
@@ -2029,6 +2081,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		});
 
+		const acceptResolvedModel = (resolved: Model<Api> | undefined, specMaxMode: boolean | undefined): boolean => {
+			if (!resolved) return false;
+			model = resolved;
+			modelFallbackMessage = undefined;
+			if (isCursorAgent(resolved)) {
+				cursorMaxMode = specMaxMode === true;
+			} else {
+				cursorMaxMode = false;
+			}
+			return true;
+		};
+
 		// Retry session-model candidates now that extension providers are
 		// registered. The initial restore runs before extensions load, so a role
 		// model supplied by an extension would have either fallen back to the
@@ -2048,10 +2112,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (!parsedModel) continue;
 				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
 				if (restoredModel && hasModelAuth(restoredModel)) {
-					model = restoredModel;
-					modelFallbackMessage = undefined;
+					acceptResolvedModel(restoredModel, parsedModel.maxMode);
 					restoredSessionModelIndex = i;
-					restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+					restoredSessionThinkingLevel =
+						isCursorAgent(restoredModel) && parsedModel.maxMode ? undefined : parsedModel.thinkingLevel;
 					// Recompute thinking-level from scratch against the reclaimed
 					// model: any value derived from the earlier fallback model's
 					// `thinking.defaultLevel` must not become sticky.
@@ -2092,6 +2156,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							formatModelSelectorValue(
 								resolved.selector ?? formatModelStringWithRouting(resolved.model),
 								resolved.thinkingLevel,
+								resolved.maxMode,
 							),
 						];
 					}
@@ -2100,11 +2165,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			);
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
 				const pattern = expandedModelPatterns[patternIndex];
-				const primary = parseModelPattern(pattern, availableModels, matchPreferences);
+				const primary = parseModelPattern(pattern, availableModels, matchPreferences, {
+					allowInvalidThinkingSelectorFallback: false,
+				});
 				if (!primary.model) continue;
 				let selectedModel = primary.model;
 				let selectedThinkingLevel = primary.thinkingLevel;
 				let selectedExplicitThinkingLevel = primary.explicitThinkingLevel;
+				let selectedMaxMode = primary.maxMode;
 				let authFallbackUsed = false;
 				if (options.modelPatternAuthFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
@@ -2120,6 +2188,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								selectedModel = fallback.model;
 								selectedThinkingLevel = fallback.thinkingLevel;
 								selectedExplicitThinkingLevel = fallback.explicitThinkingLevel;
+								selectedMaxMode = fallback.maxMode;
 								authFallbackUsed = true;
 							}
 						}
@@ -2129,6 +2198,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					const primarySelector = formatModelSelectorValue(
 						formatModelStringWithRouting(primary.model),
 						primary.thinkingLevel,
+						primary.maxMode,
 					);
 					const seenSelectors = new Set<string>([primarySelector]);
 					const fallbackSelectors: string[] = [];
@@ -2138,6 +2208,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						const fallbackSelector = formatModelSelectorValue(
 							formatModelStringWithRouting(fallback.model),
 							fallback.thinkingLevel,
+							fallback.maxMode,
 						);
 						if (seenSelectors.has(fallbackSelector)) continue;
 						seenSelectors.add(fallbackSelector);
@@ -2173,8 +2244,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						settings.override("retry.fallbackChains", fallbackChains);
 					}
 				}
-				model = selectedModel;
-				modelFallbackMessage = undefined;
+				acceptResolvedModel(selectedModel, selectedMaxMode);
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
 				}
@@ -2196,6 +2266,47 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
 				modelFallbackMessage = `Model ${requested} not found`;
 			}
+		}
+
+		const defaultModelStr = hasExistingSession ? existingSession.models.default : undefined;
+		const tryApplyDefaultRoleModel = async (): Promise<boolean> => {
+			const roleValue = hasExistingSession && defaultModelStr ? defaultModelStr : settings.getModelRole("default");
+			const spec = resolveDefaultRoleSpec(roleValue);
+			if (!spec.model || !(await hasModelApiKey(spec.model))) return false;
+			acceptResolvedModel(spec.model, spec.maxMode);
+			// Recompute thinking from scratch against the reclaimed model so the
+			// agent/session start with this model's own defaults (auto-aware).
+			thinkingLevel = pickInitialThinkingLevel(spec.model);
+			autoThinking = thinkingLevel === AUTO_THINKING;
+			effectiveThinkingLevel = thinkingLevel === AUTO_THINKING ? undefined : thinkingLevel;
+			effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+				autoThinking
+					? resolveProvisionalAutoLevel(spec.model)
+					: resolveThinkingLevelForModel(spec.model, effectiveThinkingLevel),
+			);
+			preconnectModelHost(spec.model.baseUrl);
+			return true;
+		};
+
+		// Default/session selectors are first resolved before extensions load so startup can proceed
+		// in parallel. Retry after extension providers register; otherwise a late Cursor/canonical
+		// default can fall through to the generic first-authenticated-model fallback.
+		if (!hasExplicitModel && !model) {
+			await tryApplyDefaultRoleModel();
+		}
+
+		// Some provider models (notably Cursor's live catalog) only exist after a
+		// model refresh. If the default still has not resolved, refresh before
+		// falling back across providers.
+		if (!hasExplicitModel && !model) {
+			try {
+				await (modelRefreshPromise ?? modelRegistry.refresh());
+			} catch (error) {
+				logger.warn("Model refresh before default fallback failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			await tryApplyDefaultRoleModel();
 		}
 
 		// Fall back to first available model with a valid API key, honoring the
@@ -2397,6 +2508,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
 		}
 		if (model?.provider === "cursor") {
+			// Cursor mutates files via its own server-side exec protocol, not the
+			// diff-based `edit` tool; advertising `edit` reintroduces malformed-edit
+			// failures. Keep `write` (full-file) as the only local mutation tool.
 			toolRegistry.delete("edit");
 			builtInRegistryToolNames.delete("edit");
 		}
@@ -2850,6 +2964,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: undefined
 				: undefined,
 		});
+		agent.setCursorMaxMode(model, cursorMaxMode);
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
@@ -2859,7 +2974,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(formatModelSelector(model, undefined, cursorMaxMode));
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto

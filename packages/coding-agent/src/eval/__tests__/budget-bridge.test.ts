@@ -34,6 +34,8 @@ function usage(output: number): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		latestCursorTotalTokens: 0,
+		cursorSummedTokens: 0,
 	};
 }
 

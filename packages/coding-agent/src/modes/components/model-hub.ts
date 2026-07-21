@@ -12,6 +12,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { isCursorMaxCapable } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
@@ -86,6 +87,7 @@ export interface ModelHubCallbacks {
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		selector: string,
 		scope?: ModelRoleSelectionScope,
+		maxMode?: boolean,
 	) => void;
 	/** Clear a configured role back to auto-selection. */
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
@@ -120,20 +122,21 @@ interface StripChip {
 	/** Pre-styled label body (without selection decoration). */
 	styled: string;
 	role?: string;
-	action: "assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking";
+	action: "assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking" | "max";
 	thinkingLevel?: ConfiguredThinkingLevel;
+	maxMode?: boolean;
 	scope?: ModelRoleSelectionScope;
 }
 
 type StripState =
 	| {
-			kind: "role" | "scope" | "thinking";
+			kind: "role" | "scope" | "thinking" | "max";
 			item: ModelBrowserItem;
 			role?: string;
 			scope?: ModelRoleSelectionScope;
 			chips: StripChip[];
 			index: number;
-			/** Where to land when a scope or thinking strip closes. */
+			/** Where to land when a scope, thinking, or MAX strip closes. */
 			returnToRoles: boolean;
 	  }
 	| {
@@ -780,7 +783,18 @@ export class ModelHubComponent implements Component {
 		return resolved.explicitThinkingLevel ? (resolved.thinkingLevel ?? ThinkingLevel.Inherit) : ThinkingLevel.Inherit;
 	}
 
-	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
+	#maxModeForScope(role: string, scope?: ModelRoleSelectionScope): boolean {
+		if (scope !== undefined) return this.#roleForScope(role, scope).maxMode === true;
+		const allModels =
+			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.#registry.getAll();
+		return (
+			resolveModelRoleValue(this.#settings.getModelRole(role), allModels, {
+				settings: this.#settings,
+			}).maxMode === true
+		);
+	}
+
+	/** Persist `role → item`, preserving supported flags, then open the model-specific option strip. */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.get("modelRoleStorage") === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
@@ -796,9 +810,14 @@ export class ModelHubComponent implements Component {
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
-		this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
+		const maxMode = isCursorMaxCapable(item.model) ? this.#maxModeForScope(role, scope) : false;
+		this.#callbacks.onAssign(item.model, role, level, item.selector, scope, maxMode);
 		this.#refreshAfterMutation();
-		this.#openThinkingStrip(item, role, returnToRoles, scope);
+		if (isCursorMaxCapable(item.model)) {
+			this.#openMaxStrip(item, role, level, maxMode, returnToRoles, scope);
+		} else {
+			this.#openThinkingStrip(item, role, returnToRoles, scope);
+		}
 	}
 
 	#unassignRole(role: string): void {
@@ -901,11 +920,46 @@ export class ModelHubComponent implements Component {
 		};
 	}
 
+	#openMaxStrip(
+		item: ModelBrowserItem,
+		role: string,
+		thinkingLevel: ConfiguredThinkingLevel,
+		current: boolean,
+		returnToRoles: boolean,
+		scope?: ModelRoleSelectionScope,
+	): void {
+		const chips: StripChip[] = [
+			{
+				label: "MAX off",
+				styled: theme.fg("muted", "MAX off"),
+				action: "max",
+				thinkingLevel,
+				maxMode: false,
+			},
+			{
+				label: "MAX on",
+				styled: theme.fg("warning", "MAX on"),
+				action: "max",
+				thinkingLevel,
+				maxMode: true,
+			},
+		];
+		this.#strip = {
+			kind: "max",
+			item,
+			role,
+			scope,
+			chips,
+			index: current ? 1 : 0,
+			returnToRoles,
+		};
+	}
+
 	#closeStrip(): void {
 		const strip = this.#strip;
 		this.#strip = null;
 		this.#chipRanges = [];
-		if ((strip?.kind === "scope" || strip?.kind === "thinking") && strip.returnToRoles) {
+		if ((strip?.kind === "scope" || strip?.kind === "thinking" || strip?.kind === "max") && strip.returnToRoles) {
 			this.#setActiveEntry("roles");
 			this.#focus = "list";
 		}
@@ -954,12 +1008,30 @@ export class ModelHubComponent implements Component {
 				return;
 			case "thinking":
 				if (strip.role && chip.thinkingLevel !== undefined) {
+					const maxMode = isCursorMaxCapable(strip.item.model)
+						? this.#maxModeForScope(strip.role, strip.scope)
+						: false;
 					this.#callbacks.onAssign(
 						strip.item.model,
 						strip.role,
 						chip.thinkingLevel,
 						strip.item.selector,
 						strip.scope,
+						maxMode,
+					);
+					this.#refreshAfterMutation();
+				}
+				this.#closeStrip();
+				return;
+			case "max":
+				if (strip.role && chip.maxMode !== undefined) {
+					this.#callbacks.onAssign(
+						strip.item.model,
+						strip.role,
+						chip.thinkingLevel,
+						strip.item.selector,
+						strip.scope,
+						chip.maxMode,
 					);
 					this.#refreshAfterMutation();
 				}
@@ -1868,6 +1940,7 @@ export class ModelHubComponent implements Component {
 			}
 			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
 			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
+			if (strip.kind === "max") return "←/→ MAX mode · Enter apply · Esc keep";
 			return "←/→ thinking level · Enter apply · Esc keep";
 		}
 		if (this.#assigning !== null) {

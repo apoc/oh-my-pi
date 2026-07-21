@@ -43,6 +43,27 @@ function makeModel(provider: string, id: string, contextWindow = 128_000): Model
 	});
 }
 
+function makeCursorMaxModel(): Model {
+	return buildModel({
+		id: "gpt-5.5-extra-high",
+		name: "GPT-5.5 Extra High",
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 64_000,
+		extendedContext: {
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			baseContextWindow: 272_000,
+			baseMaxTokens: 64_000,
+		},
+	});
+}
+
 let testTheme = await getThemeByName("dark");
 
 function installTestTheme(): void {
@@ -383,6 +404,51 @@ describe("ModelHub", () => {
 			expect(thinking).toContain("xhigh");
 			expect(thinking).not.toContain("max");
 		});
+		test("Cursor MAX-capable assignments open a MAX toggle and forward the selected mode", () => {
+			const model = makeCursorMaxModel();
+			const { hub, onAssign } = createHub({ models: [model], scoped: true });
+			installTestTheme();
+
+			hub.handleInput("\n");
+			hub.handleInput("\n"); // assign to default (first chip)
+
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[5]).toBe(false);
+			const maxStrip = footerLine(hub.render(220));
+			expect(maxStrip).toContain("MAX off");
+			expect(maxStrip).toContain("MAX on");
+			expect(maxStrip).not.toContain("inherit");
+
+			hub.handleInput("\x1b[C"); // MAX off → MAX on.
+			hub.handleInput("\n");
+
+			expect(onAssign).toHaveBeenCalledTimes(2);
+			const enabledCall = onAssign.mock.calls[1];
+			expect(enabledCall?.[0]).toBe(model);
+			expect(enabledCall?.[1]).toBe("default");
+			expect(enabledCall?.[2]).toBe(ThinkingLevel.Inherit);
+			expect(enabledCall?.[4]).toBe("global");
+			expect(enabledCall?.[5]).toBe(true);
+		});
+		test("thinking edits preserve MAX for non-default Cursor roles", () => {
+			const model = makeCursorMaxModel();
+			const settings = Settings.isolated();
+			settings.setModelRole("smol", `${model.provider}/${model.id}:max`);
+			const { hub, onAssign } = createHub({ models: [model], scoped: true, settings });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Focus the default row.
+			hub.handleInput(DOWN); // Select smol.
+			hub.handleInput("t"); // Edit thinking without touching MAX.
+			expect(footerLine(hub.render(220))).toContain("inherit");
+			hub.handleInput("\n");
+
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(onAssign.mock.calls[0]?.[1]).toBe("smol");
+			expect(onAssign.mock.calls[0]?.[5]).toBe(true);
+		});
+
 		test("project storage exposes project and global role actions with callback scopes", () => {
 			const model = makeModel("test", "scoped-role-model");
 			const settings = Settings.isolated({ modelRoleStorage: "project" });

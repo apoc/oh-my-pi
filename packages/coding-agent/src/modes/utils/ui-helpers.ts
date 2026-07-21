@@ -7,7 +7,7 @@ import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../coll
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
-import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import type { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
@@ -43,8 +43,10 @@ import {
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
+import { SegmentedMessageBuilder } from "./segmented-message-builder";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -361,21 +363,6 @@ export class UiHelpers {
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				const timeline = splitAssistantMessageToolTimeline(message);
-				this.ctx.addMessageToChat(message);
-				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
-				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
-				if (assistantComponent) {
-					const usage = message.usage;
-					const explained = sessionContext.cacheMissExplainedAt?.[i] ?? false;
-					if (this.ctx.settings.get("display.cacheMissMarker") && !explained) {
-						const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
-						if (invalidation) assistantComponent.setCacheInvalidation(invalidation);
-					}
-					if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
-						this.ctx.lastAssistantUsage = usage;
-					}
-				}
 				const hasVisibleAssistantContent = assistantHasVisibleContent(message);
 				if (hasVisibleAssistantContent) {
 					// Rebuild reconstructs immutable history; seal (not finalize) so the
@@ -388,19 +375,47 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
-				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
-					if (!segment || !assistantHasVisibleContent(segment)) return;
-					const component = createAssistantMessageComponent(this.ctx, segment);
-					this.ctx.chatContainer.addChild(component);
-				};
 
-				// Render tool call components
-				for (const content of message.content) {
+				// Interleave assistant segments with tool components so siblings in chatContainer
+				// appear in the same order the model emitted them in message.content. The same
+				// builder backs the streaming path in EventController — see segmented-message-builder.ts.
+				const builder = new SegmentedMessageBuilder(this.ctx.chatContainer, options =>
+					createAssistantMessageComponent(this.ctx, undefined, options),
+				);
+				const firstSegment = builder.startMessage(message);
+				const usage = message.usage;
+				const explained = sessionContext.cacheMissExplainedAt?.[i] ?? false;
+				if (this.ctx.settings.get("display.cacheMissMarker") && !explained) {
+					const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
+					if (invalidation) firstSegment.setCacheInvalidation(invalidation);
+				}
+				if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
+					this.ctx.lastAssistantUsage = usage;
+				}
+
+				for (let contentIndex = 0; contentIndex < message.content.length; contentIndex++) {
+					const content = message.content[contentIndex];
 					if (content.type !== "toolCall") {
 						continue;
 					}
 					resolveWaitingPoll(content.name);
-					const afterToolSegment = timeline.afterToolCalls.get(content.id);
+
+					// Force consecutive reads separated by VISIBLE content (non-empty text or
+					// thinking) into separate groups, mirroring EventController#openNewSegmentAt —
+					// empty thinking("") blocks Cursor emits between parallel reads must NOT split
+					// the group, or the rebuilt transcript diverges from the live render.
+					const segmentHadVisibleContent = message.content
+						.slice(builder.getOpenStartIndex(), contentIndex)
+						.some(
+							block =>
+								(block.type === "text" && canonicalizeMessage(block.text)) ||
+								(block.type === "thinking" && canonicalizeMessage(block.thinking)),
+						);
+					if (segmentHadVisibleContent) {
+						readGroup?.seal();
+						readGroup = null;
+					}
+					builder.splitAt(contentIndex + 1);
 
 					if (content.name === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (hasErrorStop && errorMessage) {
@@ -417,7 +432,9 @@ export class UiHelpers {
 								false,
 								content.id,
 							);
-						} else if (afterToolSegment) {
+						} else {
+							const normalizedArgs = normalizeToolArgs(content.arguments);
+							readToolCallArgs.set(content.id, normalizedArgs);
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
 									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
@@ -425,67 +442,61 @@ export class UiHelpers {
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
 								this.ctx.chatContainer.addChild(readGroup);
 							}
-							readGroup.updateArgs(content.arguments, content.id);
-							this.ctx.pendingTools.set(content.id, readGroup);
-							if (assistantComponent) {
-								readToolCallAssistantComponents.set(content.id, assistantComponent);
-							}
-						} else {
-							const normalizedArgs = normalizeToolArgs(content.arguments);
-							readToolCallArgs.set(content.id, normalizedArgs);
-							if (assistantComponent) {
-								readToolCallAssistantComponents.set(content.id, assistantComponent);
-							}
 						}
-						appendAssistantSegment(afterToolSegment);
-						continue;
-					}
-
-					readGroup?.seal();
-					readGroup = null;
-					const tool = this.ctx.viewSession.getToolByName(content.name);
-					const partialJson = getStreamingPartialJson(content);
-					// Mid-stream rebuild (theme change, settings, focus replay): decode
-					// display args from the raw stream exactly like the live reveal path.
-					// The provider-parsed `arguments` lag the stream by up to a throttled
-					// parse window, so spreading them alone would freeze a long write/edit
-					// preview at its last full parse.
-					const rawInput = content.customWireName !== undefined;
-					const renderArgs = partialJson
-						? decodeStreamedToolArgs(partialJson, {
-								rawInput,
-								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(content.name, rawInput),
-							})
-						: content.arguments;
-					const component = new ToolExecutionComponent(
-						content.name,
-						renderArgs,
-						{
-							snapshots: getFileSnapshotStore(this.ctx.viewSession),
-							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-							liveRegion: this.ctx.chatContainer,
-						},
-						tool,
-						this.ctx.ui,
-						this.ctx.viewSession.sessionManager.getCwd(),
-						content.id,
-					);
-					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
-
-					if (hasErrorStop && errorMessage) {
-						component.updateResult(
-							{ content: [{ type: "text", text: errorMessage }], isError: true },
-							false,
+					} else {
+						readGroup?.seal();
+						readGroup = null;
+						const tool = this.ctx.viewSession.getToolByName(content.name);
+						const partialJson = getStreamingPartialJson(content);
+						// Mid-stream rebuild (theme change, settings, focus replay): decode
+						// display args from the raw stream exactly like the live reveal path.
+						// The provider-parsed `arguments` lag the stream by up to a throttled
+						// parse window, so spreading them alone would freeze a long write/edit
+						// preview at its last full parse.
+						const rawInput = content.customWireName !== undefined;
+						const renderArgs = partialJson
+							? decodeStreamedToolArgs(partialJson, {
+									rawInput,
+									fullArgs: content.arguments,
+									streamingStringKeys: streamingStringKeysForTool(content.name, rawInput),
+								})
+							: content.arguments;
+						const component = new ToolExecutionComponent(
+							content.name,
+							renderArgs,
+							{
+								snapshots: getFileSnapshotStore(this.ctx.viewSession),
+								showImages: settings.get("terminal.showImages"),
+								editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
+								editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+								liveRegion: this.ctx.chatContainer,
+							},
+							tool,
+							this.ctx.ui,
+							this.ctx.viewSession.sessionManager.getCwd(),
 							content.id,
 						);
-					} else {
-						this.ctx.pendingTools.set(content.id, component);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+
+						if (hasErrorStop && errorMessage) {
+							component.updateResult(
+								{ content: [{ type: "text", text: errorMessage }], isError: true },
+								false,
+								content.id,
+							);
+						} else {
+							this.ctx.pendingTools.set(content.id, component);
+						}
 					}
-					appendAssistantSegment(afterToolSegment);
+
+					builder.attachOpenSegment();
+					// Route any tool-result images to the segment that follows the read tool, matching
+					// the streaming path's behavior.
+					if (content.name === "read" && !(hasErrorStop && errorMessage)) {
+						const openSegment = builder.getOpenSegment();
+						if (openSegment) readToolCallAssistantComponents.set(content.id, openSegment);
+					}
 				}
 				// Dangling toolCalls (no result on the resolved path — failed or
 				// retried turns, results on sibling branches) were stripped by the
@@ -514,6 +525,42 @@ export class UiHelpers {
 				pendingUsageDuration = message.duration;
 				pendingUsageTtft = message.ttft;
 				pendingUsageTimestamp = message.timestamp;
+
+				// Finalize the trailing segment: it owns the footer (usage, error/abort suffix).
+				// Intermediate segments are attached without rendering during the loop above
+				// (their `splitAt` close skips rendering because #lastMessage is undefined),
+				// so updateClosedContent gives them their first paint here.
+				builder.finalize(message);
+				builder.updateClosedContent(message);
+				// If the trailing open segment has no content (tool call was the last
+				// block and nothing followed it) AND there is no pending usage row to
+				// hold, remove it from chatContainer so the read-group or tool block
+				// stays the last visible child. When showTokenUsage is on, the empty
+				// trailing segment is left in place: flushPendingUsage() will append the
+				// usage-row block directly after it, making the usage row the last child.
+				// Look ahead to see if any upcoming toolResult for a registered read call
+				// will deliver images into the open segment — if so, keep it.
+				if (!pendingUsage && !hasErrorStop && builder.getOpenStartIndex() >= message.content.length) {
+					const pendingReadIds = new Set(readToolCallAssistantComponents.keys());
+					let hasIncomingImages = false;
+					if (pendingReadIds.size > 0 && settings.get("terminal.showImages")) {
+						for (let j = i + 1; j < count; j++) {
+							const next = sessionContext.messages[j];
+							if (next?.role !== "toolResult") break;
+							if (pendingReadIds.has(next.toolCallId)) {
+								const imgs = (next.content as Array<{ type: string }> | undefined) ?? [];
+								if (imgs.some(c => c.type === "image")) {
+									hasIncomingImages = true;
+									break;
+								}
+							}
+						}
+					}
+					if (!hasIncomingImages) {
+						const emptyTrailing = builder.getOpenSegment();
+						if (emptyTrailing) this.ctx.chatContainer.removeChild(emptyTrailing);
+					}
+				}
 			} else if (message.role === "toolResult") {
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =

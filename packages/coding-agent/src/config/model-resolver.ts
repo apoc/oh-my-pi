@@ -18,6 +18,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { isCursorAgent } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
@@ -79,9 +80,20 @@ export function pickDefaultAvailableModel(availableModels: Model<Api>[]): Model<
 	})[0];
 }
 
+/**
+ * Provider-flag suffixes carried alongside a model selector. Today this is `thinkingLevel`
+ * and Cursor's `maxMode`, but new provider flags should be added here rather than threaded
+ * through every interface that names them individually — the bundle is what travels.
+ */
+export interface SelectorFlags {
+	thinkingLevel?: ConfiguredThinkingLevel;
+	maxMode?: boolean;
+}
+
 export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
+	maxMode?: boolean;
 	explicitThinkingLevel: boolean;
 }
 
@@ -91,6 +103,10 @@ interface ThinkingSuffixOptions {
 }
 
 interface ModelStringParseOptions extends ThinkingSuffixOptions {
+	/**
+	 * Resolves whether `provider/id` (id UNCHANGED, suffix included) is itself a
+	 * literal registered model — if so, the suffix is never stripped/reinterpreted.
+	 */
 	isLiteralModelId?: (provider: string, id: string) => boolean;
 }
 // Suffix recognition for the model-pattern parser: `:max` is a real thinking
@@ -179,27 +195,61 @@ function resolveGlobScopePattern(
 /**
  * Parse a model string in "provider/modelId" format.
  * Returns undefined if the format is invalid.
+ *
+ * Trailing `:max` and `:<thinking-level>` flags are stripped from the id and
+ * returned separately. Either flag may appear alone or alongside the other in
+ * any order (e.g. `cursor/gpt-5.5-extra-high:max`, `anthropic/claude:high:max`).
  */
 export function parseModelString(
 	modelStr: string,
 	options?: ModelStringParseOptions,
-): { provider: string; id: string; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): ({ provider: string; id: string } & SelectorFlags) | undefined {
 	const slashIdx = modelStr.indexOf("/");
 	if (slashIdx <= 0) return undefined;
-	const id = modelStr.slice(slashIdx + 1);
 	const provider = modelStr.slice(0, slashIdx);
-	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
-	const strict = splitThinkingSuffix(id);
-	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
-	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
-	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
-		return options?.isLiteralModelId?.(provider, id) === true
-			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
+	const id = modelStr.slice(slashIdx + 1);
+	if (options?.allowMaxSuffix || options?.allowAutoAlias) {
+		// A catalog id wins unchanged over every suffix interpretation. Context-aware
+		// callers provide this lookup specifically because real ids can end in `:max`,
+		// `:auto`, or a strict effort token.
+		if (options.isLiteralModelId?.(provider, id) === true) return { provider, id };
+
+		// Peel the complete suffix chain before returning. Handling only the last
+		// strict effort used to return early for `cursor/model:max:high`, leaving
+		// `:max` embedded in the id and losing MAX mode during restore/fallback.
+		const peeled = peelSelectorFlags(id, -1, {
+			allowAutoAlias: options.allowAutoAlias === true,
+			allowMaxMode: options.allowMaxSuffix === true,
+		});
+		if (peeled.maxMode && peeled.thinkingLevel === undefined) {
+			// A lone guarded `:max` keeps its historical thinking-level interpretation.
+			// Cursor additionally surfaces it as MAX mode; in a multi-flag chain, the
+			// explicit thinking token wins and `:max` remains the provider flag.
+			return {
+				provider,
+				id: peeled.stripped,
+				thinkingLevel: ThinkingLevel.Max,
+				...(provider.toLowerCase() === "cursor" ? { maxMode: true } : {}),
+			};
+		}
+		return {
+			provider,
+			id: peeled.stripped,
+			...(peeled.thinkingLevel ? { thinkingLevel: peeled.thinkingLevel } : {}),
+			...(peeled.maxMode ? { maxMode: true } : {}),
+		};
 	}
-	return { provider, id };
+	// No alias options: a trailing `:max` is Cursor's MAX-mode flag, not a thinking-level
+	// alias, and a trailing `:auto` stays part of the literal id (opt in via allowAutoAlias).
+	// Higher layers (resolveModelFromString's literal-lookup-first path) protect ids that
+	// legitimately end in `:max` before this peeler runs.
+	const peeled = peelSelectorFlags(id, -1);
+	return {
+		provider,
+		id: peeled.stripped,
+		...(peeled.thinkingLevel ? { thinkingLevel: peeled.thinkingLevel } : {}),
+		...(peeled.maxMode ? { maxMode: true } : {}),
+	};
 }
 
 /**
@@ -236,8 +286,29 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
-export function formatModelSelectorValue(selector: string, thinkingLevel: ConfiguredThinkingLevel | undefined): string {
-	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
+const MAX_SELECTOR = "max" as const;
+export function formatModelSelectorValue(
+	selector: string,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	maxMode?: boolean,
+): string {
+	let result = selector;
+	if (maxMode) result += `:${MAX_SELECTOR}`;
+	if (thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit) result += `:${thinkingLevel}`;
+	return result;
+}
+
+/**
+ * Build a canonical "provider/id[:max][:thinking]" selector for a concrete model.
+ * `maxMode` is honored only when {@link isCursorAgent} matches — non-cursor models
+ * cannot carry the `:max` suffix.
+ */
+export function formatModelSelector(
+	model: Model,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	maxMode?: boolean,
+): string {
+	return formatModelSelectorValue(formatModelString(model), thinkingLevel, isCursorAgent(model) ? maxMode : false);
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -752,10 +823,9 @@ function matchModel(
 	return pickPreferredModel(topCandidates, context);
 }
 
-export interface ParsedModelResult {
+export interface ParsedModelResult extends SelectorFlags {
 	model: Model<Api> | undefined;
-	/** Thinking level if explicitly specified in pattern, undefined otherwise */
-	thinkingLevel?: ConfiguredThinkingLevel;
+
 	/** Upstream provider slug from an `@upstream` routing selector, if present. */
 	upstream?: string;
 	warning: string | undefined;
@@ -788,9 +858,24 @@ function parseModelPatternWithContext(
 		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
-	// Prefer a fuzzy match whose actual id ends in the suffix, preserving
-	// shorthand selectors for literal tier models such as `router:low`. Other
-	// fuzzy results (e.g. `kimi-for-coding-highspeed`) cannot absorb the suffix.
+	// No match - a trailing `:max` is Cursor's MAX-mode flag when the stripped base
+	// resolves to an extended-context Cursor model; otherwise it falls through to the
+	// thinking-suffix grammar below, where `:max` is an alias for xhigh.
+	if (pattern.endsWith(`:${MAX_SELECTOR}`)) {
+		const result = parseModelPatternWithContext(
+			pattern.slice(0, -(MAX_SELECTOR.length + 1)),
+			availableModels,
+			context,
+			options,
+		);
+		if (result.model && isCursorAgent(result.model) && result.model.extendedContext) {
+			return { ...result, maxMode: true };
+		}
+	}
+
+	// No match - try stripping a valid thinking suffix and recursing.
+	// `max` is accepted only after the full pattern failed, so literal model IDs
+	// ending in `:max` keep winning over the thinking suffix.
 	const { base, level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	if (level) {
 		const literalSuffixMatch = matchModel(pattern, availableModels, context);
@@ -815,6 +900,7 @@ function parseModelPatternWithContext(
 			return {
 				model: result.model,
 				thinkingLevel: explicitThinkingLevel ? level : undefined,
+				maxMode: result.maxMode,
 				warning: result.warning,
 				explicitThinkingLevel,
 			};
@@ -848,6 +934,7 @@ function parseModelPatternWithContext(
 		return {
 			model: result.model,
 			thinkingLevel: undefined,
+			maxMode: result.maxMode,
 			warning: `Invalid thinking level "${suffix}" in pattern "${pattern}". Using default instead.`,
 			explicitThinkingLevel: false,
 		};
@@ -1017,12 +1104,12 @@ function resolveConfiguredRolePattern(
 	const normalized = value.trim();
 	if (!normalized) return undefined;
 
-	const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
+	const peeled = peelSelectorFlags(
 		normalized,
 		modelRoleAliasPrefixLength(normalized) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-		MAX_THINKING_SUFFIX_OPTIONS,
+		{ allowAutoAlias: true },
 	);
-	const role = getModelRoleAlias(aliasCandidate, settings);
+	const role = getModelRoleAlias(peeled.stripped, settings);
 	if (!role) return [normalized];
 	if (visited.has(role)) return undefined;
 	visited.add(role);
@@ -1042,7 +1129,7 @@ function resolveConfiguredRolePattern(
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	return resolved.map(pattern => formatModelSelectorValue(pattern, peeled.thinkingLevel, peeled.maxMode));
 }
 
 /**
@@ -1135,7 +1222,7 @@ export function resolveAgentPrewalkPattern(options: AgentPrewalkResolutionOption
 /**
  * Resolve a model role value into a concrete model and thinking metadata.
  */
-export interface ResolvedModelRoleValue {
+export interface ResolvedModelRoleValue extends SelectorFlags {
 	model: Model<Api> | undefined;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** matchedPatternIndex identifies the first configured pattern that matched an available model. */
@@ -1157,6 +1244,19 @@ export function resolveModelRoleValue(
 	if (!normalized || normalized === DEFAULT_MODEL_ROLE) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
+
+	// A `:max` (or thinking-level) suffix on a role-alias reference (`@<role>` or the
+	// legacy `pi/<role>`) is a role-level override: it must survive even when the role
+	// expands to a non-cursor model, since `parseModelPatternWithContext`'s own `:max`
+	// handling gates `maxMode` on `isCursorAgent` for direct provider/id patterns (see
+	// the OpenRouter `:max` -> xhigh alias test). Callers (e.g. `AgentSession`) are
+	// responsible for gating `maxMode` on the resolved model's cursor capability before
+	// applying it.
+	const roleAliasPrefixLength = modelRoleAliasPrefixLength(normalized);
+	const roleOverride =
+		roleAliasPrefixLength !== undefined
+			? peelSelectorFlags(normalized, roleAliasPrefixLength, { allowAutoAlias: true })
+			: undefined;
 
 	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings);
 	if (!effectivePatterns || effectivePatterns.length === 0) {
@@ -1180,6 +1280,7 @@ export function resolveModelRoleValue(
 						? AUTO_THINKING
 						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
 					: resolved.thinkingLevel,
+				maxMode: resolved.maxMode || roleOverride?.maxMode,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
 				warning: resolved.warning,
 			};
@@ -1197,8 +1298,45 @@ interface ExplicitThinkingSelectorOptions {
 }
 
 function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
-	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
+	const slashIdx = value.indexOf("/");
+	if (slashIdx <= 0) return false;
+	const provider = value.slice(0, slashIdx);
+	const id = value.slice(slashIdx + 1);
+	return options?.isLiteralModelId?.(provider, id) === true;
+}
+
+/** True when `value` is a `cursor/<id>[:suffix]` selector (not a `pi/<role>` reference). */
+function isCursorProviderSelector(value: string): boolean {
+	const slashIdx = value.indexOf("/");
+	return slashIdx > 0 && value.slice(0, slashIdx).toLowerCase() === "cursor";
+}
+
+function walkRoleAliasSelectorFlags(
+	value: string | undefined,
+	settings: Settings | undefined,
+	pick: (peeled: { stripped: string } & SelectorFlags) => boolean,
+): ({ stripped: string } & SelectorFlags) | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim();
+	if (!normalized || normalized === DEFAULT_MODEL_ROLE) return undefined;
+
+	const visited = new Set<string>();
+	let current = normalized;
+	while (!visited.has(current)) {
+		visited.add(current);
+		const peeled = peelSelectorFlags(
+			current,
+			modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			{ allowAutoAlias: true },
+		);
+		if (pick(peeled)) return peeled;
+		const expanded = expandRoleAlias(current, settings).trim();
+		if (!expanded || expanded === current) break;
+		if (expanded === DEFAULT_MODEL_ROLE) return undefined;
+		current = expanded;
+	}
+
+	return undefined;
 }
 
 export function extractExplicitThinkingSelector(
@@ -1215,16 +1353,29 @@ export function extractExplicitThinkingSelector(
 	while (!visited.has(current)) {
 		visited.add(current);
 		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
-		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
-		if (strictSelector) {
-			return strictSelector;
+		const peeled = peelSelectorFlags(current, rolePrefixLength, { allowAutoAlias: true });
+		if (peeled.thinkingLevel !== undefined) {
+			// A literal model id ending in `:auto` must win over the alias interpretation —
+			// mirrors the `:max` -> maxMode literal gate below (nanogpt/coding-router:auto).
+			const isLiteralAuto =
+				peeled.thinkingLevel === AUTO_THINKING &&
+				modelRoleAliasPrefixLength(current) === undefined &&
+				isLiteralModelSelector(current, options);
+			if (!isLiteralAuto) {
+				return peeled.thinkingLevel;
+			}
 		}
-		const maxSelector = splitThinkingSuffix(current, rolePrefixLength, MAX_THINKING_SUFFIX_OPTIONS).level;
+		// A `:max` peeled as Cursor's maxMode flag doubles as an explicit Max thinking level
+		// for role-alias patterns or non-literal, non-cursor model selectors — a real model id
+		// ending in `:max` always wins via `isLiteralModelId`, and a literal `cursor/<id>:max`
+		// selector never carries the Max-level fallback (it's pure MAX-mode, gated by the
+		// caller instead).
 		if (
-			maxSelector &&
-			(modelRoleAliasPrefixLength(current) !== undefined || !isLiteralModelSelector(current, options))
+			peeled.maxMode &&
+			(modelRoleAliasPrefixLength(current) !== undefined ||
+				(!isLiteralModelSelector(current, options) && !isCursorProviderSelector(current)))
 		) {
-			return maxSelector;
+			return ThinkingLevel.Max;
 		}
 		const expanded = expandRoleAlias(current, settings).trim();
 		if (!expanded || expanded === current) break;
@@ -1233,6 +1384,58 @@ export function extractExplicitThinkingSelector(
 	}
 
 	return undefined;
+}
+
+/**
+ * Extract Cursor's MAX-mode flag from a stored role selector value, walking role
+ * aliases the same way as {@link extractExplicitThinkingSelector}.
+ */
+export function extractExplicitMaxMode(value: string | undefined, settings?: Settings): boolean | undefined {
+	return walkRoleAliasSelectorFlags(value, settings, peeled => peeled.maxMode === true)?.maxMode;
+}
+
+/**
+ * Peel trailing `:max` and `:<thinking-level>` flag segments from a value, stopping
+ * at the first segment that is neither flag or once `lastColonIndex <= minColonIndex`.
+ *
+ * Used in two modes:
+ * - `parseModelString`'s no-alias-options path passes `minColonIndex = -1` with no
+ *   `allowAutoAlias` — a literal trailing `:auto` id must stay untouched there.
+ * - `extractExplicitThinkingSelector` / `extractExplicitMaxMode` / role-pattern
+ *   expansion pass the resolved role-alias prefix length (falling back to the legacy
+ *   `pi/` prefix length) and `allowAutoAlias: true` so `@<role>`/`pi/<role>` aliases
+ *   and the `auto` sentinel both survive.
+ */
+function peelSelectorFlags(
+	value: string,
+	minColonIndex: number,
+	options?: { allowAutoAlias?: boolean; allowMaxMode?: boolean },
+): { stripped: string } & SelectorFlags {
+	let stripped = value;
+	let thinkingLevel: ConfiguredThinkingLevel | undefined;
+	let maxMode: boolean | undefined;
+	while (true) {
+		const lastColonIndex = stripped.lastIndexOf(":");
+		if (lastColonIndex <= minColonIndex) break;
+		const suffix = stripped.slice(lastColonIndex + 1);
+		if (suffix === MAX_SELECTOR && maxMode === undefined && options?.allowMaxMode !== false) {
+			maxMode = true;
+			stripped = stripped.slice(0, lastColonIndex);
+			continue;
+		}
+		if (thinkingLevel === undefined) {
+			// `allowAutoAlias` recovers the `auto` sentinel here; `allowMaxAlias` stays off —
+			// `:max` is intercepted above as Cursor's flag, never reinterpreted as xhigh.
+			const lvl = parseThinkingSuffix(suffix, { allowAutoAlias: options?.allowAutoAlias === true });
+			if (lvl) {
+				thinkingLevel = lvl;
+				stripped = stripped.slice(0, lastColonIndex);
+				continue;
+			}
+		}
+		break;
+	}
+	return { stripped, thinkingLevel, maxMode };
 }
 
 /**
@@ -1288,7 +1491,7 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
+): { model?: Model<Api>; explicitThinkingLevel: boolean; warning?: string } & SelectorFlags {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = getModelMatchPreferences(settings);
@@ -1297,6 +1500,7 @@ export function resolveModelOverride(
 		const {
 			model,
 			thinkingLevel,
+			maxMode,
 			explicitThinkingLevel,
 			warning: patternWarning,
 		} = resolveModelRoleValue(pattern, availableModels, {
@@ -1304,7 +1508,7 @@ export function resolveModelOverride(
 			matchPreferences,
 		});
 		if (model) {
-			return { model, thinkingLevel, explicitThinkingLevel, warning: patternWarning };
+			return { model, thinkingLevel, maxMode, explicitThinkingLevel, warning: patternWarning };
 		}
 		if (!warning && patternWarning) warning = patternWarning;
 	}
@@ -1343,13 +1547,14 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
-): Promise<{
-	model?: Model<Api>;
-	thinkingLevel?: ConfiguredThinkingLevel;
-	explicitThinkingLevel: boolean;
-	authFallbackUsed: boolean;
-	warning?: string;
-}> {
+): Promise<
+	{
+		model?: Model<Api>;
+		explicitThinkingLevel: boolean;
+		authFallbackUsed: boolean;
+		warning?: string;
+	} & SelectorFlags
+> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
@@ -1382,7 +1587,7 @@ export function resolveRoleSelection(
 	roles: readonly string[],
 	settings: Settings,
 	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): ({ model: Model<Api> } & SelectorFlags) | undefined {
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -1390,7 +1595,7 @@ export function resolveRoleSelection(
 			matchPreferences,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel, maxMode: resolved.maxMode };
 		}
 	}
 	return undefined;
@@ -1407,12 +1612,14 @@ export function resolveRoleSelection(
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
 	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): ({ model: Model<Api> } & SelectorFlags) | undefined {
 	const resolved = resolveModelRoleValue(formatModelRoleAlias("advisor"), availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
 	});
-	return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
+	return resolved.model
+		? { model: resolved.model, thinkingLevel: resolved.thinkingLevel, maxMode: resolved.maxMode }
+		: undefined;
 }
 
 /**
@@ -1435,13 +1642,19 @@ export async function resolveModelScope(
 	const availableModels = modelRegistry.getAvailable();
 	const context = buildPreferenceContext(availableModels, preferences);
 	const scopedModels: ScopedModel[] = [];
-	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
+	const addScopedModel = (
+		model: Model<Api>,
+		thinkingLevel: ThinkingLevel | undefined,
+		explicit: boolean,
+		maxMode?: boolean,
+	) => {
 		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
 			thinkingLevel: explicit
 				? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
 				: thinkingLevel,
+			maxMode: isCursorAgent(model) ? maxMode : undefined,
 			explicitThinkingLevel: explicit,
 		});
 	};
@@ -1449,13 +1662,28 @@ export async function resolveModelScope(
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
-			// Extract optional thinking level suffix (e.g., "provider/*:high") only
-			// after literal `:max` globs had a chance to match real model IDs.
-			const {
-				models: matchingModels,
-				thinkingLevel,
-				explicitThinkingLevel,
-			} = resolveGlobScopePattern(pattern, availableModels);
+			// Extract optional `:max` and thinking-level suffixes (e.g. "cursor/*:max:high").
+			// A trailing `:max` is Cursor's MAX-mode flag when it matches at least one
+			// extended-context Cursor model; otherwise `resolveGlobScopePattern` treats it
+			// as upstream's xhigh alias (or a literal id suffix, when one matches).
+			let matchingModels: Model<Api>[];
+			let thinkingLevel: ThinkingLevel | undefined;
+			let explicitThinkingLevel = false;
+			let maxMode: boolean | undefined;
+			const maxCandidates = pattern.endsWith(`:${MAX_SELECTOR}`)
+				? matchingGlobModels(pattern.slice(0, -(MAX_SELECTOR.length + 1)), availableModels).filter(
+						m => isCursorAgent(m) && m.extendedContext,
+					)
+				: [];
+			if (maxCandidates.length > 0) {
+				matchingModels = maxCandidates;
+				maxMode = true;
+			} else {
+				const resolved = resolveGlobScopePattern(pattern, availableModels);
+				matchingModels = resolved.models;
+				thinkingLevel = resolved.thinkingLevel;
+				explicitThinkingLevel = resolved.explicitThinkingLevel;
+			}
 
 			if (matchingModels.length === 0) {
 				logger.warn(`No models match pattern "${pattern}"`);
@@ -1463,7 +1691,7 @@ export async function resolveModelScope(
 			}
 
 			for (const model of matchingModels) {
-				addScopedModel(model, thinkingLevel, explicitThinkingLevel);
+				addScopedModel(model, thinkingLevel, explicitThinkingLevel, maxMode);
 			}
 			continue;
 		}
@@ -1480,14 +1708,14 @@ export async function resolveModelScope(
 				continue;
 			}
 			if (resolved.thinkingLevel === AUTO_THINKING) {
-				addScopedModel(resolved.model, undefined, false);
+				addScopedModel(resolved.model, undefined, false, resolved.maxMode);
 			} else {
-				addScopedModel(resolved.model, resolved.thinkingLevel, resolved.explicitThinkingLevel);
+				addScopedModel(resolved.model, resolved.thinkingLevel, resolved.explicitThinkingLevel, resolved.maxMode);
 			}
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
+		const { model, thinkingLevel, maxMode, warning, explicitThinkingLevel } = parseModelPatternWithContext(
 			pattern,
 			availableModels,
 			context,
@@ -1505,9 +1733,9 @@ export async function resolveModelScope(
 		// Scoped models (Ctrl+P cycling) carry concrete per-model overrides;
 		// `auto` lives on the session, so drop the sentinel here.
 		if (thinkingLevel === AUTO_THINKING) {
-			addScopedModel(model, undefined, false);
+			addScopedModel(model, undefined, false, maxMode);
 		} else {
-			addScopedModel(model, thinkingLevel, explicitThinkingLevel);
+			addScopedModel(model, thinkingLevel, explicitThinkingLevel, maxMode);
 		}
 	}
 
@@ -1599,14 +1827,14 @@ export function filterAvailableModelsByEnabledPatterns(
 	return includeSyntheticAllowedModels(available, allowedModels);
 }
 
-export interface ResolveCliModelResult {
+export interface ResolveCliModelResult extends SelectorFlags {
 	model: Model<Api> | undefined;
 	/** configuredPatterns is the full configured fallback chain when the selector resolves through a role. */
 	configuredPatterns?: string[];
 	/** configuredPatternIndex identifies the configured role pattern that matched an available model. */
 	configuredPatternIndex?: number;
 	selector?: string;
-	thinkingLevel?: ConfiguredThinkingLevel;
+
 	warning: string | undefined;
 	error: string | undefined;
 }
@@ -1639,6 +1867,19 @@ export function resolveCliModel(options: {
 		};
 	}
 
+	if (!cliProvider && modelRoleAliasPrefixLength(cliModel) !== undefined) {
+		const resolved = resolveModelRoleValue(cliModel, availableModels, { settings, matchPreferences: preferences });
+		if (resolved.model) {
+			return {
+				model: resolved.model,
+				selector: formatModelString(resolved.model),
+				thinkingLevel: resolved.thinkingLevel,
+				maxMode: resolved.maxMode,
+				warning: resolved.warning,
+				error: undefined,
+			};
+		}
+	}
 	const providerMap = new Map<string, string>();
 	for (const model of availableModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
@@ -1694,6 +1935,19 @@ export function resolveCliModel(options: {
 				);
 			}
 			if (exactSuffixed) {
+				if (
+					exactThinkingLevel === ThinkingLevel.Max &&
+					isCursorAgent(exactSuffixed) &&
+					exactSuffixed.extendedContext
+				) {
+					return {
+						model: exactSuffixed,
+						selector: formatModelString(exactSuffixed),
+						warning: undefined,
+						maxMode: true,
+						error: undefined,
+					};
+				}
 				return {
 					model: exactSuffixed,
 					selector: formatModelString(exactSuffixed),
@@ -1706,16 +1960,17 @@ export function resolveCliModel(options: {
 	}
 	let configuredPatterns: string[] | undefined;
 	if (!cliProvider) {
-		const { base: bareRoleName, level: bareRoleThinkingLevel } = splitThinkingSuffix(
-			trimmedModel,
-			-1,
-			MAX_THINKING_SUFFIX_OPTIONS,
-		);
+		const bareRoleFlags = peelSelectorFlags(trimmedModel, -1, { allowAutoAlias: true });
+		const bareRoleName = bareRoleFlags.stripped;
 		const roleSelector =
 			modelRoleAliasPrefixLength(trimmedModel) !== undefined
 				? trimmedModel
 				: settings?.getModelRole(bareRoleName) !== undefined
-					? `${formatModelRoleAlias(bareRoleName)}${bareRoleThinkingLevel ? `:${bareRoleThinkingLevel}` : ""}`
+					? formatModelSelectorValue(
+							formatModelRoleAlias(bareRoleName),
+							bareRoleFlags.thinkingLevel,
+							bareRoleFlags.maxMode,
+						)
 					: undefined;
 		if (roleSelector) {
 			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], settings);
@@ -1730,6 +1985,7 @@ export function resolveCliModel(options: {
 					configuredPatterns,
 					configuredPatternIndex: resolved.matchedPatternIndex,
 					thinkingLevel: resolved.thinkingLevel,
+					maxMode: resolved.maxMode,
 					warning: resolved.warning,
 					error: undefined,
 				};
@@ -1780,7 +2036,7 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
-	const { model, thinkingLevel, warning, upstream } = parseModelPattern(pattern, candidates, preferences, {
+	const { model, thinkingLevel, maxMode, warning, upstream } = parseModelPattern(pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 
@@ -1797,6 +2053,7 @@ export function resolveCliModel(options: {
 	}
 
 	let selector = provider ? formatModelString(model) : undefined;
+
 	if (selector !== undefined && upstream) {
 		selector = `${selector}@${upstream}`;
 	}
@@ -1805,6 +2062,7 @@ export function resolveCliModel(options: {
 		model,
 		selector,
 		thinkingLevel,
+		maxMode,
 		warning,
 		error: undefined,
 	};

@@ -152,9 +152,11 @@ function resolveSubagentRetryFallbackCandidates(
 	for (const pattern of modelPatterns) {
 		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
 		if (!resolved.model) continue;
-		const selector = resolved.explicitThinkingLevel
-			? formatModelSelectorValue(formatModelStringWithRouting(resolved.model), resolved.thinkingLevel)
-			: formatModelStringWithRouting(resolved.model);
+		const selector = formatModelSelectorValue(
+			formatModelStringWithRouting(resolved.model),
+			resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined,
+			resolved.maxMode,
+		);
 		if (seen.has(selector)) continue;
 		seen.add(selector);
 		candidates.push({ model: resolved.model, selector });
@@ -318,6 +320,7 @@ export interface ExecutorOptions {
 	 */
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	cursorMaxMode?: boolean;
 	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
@@ -2391,6 +2394,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
+				maxMode: resolvedMaxMode,
 				authFallbackUsed,
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
@@ -2434,15 +2438,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				progress.contextWindow = model.contextWindow;
 			}
 			if (model) {
-				progress.resolvedModel = explicitThinkingLevel
-					? formatModelSelectorValue(formatModelStringWithRouting(model), resolvedThinkingLevel)
-					: formatModelStringWithRouting(model);
+				progress.resolvedModel = formatModelSelectorValue(
+					formatModelStringWithRouting(model),
+					explicitThinkingLevel ? resolvedThinkingLevel : undefined,
+					resolvedMaxMode,
+				);
 			}
 			// Precedence: explicit `:level` suffix on the resolved model pattern >
 			// agent-definition default (e.g. task's `auto`) > pattern-derived level.
 			const effectiveThinkingLevel = explicitThinkingLevel
 				? resolvedThinkingLevel
 				: (thinkingLevel ?? resolvedThinkingLevel);
+			const effectiveCursorMaxMode =
+				resolvedMaxMode ?? (modelPatterns.length > 0 && !authFallbackUsed ? false : options.cursorMaxMode);
 			resolvedAt = performance.now();
 			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
 			// `task.agentPrewalk` settings override hands the subagent off to a
@@ -2550,6 +2558,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
 					model || modelOverride === undefined ? undefined : defaultRetryFallbackChain,
+				cursorMaxMode: effectiveCursorMaxMode,
 				thinkingLevel: effectiveThinkingLevel,
 				toolNames,
 				outputSchema,

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -11,6 +12,7 @@ import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-age
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -30,6 +32,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			authStorage.close();
 		}
 		authStoragesToClose.length = 0;
+		// AgentStorage caches a bun:sqlite Database keyed by agentDir; closing it
+		// releases the handle before removing tempDir (Windows holds file locks
+		// on SQLite DBs briefly after close otherwise).
+		AgentStorage.resetInstance();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -116,10 +122,68 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await buildSessionOptions("runtime-provider/runtime-model"),
 		);
 
-		expect(session.model).toBeDefined();
-		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-model");
-		expect(modelFallbackMessage).toBeUndefined();
+		try {
+			expect(session.model).toBeDefined();
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("preserves MAX when an explicit deferred extension model resolves", async () => {
+		const authStorage = await AuthStorage.create(path.join(tempDir, "cursor-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "cursor-models.yml"));
+		const cursorModel = buildModel({
+			id: "runtime-cursor-model",
+			name: "Runtime Cursor Model",
+			api: "cursor-agent",
+			provider: "runtime-cursor",
+			baseUrl: "https://runtime-cursor.example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		});
+		const getAll = modelRegistry.getAll.bind(modelRegistry);
+		const cursorProviderExtension: ExtensionFactory = () => {
+			vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [...getAll(), cursorModel]);
+		};
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [cursorProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			modelPattern: "runtime-cursor/runtime-cursor-model:max",
+		});
+
+		try {
+			expect(session.model).toMatchObject({ provider: "runtime-cursor", id: "runtime-cursor-model" });
+			expect(session.agent.getCursorMaxMode()).toBe(true);
+			expect(session.model?.contextWindow).toBe(1_000_000);
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("resolves explicit dynamic-only modelPattern from fresh runtime cache", async () => {
@@ -437,6 +501,35 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("does not silently strip an invalid thinking suffix when deferred", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession(
+			await buildSessionOptions("runtime-provider/runtime-model:bogus"),
+		);
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model:bogus" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("applies an explicit thinking suffix when deferred --model resolves", async () => {
+		// Default level differs from the suffix so the assertion fails if the suffix is dropped.
+		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
+		const { session } = await createAgentSession({
+			...(await buildSessionOptions("runtime-provider/runtime-reasoning-model:high")),
+			settings,
+		});
+
+		try {
+			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.thinkingLevel).toBe(ThinkingLevel.High);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {
 		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
 		settings.setModelRole("smol", "runtime-provider/runtime-reasoning-model");
@@ -467,7 +560,12 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		expect(session.thinkingLevel).toBe(Effort.XHigh);
 	});
 
-	test("selects the settings default model without synchronously validating auth", async () => {
+	test("selects the settings default model with a single auth lookup", async () => {
+		// The role resolver scans modelRegistry.getAll() (not getAvailable()) so Cursor's
+		// hidden default — not yet auth-discovered at startup — can be honored. The
+		// settings-default step then validates auth on the resolved model directly rather
+		// than relying on an upstream auth filter. See: fix(cursor-agent): honor hidden
+		// default cursor model on startup.
 		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!defaultModel) {
 			throw new Error("Expected bundled anthropic default model");
@@ -479,9 +577,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
 
-		const getApiKeySpy = vi
-			.spyOn(modelRegistry, "getApiKey")
-			.mockRejectedValue(new Error("settings default model should not validate auth during startup"));
+		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey");
 
 		try {
 			const { session } = await createAgentSession({
@@ -503,7 +599,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			try {
 				expect(session.model?.provider).toBe(defaultModel.provider);
 				expect(session.model?.id).toBe(defaultModel.id);
-				expect(getApiKeySpy).not.toHaveBeenCalled();
+				// Auth is checked for the role's resolved model, not iterated across the
+				// full registry — lookups are cached on `provider + baseUrl`.
+				const calledModelKeys = new Set(getApiKeySpy.mock.calls.map(c => `${c[0].provider}/${c[0].id}`));
+				expect(calledModelKeys).toContain(`${defaultModel.provider}/${defaultModel.id}`);
+				expect(calledModelKeys.size).toBeLessThanOrEqual(2);
 			} finally {
 				await session.dispose();
 			}

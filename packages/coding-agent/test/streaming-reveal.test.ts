@@ -306,9 +306,10 @@ describe("streaming reveal", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
-	it("passes the bound component to requestRender on each smooth tick", () => {
-		// The controller must hand its component to `requestRender` so the caller
-		// scopes the render to that subtree via `TUI.requestComponentRender`
+	it("calls requestRender on each smooth tick (caller resolves the real in-tree component)", () => {
+		// The controller calls requestRender() with no args so the caller can
+		// resolve the real in-tree component (e.g. the open segment from
+		// SegmentedMessageBuilder) for a scoped render via requestComponentRender
 		// instead of forcing a full-tree walk at 30fps (issue #4377).
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
@@ -320,7 +321,7 @@ describe("streaming reveal", () => {
 
 		expect(requestRender).toHaveBeenCalled();
 		for (const call of requestRender.mock.calls) {
-			expect(call[0]).toBe(component);
+			expect(call.length).toBe(0);
 		}
 	});
 });

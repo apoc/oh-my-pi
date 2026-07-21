@@ -84,6 +84,13 @@ describe("UiHelpers.renderSessionContext token-usage row placement", () => {
 	beforeAll(async () => {
 		await initTheme();
 	});
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+	});
+	afterEach(() => {
+		resetSettingsForTest();
+	});
 
 	it("places the usage row below the read group for a read turn", () => {
 		const { ctx, helpers } = makeHarness(true);

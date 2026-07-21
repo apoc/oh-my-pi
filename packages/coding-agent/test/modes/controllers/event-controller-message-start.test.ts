@@ -1,5 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AssistantMessage, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -8,8 +9,15 @@ import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { Component } from "@oh-my-pi/pi-tui";
 
-beforeAll(() => {
-	initTheme();
+beforeAll(async () => {
+	await initTheme();
+});
+
+beforeEach(async () => {
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
+});
+afterEach(() => {
+	resetSettingsForTest();
 });
 
 function createUserMessage(text: string): UserMessage {
@@ -18,6 +26,26 @@ function createUserMessage(text: string): UserMessage {
 		content: [{ type: "text", text }],
 		attribution: "user",
 		timestamp: Date.now(),
+	};
+}
+
+function createAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 1,
 	};
 }
 
@@ -42,6 +70,16 @@ function createContext(options: {
 	const replaceOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
+	const chatChildren: unknown[] = [];
+	const chatContainer = {
+		children: chatChildren,
+		addChild: vi.fn((child: unknown) => chatChildren.push(child)),
+		removeChild: vi.fn((child: unknown) => {
+			const index = chatChildren.indexOf(child);
+			if (index >= 0) chatChildren.splice(index, 1);
+		}),
+		isBlockUncommitted: () => true,
+	};
 	const ctx = {
 		isInitialized: true,
 		statusLine: { invalidate: vi.fn() },
@@ -50,6 +88,15 @@ function createContext(options: {
 		editor,
 		addMessageToChat,
 		updatePendingMessagesDisplay,
+		chatContainer,
+		pendingTools: new Map(),
+		session: { getToolByName: () => undefined, isTtsrAbortPending: false, retryAttempt: 0 },
+		sessionManager: { getCwd: () => process.cwd() },
+		settings: { get: () => false },
+		hideThinkingBlock: false,
+		toolOutputExpanded: false,
+		setWorkingMessage: vi.fn(),
+		flushPendingModelSwitch: vi.fn(async () => {}),
 		getUserMessageText: (message: UserMessage) =>
 			typeof message.content === "string"
 				? message.content
@@ -61,8 +108,8 @@ function createContext(options: {
 		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
-		pendingTools: new Map(),
-		viewSession: { isStreaming: false },
+		viewSession: { isStreaming: false, getToolByName: () => undefined, isTtsrAbortPending: false, retryAttempt: 0 },
+		noteDisplayableThinkingContent: vi.fn(() => false),
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,
@@ -72,6 +119,7 @@ function createContext(options: {
 		updatePendingMessagesDisplay,
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
+		chatChildren,
 	};
 }
 
@@ -299,5 +347,82 @@ describe("EventController IRC expiry", () => {
 
 		expect(chatContainer.children).toHaveLength(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("EventController assistant streaming segmentation", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("orders text, tool, and trailing text as separate chat siblings", async () => {
+		const initial = createAssistantMessage([]);
+		const updated = createAssistantMessage([
+			{ type: "text", text: "Before" },
+			{ type: "toolCall", id: "toolu_segment", name: "read", arguments: { path: "README.md" } },
+			{ type: "text", text: "After" },
+		]);
+		const { ctx, chatChildren } = createContext({ editorText: "" });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({ type: "message_start", message: initial });
+		await controller.handleEvent({
+			type: "message_update",
+			message: updated,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 2, delta: "After", partial: updated },
+		});
+
+		expect(chatChildren).toHaveLength(3);
+		expect(chatChildren.indexOf(ctx.streamingComponent as unknown)).toBe(2);
+	});
+
+	it("groups adjacent streaming read tool calls into one read group", async () => {
+		const initial = createAssistantMessage([]);
+		const updated = createAssistantMessage([
+			{ type: "toolCall", id: "toolu_read_1", name: "read", arguments: { path: "a.ts" } },
+			{ type: "toolCall", id: "toolu_read_2", name: "read", arguments: { path: "b.ts" } },
+		]);
+		const secondReadCall = updated.content[1];
+		if (secondReadCall?.type !== "toolCall") throw new Error("expected second read tool call");
+		const { ctx } = createContext({ editorText: "" });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({ type: "message_start", message: initial });
+		await controller.handleEvent({
+			type: "message_update",
+			message: updated,
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 1,
+				toolCall: secondReadCall,
+				partial: updated,
+			},
+		});
+
+		expect(ctx.pendingTools.get("toolu_read_1")).toBe(ctx.pendingTools.get("toolu_read_2"));
+	});
+
+	it("keeps post-tool content below tool rows when tool_execution_start arrives first", async () => {
+		const initial = createAssistantMessage([]);
+		const updated = createAssistantMessage([{ type: "text", text: "After tool" }]);
+		const { ctx, chatChildren } = createContext({ editorText: "" });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({ type: "message_start", message: initial });
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "toolu_early",
+			toolName: "read",
+			args: { path: "README.md" },
+			intent: "Read README",
+		});
+		await controller.handleEvent({
+			type: "message_update",
+			message: updated,
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "After tool", partial: updated },
+		});
+
+		expect(chatChildren).toHaveLength(3);
+		expect(chatChildren.indexOf(ctx.streamingComponent as unknown)).toBe(2);
 	});
 });

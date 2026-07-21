@@ -22,6 +22,14 @@ Read files, directories, archives, SQLite, images, documents, internal resources
 - `ssh://host/<path>` reads remote file/dir (UTF-8, ≤1 MiB); bare `ssh://` lists hosts; also `write`/`search`-able.
   Literal `:`, `?`, `#` → percent-encode (`%3A`/`%3F`/`%23`). Requires POSIX shell (else `ssh` tool).
 
+## Required Workflow For Code Inspection
+1. Read the file overview.
+2. Identify folded ranges relevant to the task.
+3. Re-read exact ranges with `path:START-END`.
+4. Only then analyze implementation.
+
+It is preferable to make extra read calls than to infer omitted code.
+
 <critical>
 Summary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
 </critical>

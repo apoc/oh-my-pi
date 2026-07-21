@@ -8,6 +8,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { reconcileCursorCumulativeTokens } from "@oh-my-pi/pi-ai";
 import {
 	directoryExists,
 	getBlobsDir,
@@ -128,6 +129,8 @@ function emptyUsageStatistics(): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		latestCursorTotalTokens: 0,
+		cursorSummedTokens: 0,
 	};
 }
 
@@ -137,26 +140,51 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 	return maybeUsage !== null && typeof maybeUsage === "object" ? (maybeUsage as Usage) : undefined;
 }
 
-function entryUsage(entry: SessionEntry): Usage | undefined {
+function entryUsage(entry: SessionEntry): { usage: Usage; api?: string } | undefined {
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
-	if (message.role === "assistant") return message.usage;
-	if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+	if (message.role === "assistant") return { usage: message.usage, api: message.api };
+	if (message.role === "toolResult" && message.toolName === "task") {
+		const usage = taskUsageFrom(message.details);
+		return usage ? { usage } : undefined;
+	}
 	return undefined;
 }
 
-function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
-	if (!usage) return;
+function addUsage(target: UsageStatistics, entry: { usage: Usage; api?: string } | undefined): void {
+	if (!entry) return;
+	const { usage, api } = entry;
+	// `target.input` is stored reconciled (raw input + Cursor phantom). Strip the
+	// current phantom to recover the raw input, fold in this usage, then re-apply
+	// the phantom computed from Cursor-agent messages only — so non-Cursor input
+	// is never inflated by Cursor's cumulative counter in a mixed-provider session.
+	const oldCursorPhantom = Math.max(0, target.latestCursorTotalTokens - target.cursorSummedTokens);
+	target.input -= oldCursorPhantom;
 	target.input += usage.input;
 	target.output += usage.output;
 	target.cacheRead += usage.cacheRead;
 	target.cacheWrite += usage.cacheWrite;
-	target.totalTokens += usage.totalTokens;
 	target.orchestrationInput += usage.orchestration?.input ?? 0;
 	target.orchestrationOutput += usage.orchestration?.output ?? 0;
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+	if (api === "cursor-agent") {
+		const previousCursorTotalTokens = target.latestCursorTotalTokens;
+		target.cursorSummedTokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		target.latestCursorTotalTokens = Math.max(target.latestCursorTotalTokens, usage.totalTokens ?? 0);
+		// Cursor's `totalTokens` is cumulative for the conversation, so only add
+		// growth beyond the previous high-water mark. Summing every turn would
+		// report 35k for cumulative snapshots of 10k then 25k.
+		target.totalTokens += target.latestCursorTotalTokens - previousCursorTotalTokens;
+	} else {
+		target.totalTokens += usage.totalTokens;
+	}
+	target.input = reconcileCursorCumulativeTokens({
+		totalInput: target.input,
+		cursorSummedTokens: target.cursorSummedTokens,
+		latestCursorTotalTokens: target.latestCursorTotalTokens,
+	}).totalInput;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {

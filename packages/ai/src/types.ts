@@ -535,6 +535,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cursorExecHandlers?: CursorExecHandlers;
 	/** Hook to handle tool results from Cursor exec */
 	cursorOnToolResult?: CursorToolResultHandler;
+	/**
+	 * Enable Cursor's MAX mode for the request. Maps to `RequestedModel.max_mode`
+	 * on the cursor-agent wire and unlocks the model's `extendedContext` window
+	 * (typically 1M for GPT-5.4 / GPT-5.5) at the cost of Cursor's premium
+	 * pricing tier above the base window. Ignored by non-cursor providers.
+	 */
+	cursorMaxMode?: boolean;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */

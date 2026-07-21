@@ -119,27 +119,19 @@ export class FooterComponent implements Component {
 	render(width: number): readonly string[] {
 		const state = this.session.state;
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-		let totalPremiumRequests = 0;
-
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
-			}
-		}
+		// SessionManager maintains these incrementally on every append (assistant message + task
+		// tool sub-agent results), with per-message Cursor cumulative-token reconciliation already
+		// applied. Reading the snapshot avoids walking all entries per render.
+		const {
+			input: totalInput,
+			output: totalOutput,
+			cacheRead: totalCacheRead,
+			cacheWrite: totalCacheWrite,
+			cost: totalCost,
+			premiumRequests: totalPremiumRequests,
+		} = this.session.sessionManager.getUsageStatistics();
 
 		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextTokens = contextUsage?.tokens ?? 0;

@@ -249,4 +249,19 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
+	/**
+	 * Running max of `usage.totalTokens` seen on `cursor-agent` assistant messages.
+	 * Cursor reports a monotonically-increasing cumulative counter; we anchor the
+	 * reconciled `input` against this so all consumers (footer, getSessionStats,
+	 * context-usage) agree on the cumulative total without re-walking messages.
+	 */
+	latestCursorTotalTokens: number;
+	/**
+	 * Sum of input+output+cacheRead+cacheWrite over `cursor-agent` assistant
+	 * messages only. The reconciled `input` carries a phantom equal to
+	 * `latestCursorTotalTokens - cursorSummedTokens`; isolating the Cursor sum
+	 * keeps a mixed-provider session from folding Cursor's cumulative counter
+	 * onto unrelated non-Cursor usage.
+	 */
+	cursorSummedTokens: number;
 }

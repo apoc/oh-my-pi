@@ -162,6 +162,17 @@ describe("status line session accent", () => {
 	});
 });
 
+describe("context percentage segment", () => {
+	it("renders unknown usage as a question mark", () => {
+		const ctx = createCtx();
+		ctx.contextPercent = null;
+		ctx.contextWindow = 272_000;
+
+		const rendered = renderSegment("context_pct", ctx);
+		expect(rendered.content).toContain("?/272K");
+		expect(rendered.content).not.toContain("0.0%");
+	});
+});
 describe("path segment truncation at varying maxLength", () => {
 	let tmpDir: string;
 

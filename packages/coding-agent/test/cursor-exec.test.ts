@@ -318,7 +318,6 @@ describe("CursorExecHandlers advise routing (issue #5680)", () => {
 			h2Request,
 			handlers,
 			undefined,
-			{ sawTokenDelta: false },
 			[],
 		);
 
@@ -348,7 +347,6 @@ describe("CursorExecHandlers advise routing (issue #5680)", () => {
 			h2Request,
 			undefined,
 			undefined,
-			{ sawTokenDelta: false },
 			[],
 		);
 

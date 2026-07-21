@@ -1792,6 +1792,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+				maxMode: options?.cursorMaxMode === true,
 			});
 		}
 

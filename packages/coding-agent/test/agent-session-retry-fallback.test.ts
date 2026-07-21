@@ -44,6 +44,27 @@ function getLastAssistantMessage(session: AgentSession): AssistantMessage {
 	return lastMessage;
 }
 
+function createCursorMaxModel(id: string): Model<"cursor-agent"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "cursor-agent",
+		provider: "cursor-test",
+		baseUrl: "https://cursor.example.test",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 64_000,
+		extendedContext: {
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			baseContextWindow: 272_000,
+			baseMaxTokens: 64_000,
+		},
+	});
+}
+
 function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Agent {
 	const mock = createMockModel();
 	let primaryAttempts = 0;
@@ -337,6 +358,94 @@ describe("AgentSession retry fallback", () => {
 			provider: advisorPrimary.provider,
 			id: advisorPrimary.id,
 		});
+	});
+
+	it("applies and restores Cursor MAX across advisor fallback switches", async () => {
+		const mainModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!mainModel) throw new Error("Expected bundled main model to exist");
+		const advisorPrimary = createCursorMaxModel("advisor-primary");
+		const advisorFallback = createCursorMaxModel("advisor-fallback");
+		const primarySelector = `${advisorPrimary.provider}/${advisorPrimary.id}`;
+		const fallbackSelector = `${advisorFallback.provider}/${advisorFallback.id}`;
+
+		const available = modelRegistry.getAvailable();
+		const findModel = modelRegistry.find.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([...available, advisorPrimary, advisorFallback]);
+		vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) => {
+			if (provider === advisorPrimary.provider && id === advisorPrimary.id) return advisorPrimary;
+			if (provider === advisorFallback.provider && id === advisorFallback.id) return advisorFallback;
+			return findModel(provider, id);
+		});
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
+
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }, { content: ["Primary complete again"] }],
+		});
+		const advisorMock = createMockModel();
+		let advisorPrimaryAttempts = 0;
+		const advisorRequests: Array<{ selector: string; maxMode: boolean | undefined }> = [];
+		const fallbackSucceeded = Promise.withResolvers<void>();
+		const primaryRestored = Promise.withResolvers<void>();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mainMock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+			"advisor.syncBacklog": "1",
+		});
+		settings.setModelRole("advisor", `${primarySelector}:max`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				advisorRequests.push({ selector, maxMode: options?.cursorMaxMode });
+				if (selector === primarySelector && advisorPrimaryAttempts++ === 0) {
+					advisorMock.push({ throw: "rate limit exceeded. Please retry in 200ms" });
+				} else if (selector === primarySelector) {
+					primaryRestored.resolve();
+					advisorMock.push({ content: ["Advisor primary restored"] });
+				} else if (selector === fallbackSelector) {
+					advisorMock.push({ content: ["Advisor recovered"] });
+				} else {
+					throw new Error(`Unexpected advisor model requested: ${selector}`);
+				}
+				return advisorMock.stream(model, context, options);
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_succeeded") fallbackSucceeded.resolve();
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("Trigger advisor fallback");
+		await session.waitForIdle();
+		await fallbackSucceeded.promise;
+
+		expect(advisorRequests).toEqual([
+			{ selector: primarySelector, maxMode: true },
+			{ selector: fallbackSelector, maxMode: false },
+		]);
+		expect(session.getAdvisorAgent()?.getCursorMaxMode()).toBe(false);
+		expect(session.getAdvisorAgent()?.state.model?.contextWindow).toBe(272_000);
+
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
+		await session.prompt("Trigger advisor primary restore");
+		await session.waitForIdle();
+		await primaryRestored.promise;
+
+		expect(advisorRequests.at(-1)).toEqual({ selector: primarySelector, maxMode: true });
+		expect(session.getAdvisorAgent()?.getCursorMaxMode()).toBe(true);
+		expect(session.getAdvisorAgent()?.state.model?.contextWindow).toBe(1_000_000);
 	});
 
 	it("activates a model-keyed fallback chain without any role assignment", async () => {

@@ -26,25 +26,48 @@ describe("resolvePlanModelTransition", () => {
 	it("switches to the resolved plan model when it differs from the active one", () => {
 		const plan = model("anthropic", "opus");
 		const transition = resolvePlanModelTransition(model("openai", "gpt"), resolved(plan), false);
-		expect(transition).toEqual({ kind: "apply", model: plan, thinkingLevel: undefined, deferred: false });
+		expect(transition).toEqual({
+			kind: "apply",
+			model: plan,
+			thinkingLevel: undefined,
+			maxMode: undefined,
+			deferred: false,
+		});
 	});
 
 	it("defers the switch while the session is streaming", () => {
 		const plan = model("anthropic", "opus");
 		const transition = resolvePlanModelTransition(model("openai", "gpt"), resolved(plan), true);
-		expect(transition).toEqual({ kind: "apply", model: plan, thinkingLevel: undefined, deferred: true });
+		expect(transition).toEqual({
+			kind: "apply",
+			model: plan,
+			thinkingLevel: undefined,
+			maxMode: undefined,
+			deferred: true,
+		});
 	});
 
 	it("carries the plan role's explicit thinking level into the switch", () => {
 		const plan = model("anthropic", "opus");
 		const transition = resolvePlanModelTransition(model("openai", "gpt"), resolved(plan, ThinkingLevel.High), false);
-		expect(transition).toEqual({ kind: "apply", model: plan, thinkingLevel: ThinkingLevel.High, deferred: false });
+		expect(transition).toEqual({
+			kind: "apply",
+			model: plan,
+			thinkingLevel: ThinkingLevel.High,
+			maxMode: undefined,
+			deferred: false,
+		});
 	});
 
 	it("only adjusts thinking when the model is unchanged but the level is explicit", () => {
 		const plan = model("anthropic", "opus");
 		const transition = resolvePlanModelTransition(plan, resolved(model("anthropic", "opus"), AUTO_THINKING), false);
-		expect(transition).toEqual({ kind: "thinking", thinkingLevel: AUTO_THINKING });
+		expect(transition).toEqual({
+			kind: "flags",
+			model: plan,
+			thinkingLevel: AUTO_THINKING,
+			maxMode: undefined,
+		});
 	});
 
 	it("is a no-op when the model matches and no explicit thinking level is set", () => {

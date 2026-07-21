@@ -1,6 +1,25 @@
 # Changelog
 
 ## [Unreleased]
+### Breaking Changes
+
+- `AgentSession.setModelTemporary` signature changed from `(model, thinkingLevel?: ConfiguredThinkingLevel, opts?: { ephemeral? })` to `(model, flags: SelectorFlags & { ephemeral?: boolean } = {})`. Callers passing a positional thinking level must migrate to `setModelTemporary(model, { thinkingLevel: level })`.
+
+### Added
+
+- Added a Cursor MAX-mode toggle to the model selector for models that declare `extendedContext` (currently Cursor GPT-5.4 / GPT-5.5 1M variants). After picking a role, the second selector step is a `MAX off / MAX on` choice instead of a thinking-effort list, and the chosen state is persisted in the role-value string as a `:max` suffix (e.g. `cursor/gpt-5.5-extra-high:max`). The status line surfaces a `· MAX` indicator when active.
+
+### Changed
+
+- Changed the `read` tool prompt to make structural summaries explicit orientation-only output and require re-reading folded ranges before reasoning about, debugging, or editing hidden bodies.
+
+### Fixed
+
+- Fixed subagents launched in the same parallel batch not seeing each other in their initial `# IRC Peers` system-prompt block by pre-registering the agent in the global `AgentRegistry` before `rebuildSystemPrompt` runs and attaching the live session afterwards.
+- Fixed the TUI status line's context-usage indicator double-accounting Cursor sessions and lagging until `message_end`. The status-line component now consumes `AgentSession.getContextUsage()` (which respects compaction boundaries, post-compaction validity, live streaming assistant usage, and the model-reported `contextWindow`) instead of re-deriving tokens via `calculatePromptTokens(lastAssistantMessage.usage)`.
+- Fixed `extractExplicitThinkingSelector` silently dropping the thinking level when the role value also carries a trailing `:max` flag (e.g. `provider/id:high:max`). The shared `peelSelectorFlags` helper now strips `:max` and `:<thinking>` segments in either order before reporting either flag.
+- Fixed Cursor sessions displaying text that appears after a tool call as if it preceded the tool call. `EventController` now uses `SegmentedMessageBuilder` to split `AssistantMessageComponent` at tool-call boundaries, so post-tool text renders as a separate sibling segment in the correct emission order. `UiHelpers` rebuilds these segmented messages on transcript replay.
+- Fixed Cursor MAX mode not being inherited by subagent sessions. `ExecutorOptions.cursorMaxMode` now propagates the parent session's MAX-mode flag through the task executor so subagents launched with a Cursor model share the same MAX/base context window as the parent.
 
 ## [17.0.6] - 2026-07-20
 

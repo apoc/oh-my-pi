@@ -661,7 +661,7 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(roleResolved.thinkingLevel).toBe(Effort.High);
 
 		const roleThinkingLevel = session.resolveTemporaryModelThinkingLevel(temporaryModel);
-		await session.setModelTemporary(temporaryModel, roleThinkingLevel);
+		await session.setModelTemporary(temporaryModel, { thinkingLevel: roleThinkingLevel });
 
 		expect(session.model?.provider).toBe(temporaryModel.provider);
 		expect(session.model?.id).toBe(temporaryModel.id);

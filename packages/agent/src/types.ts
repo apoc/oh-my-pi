@@ -356,6 +356,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getModel?: () => Model;
 
 	/**
+	 * Dynamic Cursor MAX-mode override, resolved per LLM call. When set, its
+	 * return value (including `false`) overrides the static `cursorMaxMode`
+	 * captured at run-loop start, keeping the provider flag aligned with a
+	 * model projected by a mid-run MAX toggle.
+	 */
+	getCursorMaxMode?: () => boolean | undefined;
+
+	/**
 	 * Dynamic reasoning-disable override, resolved per LLM call. When set,
 	 * its return value overrides the static `disableReasoning` from
 	 * `SimpleStreamOptions` for that request. Pair with `getReasoning` so

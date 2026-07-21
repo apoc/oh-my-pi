@@ -5,7 +5,6 @@ import {
 	processInteractionUpdate,
 	synthesizeCursorExecToolCall,
 	type ToolCallState,
-	type UsageState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { getStreamingPartialJson, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -16,7 +15,6 @@ interface Harness {
 	stream: AssistantMessageEventStream;
 	captured: AssistantMessageEvent[];
 	state: BlockState;
-	usageState: UsageState;
 }
 
 function newHarness(): Harness {
@@ -71,7 +69,7 @@ function newHarness(): Harness {
 		},
 		setFirstTokenTime: () => {},
 	};
-	return { output, stream, captured, state, usageState: { sawTokenDelta: false } };
+	return { output, stream, captured, state };
 }
 
 function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
@@ -90,7 +88,6 @@ function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
 		h.output,
 		h.stream,
 		h.state,
-		h.usageState,
 	);
 }
 
@@ -100,7 +97,6 @@ function pushArgsTextDelta(h: Harness, argsTextDelta: string): void {
 		h.output,
 		h.stream,
 		h.state,
-		h.usageState,
 	);
 }
 
@@ -115,18 +111,11 @@ function completeMcpToolCall(h: Harness, args: Record<string, Uint8Array> | unde
 		h.output,
 		h.stream,
 		h.state,
-		h.usageState,
 	);
 }
 
 function pushTextDelta(h: Harness, text: string): void {
-	processInteractionUpdate(
-		{ message: { case: "textDelta", value: { text } } },
-		h.output,
-		h.stream,
-		h.state,
-		h.usageState,
-	);
+	processInteractionUpdate({ message: { case: "textDelta", value: { text } } }, h.output, h.stream, h.state);
 }
 
 describe("mergeCursorMcpToolCallArgs", () => {

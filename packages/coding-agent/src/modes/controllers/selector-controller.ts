@@ -669,7 +669,7 @@ export class SelectorController {
 					try {
 						// Session-only: update agent state but don't persist the model to settings.
 						const roleThinkingLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
-						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
+						await this.ctx.session.setModelTemporary(model, { thinkingLevel: roleThinkingLevel });
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
@@ -742,7 +742,14 @@ export class SelectorController {
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
-				onAssign: async (model, role, thinkingLevel, selector, scope?: ModelRoleSelectionScope) => {
+				onAssign: async (
+					model,
+					role,
+					thinkingLevel,
+					selector,
+					scope?: ModelRoleSelectionScope,
+					maxMode?: boolean,
+				) => {
 					const releaseDefaultMutation = role === "default" ? await this.#acquireDefaultRoleMutation() : undefined;
 					const configuredStorage = this.ctx.settings.get("modelRoleStorage");
 					const targetScope = configuredStorage === "project" ? (scope ?? "project") : "global";
@@ -772,7 +779,7 @@ export class SelectorController {
 							if (shadowedGlobal) {
 								this.ctx.settings.setModelRole(
 									"default",
-									formatModelSelectorValue(selectorValue, concreteThinking),
+									formatModelSelectorValue(selectorValue, concreteThinking, maxMode),
 								);
 								if (isAuto) {
 									this.ctx.settings.set("defaultThinkingLevel", AUTO_THINKING);
@@ -780,7 +787,7 @@ export class SelectorController {
 							} else if (shadowedProject) {
 								this.ctx.settings.setProjectModelRole(
 									"default",
-									formatModelSelectorValue(selectorValue, concreteThinking),
+									formatModelSelectorValue(selectorValue, concreteThinking, maxMode),
 								);
 								if (isAuto) {
 									this.ctx.settings.set("defaultThinkingLevel", AUTO_THINKING);
@@ -789,6 +796,7 @@ export class SelectorController {
 								const { switched } = await this.ctx.session.setModel(model, role, {
 									selector,
 									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
+									maxMode,
 									persist: targetScope === "global",
 									currentContextTokens,
 								});
@@ -796,7 +804,7 @@ export class SelectorController {
 								if (targetScope === "project") {
 									this.ctx.settings.setProjectModelRole(
 										"default",
-										formatModelSelectorValue(selectorValue, concreteThinking),
+										formatModelSelectorValue(selectorValue, concreteThinking, maxMode),
 									);
 								}
 								if (isAuto) {
@@ -810,7 +818,7 @@ export class SelectorController {
 							this.ctx.showStatus(`${defaultStatusLabel} model: ${selector ?? model.id}`);
 						} else {
 							// Other roles (smol, slow, custom): update settings, not the current model.
-							const modelRoleValue = formatModelSelectorValue(selectorValue, concreteThinking);
+							const modelRoleValue = formatModelSelectorValue(selectorValue, concreteThinking, maxMode);
 							if (targetScope === "project") {
 								this.ctx.settings.setProjectModelRole(role, modelRoleValue);
 							} else {

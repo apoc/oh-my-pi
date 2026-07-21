@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type Agent,
+	type AgentToolResult,
 	AgentBusyError,
 	type AgentMessage,
 	EventLoopKeepalive,
@@ -88,7 +89,8 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
-import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { humanizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { ToolError } from "../tools/tool-errors";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
@@ -546,8 +548,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
 	#goalSuppressNextContinuation = false;
-	#planModePreviousModelState: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
-	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
+	#planModePreviousModelState:
+		| { model: Model; thinkingLevel?: ConfiguredThinkingLevel; maxMode?: boolean }
+		| undefined;
+	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel; maxMode?: boolean } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
 	#planModeHasEntered = false;
@@ -2146,7 +2150,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// active model on the plan role, so overwriting here would restore the old
 		// plan model instead of the user's real pre-plan model.
 		this.#planModePreviousModelState = currentModel
-			? { model: currentModel, thinkingLevel: this.session.configuredThinkingLevel() }
+			? {
+					model: currentModel,
+					thinkingLevel: this.session.configuredThinkingLevel(),
+					maxMode: this.session.agent.getCursorMaxMode(),
+				}
 			: undefined;
 
 		await this.#applyPlanModelTransition(currentModel, resolved);
@@ -2181,7 +2189,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingPlanModelSwitch = false;
 	}
 
-	/** Apply (or defer) the model/thinking change implied by the resolved plan role. */
+	/** Apply (or defer) the model and selector flags implied by the resolved plan role. */
 	async #applyPlanModelTransition(currentModel: Model | undefined, resolved: ResolvedModelRoleValue): Promise<void> {
 		const transition = resolvePlanModelTransition(currentModel, resolved, this.session.isStreaming);
 		if (transition.kind !== "apply" || !transition.deferred) {
@@ -2190,17 +2198,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		switch (transition.kind) {
 			case "none":
 				return;
-			case "thinking":
-				this.session.setThinkingLevel(transition.thinkingLevel);
+			case "flags":
+				if (transition.thinkingLevel !== undefined) {
+					this.session.setThinkingLevel(transition.thinkingLevel);
+				}
+				if (transition.maxMode !== undefined) {
+					this.session.agent.setCursorMaxMode(transition.model, transition.maxMode);
+				}
 				return;
 			case "apply":
 				if (transition.deferred) {
-					this.#pendingModelSwitch = { model: transition.model, thinkingLevel: transition.thinkingLevel };
+					this.#pendingModelSwitch = {
+						model: transition.model,
+						thinkingLevel: transition.thinkingLevel,
+						maxMode: transition.maxMode,
+					};
 					this.#pendingPlanModelSwitch = true;
 					return;
 				}
 				try {
-					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
+					await this.session.setModelTemporary(transition.model, {
+						thinkingLevel: transition.thinkingLevel,
+						maxMode: transition.maxMode,
+					});
 				} catch (error) {
 					this.showWarning(
 						`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
@@ -2217,7 +2237,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingPlanModelSwitch = false;
 		if (!pending) return;
 		try {
-			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
+			await this.session.setModelTemporary(pending.model, {
+				thinkingLevel: pending.thinkingLevel,
+				maxMode: pending.maxMode,
+			});
 		} catch (error) {
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
@@ -2400,16 +2423,50 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}
 
-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
+	/** Plan-proposal handler registered while plan mode is active. The agent
+	 *  submits the finalized plan by writing the chosen `<slug>`/title to
+	 *  `xd://propose`; this handler validates the plan file exists, normalizes
+	 *  the title, and shapes the payload that `event-controller` forwards to
+	 *  `handlePlanApproval`. */
+	async #handlePlanProposal(title: string): Promise<AgentToolResult<unknown>> {
+		const state = this.session.getPlanModeState?.();
+		if (!state?.enabled) {
+			throw new ToolError("Plan mode is not active.");
+		}
+		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+			suppliedTitle: title,
+			statePlanFilePath: state.planFilePath,
+			readPlan: (url: string) => this.#readPlanFile(url),
+			listPlanFiles: () => this.#listLocalPlanFiles(),
+		});
+		const details: PlanApprovalDetails = {
+			planFilePath,
+			title: resolvedTitle,
+			planExists: true,
+		};
+		return {
+			content: [{ type: "text" as const, text: "Plan ready for approval." }],
+			details,
+		};
+	}
+
+	async #restorePlanPreviousModel(prev: {
+		model: Model;
+		thinkingLevel?: ConfiguredThinkingLevel;
+		maxMode?: boolean;
+	}): Promise<void> {
 		if (modelsAreEqual(this.session.model, prev.model)) {
-			// Same model — only thinking level may differ. Avoid setModelTemporary()
-			// which would reset provider-side sessions and break continuity.
+			// Same model — only thinking level and MAX mode may differ. Avoid
+			// setModelTemporary() which would reset provider-side sessions
+			// (openai-responses/Codex) and break conversation continuity; restore
+			// the flag directly, mirroring the session-restore pattern.
 			this.session.setThinkingLevel(prev.thinkingLevel);
+			this.session.agent.setCursorMaxMode(prev.model, prev.maxMode ?? false);
 		} else if (this.session.isStreaming) {
-			this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
+			this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel, maxMode: prev.maxMode };
 			this.#pendingPlanModelSwitch = false;
 		} else {
-			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+			await this.session.setModelTemporary(prev.model, { thinkingLevel: prev.thinkingLevel, maxMode: prev.maxMode });
 		}
 	}
 

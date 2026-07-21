@@ -110,6 +110,8 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** Cursor MAX-mode selector state; inherited from the parent's active model when set. */
+	cursorMaxMode?: boolean;
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -386,6 +388,7 @@ function buildExecutorOptions(
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
+		cursorMaxMode: request.cursorMaxMode,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		...(policy.schema.source === "none"
 			? {}

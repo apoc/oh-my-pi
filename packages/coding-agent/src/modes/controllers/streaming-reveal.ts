@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { type Component, getSegmenter } from "@oh-my-pi/pi-tui";
+import { getSegmenter } from "@oh-my-pi/pi-tui";
 import { LRUCache } from "lru-cache/raw";
 import { formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import type { AssistantMessageComponent } from "../components/assistant-message";
@@ -10,21 +10,18 @@ export const CATCHUP_FRAMES = 8;
 
 type AssistantContentBlock = AssistantMessage["content"][number];
 type DisplayThinkingContentBlock = Extract<AssistantContentBlock, { type: "thinking" }> & { rawThinking?: string };
-/** The concrete streaming-reveal target is an {@link AssistantMessageComponent}; the
- *  Component intersection is what lets the reveal request component-scoped renders
- *  through {@link TUI.requestComponentRender} instead of forcing a full-tree walk. */
-type StreamingRevealComponent = Pick<AssistantMessageComponent, "updateContent"> & Component;
+type StreamingRevealTarget = Pick<AssistantMessageComponent, "updateContent">;
 type GraphemeSlicer = (index: number, text: string, units: number) => string;
 
 type StreamingRevealControllerOptions = {
 	getSmoothStreaming(): boolean;
 	getHideThinkingBlock(): boolean;
 	getProseOnlyThinking(): boolean;
-	/** Called after each reveal tick with the component whose subtree changed;
-	 *  callers scope the render to that subtree (a full tree walk here at 30fps
-	 *  costs 5% of CPU on its own and drives the Box/Container overhead that
-	 *  cascades into another ~15% — see issue #4377). */
-	requestRender(component: Component): void;
+	/** Called after each reveal tick so the caller can request a scoped component
+	 *  render. The caller resolves the real in-tree component (e.g. the open
+	 *  segment from SegmentedMessageBuilder) — the reveal target itself need not
+	 *  be a Component (issue #4377). */
+	requestRender(): void;
 };
 
 const graphemeCountCache = new LRUCache<string, number>({ max: 128 });
@@ -217,9 +214,9 @@ export class StreamingRevealController {
 	readonly #getSmoothStreaming: () => boolean;
 	readonly #getHideThinkingBlock: () => boolean;
 	readonly #getProseOnlyThinking: () => boolean;
-	readonly #requestRender: (component: Component) => void;
+	readonly #requestRender: () => void;
 	#target: AssistantMessage | undefined;
-	#component: StreamingRevealComponent | undefined;
+	#component: StreamingRevealTarget | undefined;
 	#timer: NodeJS.Timeout | undefined;
 	#revealed = 0;
 	#hideThinkingBlock = false;
@@ -247,7 +244,7 @@ export class StreamingRevealController {
 		);
 	}
 
-	begin(component: StreamingRevealComponent, message: AssistantMessage): void {
+	begin(component: StreamingRevealTarget, message: AssistantMessage): void {
 		this.stop();
 		this.#component = component;
 		this.#target = message;
@@ -391,7 +388,7 @@ export class StreamingRevealController {
 		component.updateContent(this.#build(target, this.#revealed), {
 			transient: true,
 		});
-		this.#requestRender(component);
+		this.#requestRender();
 		if (this.#revealed >= total) {
 			this.#stopTimer();
 		}

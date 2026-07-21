@@ -996,9 +996,8 @@ export class StatusLineComponent implements Component {
 	 *
 	 * The numerator comes from `session.getContextUsage()`, which anchors on the
 	 * last assistant's real prompt-token count — so the bar matches the provider
-	 * and the `/context` panel — and reports `null` while that count is unknown
-	 * (right after compaction, before the next response). Exposed (non-private)
-	 * for unit tests and the collab host's state broadcast.
+	 * and the `/context` panel instead of an independent estimate. Exposed
+	 * (non-private) for unit tests and the collab host's state broadcast.
 	 */
 	getCachedContextBreakdown(): { usedTokens: number; contextWindow: number } {
 		const messages = this.session.messages ?? EMPTY_MESSAGES;
@@ -1072,6 +1071,8 @@ export class StatusLineComponent implements Component {
 			orchestrationCacheRead: 0,
 			premiumRequests: 0,
 			cost: 0,
+			latestCursorTotalTokens: 0,
+			cursorSummedTokens: 0,
 		};
 		const usageStats = {
 			...aggregateUsageStats,

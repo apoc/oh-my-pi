@@ -81,6 +81,37 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.cost).toBeCloseTo(5.629, 8);
 	});
 
+	it("uses the latest Cursor cumulative total instead of summing snapshots", () => {
+		const session = SessionManager.inMemory();
+
+		for (const [timestamp, totalTokens] of [
+			[1, 10_000],
+			[2, 25_000],
+		] as const) {
+			session.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "cursor turn" }],
+				api: "cursor-agent",
+				provider: "cursor",
+				model: "gpt-5.5-extra-high",
+				usage: {
+					input: 5_000,
+					output: 5_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp,
+			});
+		}
+
+		const usage = session.getUsageStatistics();
+		expect(usage.latestCursorTotalTokens).toBe(25_000);
+		expect(usage.totalTokens).toBe(25_000);
+	});
+
 	it("preserves fractional premium request multipliers", () => {
 		const session = SessionManager.inMemory();
 

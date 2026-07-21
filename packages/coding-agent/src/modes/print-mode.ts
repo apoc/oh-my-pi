@@ -147,11 +147,19 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 
 		const resolved = session.resolveRoleModelWithThinking("plan");
 		const transition = resolvePlanModelTransition(session.model, resolved, false);
-		if (transition.kind === "thinking") {
-			session.setThinkingLevel(transition.thinkingLevel);
+		if (transition.kind === "flags") {
+			if (transition.thinkingLevel !== undefined) {
+				session.setThinkingLevel(transition.thinkingLevel);
+			}
+			if (transition.maxMode !== undefined) {
+				session.agent.setCursorMaxMode(transition.model, transition.maxMode);
+			}
 		} else if (transition.kind === "apply") {
 			try {
-				await session.setModelTemporary(transition.model, transition.thinkingLevel);
+				await session.setModelTemporary(transition.model, {
+					thinkingLevel: transition.thinkingLevel,
+					maxMode: transition.maxMode,
+				});
 			} catch (error) {
 				logger.warn("Failed to switch to plan model for print mode", { error: String(error) });
 			}

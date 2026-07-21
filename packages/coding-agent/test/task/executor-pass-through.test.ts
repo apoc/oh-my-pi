@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -94,13 +95,37 @@ const baseOptions = {
 	enableLsp: false,
 };
 
-function createModelRegistry(model: Model): ModelRegistry {
+function createModelRegistry(modelOrModels: Model | Model[]): ModelRegistry {
+	const models = Array.isArray(modelOrModels) ? modelOrModels : [modelOrModels];
 	return {
 		authStorage: {},
 		refresh: async () => {},
-		getAvailable: () => [model],
+		getAvailable: () => models,
+		getAll: () => models,
+		find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
 		getApiKey: async () => "test-key",
 	} as unknown as ModelRegistry;
+}
+
+function makeCursorMaxModel(id: string): Model {
+	return buildModel({
+		id,
+		name: id,
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 64_000,
+		extendedContext: {
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			baseContextWindow: 272_000,
+			baseMaxTokens: 64_000,
+		},
+	});
 }
 
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
@@ -277,5 +302,34 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
+	});
+
+	it("keeps MAX in subagent runtime fallback selectors", async () => {
+		const primary = makeCursorMaxModel("primary-max");
+		const fallback = makeCursorMaxModel("fallback-max");
+		const settings = Settings.isolated();
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const id = "subagent-max-fallback";
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			agent: {
+				...baseAgent,
+				model: [`${primary.provider}/${primary.id}:max`, `${fallback.provider}/${fallback.id}:max`],
+			},
+			settings,
+			modelRegistry: createModelRegistry([primary, fallback]),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		const fallbackRole = `subagent:${id}`;
+		expect(forwarded?.settings?.getModelRole(fallbackRole)).toBe(`${primary.provider}/${primary.id}:max`);
+		expect(forwarded?.settings?.get("retry.fallbackChains")?.[fallbackRole]).toEqual([
+			`${fallback.provider}/${fallback.id}:max`,
+		]);
+		expect(forwarded?.cursorMaxMode).toBe(true);
 	});
 });

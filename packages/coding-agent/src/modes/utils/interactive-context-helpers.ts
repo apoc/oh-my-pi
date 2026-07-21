@@ -15,6 +15,7 @@ import type { InteractiveModeContext } from "../types";
 export function createAssistantMessageComponent(
 	ctx: InteractiveModeContext,
 	message?: AssistantMessage,
+	options?: { startIndex?: number; endIndex?: number; isFinalSegment?: boolean },
 ): AssistantMessageComponent {
 	const component = new AssistantMessageComponent(
 		message,
@@ -23,6 +24,7 @@ export function createAssistantMessageComponent(
 		ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
+		options,
 	);
 	component.setImagesVisible(ctx.settings.get("terminal.showImages"));
 	return component;

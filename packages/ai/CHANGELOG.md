@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Cursor MAX-mode support on the cursor-agent stream. `CursorOptions.maxMode` (and the upstream `SimpleStreamOptions.cursorMaxMode` plumbed through `Agent` → `mapOptionsForApi`) flips both `ModelDetails.max_mode` and the forward-compatible `RequestedModel.max_mode` on the gRPC `AgentRunRequest`. When off, requests stay on Cursor's base context window and base pricing tier; when on, the model's full context (`extendedContext.contextWindow`) is unlocked at Cursor's premium pricing tier above the base window.
+- Added an `extendedContext` field to the generic `Model<TApi>` interface (`{ contextWindow; maxTokens; baseContextWindow; baseMaxTokens }`) describing the opt-in larger window unlocked by a provider-specific flag. Cursor discovery now populates it for GPT-5.4 / GPT-5.5 1M variants; non-cursor providers leave it unset.
+- Cursor discovery now classifies GPT-5.4 / GPT-5.5 1M variants by model id. Matching models advertise the no-MAX defaults (`contextWindow: 272_000`, `maxTokens: 64_000`) plus `extendedContext: { contextWindow: 1_000_000, maxTokens: 128_000, baseContextWindow: 272_000, baseMaxTokens: 64_000 }`; the conservative 200k / 64k fallback remains for unrecognized Cursor models.
+
+### Changed
+
+- Made the conversation-checkpoint `usedTokens` value from Cursor's `cursor-agent` stream an authoritative cumulative-usage floor. `handleConversationCheckpointUpdate` no longer ignores checkpoints once a `tokenDelta` has been seen and no longer overwrites `output` with the conversation total: a new exported helper `applyCursorConversationTokenDetails` anchors `totalTokens` with `Math.max(totalTokens, usedTokens)` while intentionally leaving per-turn `input` / `cacheRead` unchanged. This fixes the context-usage indicator climbing far too slowly on Cursor sessions (the bar tracked per-turn output deltas instead of the conversation total).
 
 ## [17.0.6] - 2026-07-20
 
@@ -44,6 +53,9 @@
 - Restored the `createAssistantMessageEventStream()` root export used by legacy provider extensions ([#5879](https://github.com/can1357/oh-my-pi/issues/5879)).
 - Fixed parallel Responses tool-result images interleaving synthetic user messages before all pending outputs, preventing strict OpenRouter/Moonshot backends from rejecting follow-up requests. ([#5850](https://github.com/can1357/oh-my-pi/issues/5850))
 - Fixed Kimi Code K3 requests to send native named efforts (`low`, `high`, `max`) and use adaptive effort rather than generic token budgets on explicit Anthropic transport overrides ([#5893](https://github.com/can1357/oh-my-pi/issues/5893)).
+- Fixed cross-provider replay of conversations recorded under Cursor's `cursor-agent` API failing with `messages.N.content.0.tool_result.tool_use_id: String should match pattern '^[a-zA-Z0-9_-]+$'` (and equivalent unpaired `tool_use`/`tool_result` errors on Google, OpenAI Responses, etc.). Cursor executes native and MCP tools via exec handlers and never emits `toolCall` blocks in the assistant message; the resulting `toolResult` messages reference IDs minted by its upstream OpenAI Responses bridge in `call_<id>\nfc_<itemId>` form, which fails Anthropic's pattern. `transformMessages` now detects orphan tool_results whose source assistant turn is `cursor-agent`, normalizes their IDs, and injects a synthetic `toolCall` block (same id, empty arguments) into the most recent preceding assistant message (or a synthesized leading assistant when none exists) so downstream conversion produces well-formed `tool_use`/`tool_result` pairs. Orphans sourced from any other provider (e.g. a `tool_use` folded away by compaction/handoff) are left for the pre-existing drop / `<stale-tool-result>` handling.
+- Fixed Cursor `cursor-agent` stream accumulating post-tool text into the pre-tool text block when the model interleaves text with tool calls (e.g. GPT-5.5). `processInteractionUpdate` now closes the active text block before opening a new thinking block and vice versa, so each content segment is emitted at its correct stream index.
+- Fixed Cursor MCP tool calls routed through the exec bridge remaining in the assistant content stream and being re-executed by the agent loop (double-execution). `ProcessInteractionUpdateOptions.suppressMcpToolCalls` (enabled when `execHandlers.mcp` is present) drops those tool-call events from the interaction stream; the exec bridge already ran them and delivers the result separately.
 - Automatically invalidate and rotate OAuth credentials when an "invalidated oauth token" error occurs
 - Fixed Anthropic usage reports treating the organization response header as the account identity, which caused the 5h/7d status-line segment to disappear for OAuth credentials without stored organization metadata. ([#5698](https://github.com/can1357/oh-my-pi/issues/5698))
 

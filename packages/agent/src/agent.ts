@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { isCursorAgent } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -369,7 +370,7 @@ export class Agent {
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
 	#cwdResolver?: () => string | undefined;
-
+	#cursorMaxMode: boolean = false;
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
@@ -809,6 +810,10 @@ export class Agent {
 	}
 
 	setModel(m: Model) {
+		if (isCursorAgent(m)) {
+			this.setCursorMaxMode(m, this.#cursorMaxMode);
+			return;
+		}
 		this.#state.model = m;
 	}
 
@@ -818,6 +823,39 @@ export class Agent {
 
 	setDisableReasoning(disabled: boolean) {
 		this.#state.disableReasoning = disabled;
+	}
+
+	/**
+	 * Atomic flag + model update for Cursor MAX mode. The model may be projected
+	 * (with `contextWindow` / `maxTokens` already overwritten to the extended
+	 * values) or canonical — `extendedContext.baseContextWindow` / `baseMaxTokens`
+	 * always carry the no-flag capacity, so projection and un-projection are
+	 * stateless. Pass `undefined` to reuse the current model.
+	 */
+	setCursorMaxMode(model: Model | undefined, enabled: boolean) {
+		const sourceModel = model ?? this.#state.model;
+		this.#cursorMaxMode = enabled;
+		if (!sourceModel) return;
+
+		const ext = isCursorAgent(sourceModel) ? sourceModel.extendedContext : undefined;
+		if (!ext) {
+			this.#state.model = sourceModel;
+			return;
+		}
+		const targetWindow = enabled ? ext.contextWindow : ext.baseContextWindow;
+		const targetMaxTokens = enabled ? ext.maxTokens : ext.baseMaxTokens;
+		// sourceModel may already carry the projected values (e.g. setCursorMaxMode called
+		// twice with the same flag, or setModel called with an already-projected model).
+		// Skip the spread to avoid creating an unnecessary new object.
+		if (sourceModel.contextWindow === targetWindow && sourceModel.maxTokens === targetMaxTokens) {
+			this.#state.model = sourceModel;
+			return;
+		}
+		this.#state.model = { ...sourceModel, contextWindow: targetWindow, maxTokens: targetMaxTokens };
+	}
+
+	getCursorMaxMode(): boolean {
+		return this.#cursorMaxMode;
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
@@ -986,6 +1024,7 @@ export class Agent {
 		this.#state.error = undefined;
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#cursorToolResultBuffer = [];
 	}
 
 	/** Send a prompt with an AgentMessage */
@@ -1062,7 +1101,7 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			throw new Error("Last message is from the assistant but no steering or follow-up messages are queued");
 		}
 
 		await this.#runLoop(undefined);
@@ -1109,7 +1148,9 @@ export class Agent {
 								if (updated) {
 									finalMessage = updated;
 								}
-							} catch {}
+							} catch (err) {
+								logger.error("Cursor tool result transform failed", { toolCallId: message.toolCallId, err });
+							}
 						}
 						// Cursor executes tools server-side during streaming. We buffer
 						// each toolResult and emit them right after the assistant message
@@ -1164,6 +1205,8 @@ export class Agent {
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async context => {
 				if (this.#listeners.size > 0) {
+					// Yield to the microtask queue so state-update events dispatched by listeners
+					// flush before the next model call reads updated system prompt or tools.
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
@@ -1173,6 +1216,7 @@ export class Agent {
 			cursorOnToolResult,
 			cwd: this.#cwd,
 			getCwd: this.#cwdResolver,
+			cursorMaxMode: this.#cursorMaxMode,
 			transformToolCallArguments: this.#transformToolCallArguments,
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
@@ -1189,6 +1233,7 @@ export class Agent {
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			getToolChoice,
 			getModel: () => this.#state.model ?? model,
+			getCursorMaxMode: () => this.#cursorMaxMode,
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
@@ -1264,8 +1309,9 @@ export class Agent {
 						break;
 
 					case "turn_end":
-						if (event.message.role === "assistant" && (event.message as any).errorMessage) {
-							this.#state.error = (event.message as any).errorMessage;
+						if (event.message.role === "assistant") {
+							const assistantMsg = event.message as AssistantMessage;
+							if (assistantMsg.errorMessage) this.#state.error = assistantMsg.errorMessage;
 						}
 						break;
 

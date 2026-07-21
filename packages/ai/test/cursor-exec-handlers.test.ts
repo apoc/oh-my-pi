@@ -1,25 +1,32 @@
 import { describe, expect, it } from "bun:test";
-import { create } from "@bufbuild/protobuf";
+import { create, fromBinary } from "@bufbuild/protobuf";
 import {
 	type BlockState,
 	buildCursorHistoryForTest,
 	buildCursorSystemPromptJsons,
+	buildGrpcRequest,
 	emptyGrepPatternRejection,
 	handleServerMessage,
+	processCursorInteractionUpdatesForTest,
 	resolveExecHandler,
 	streamCursor,
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
+import { applyCursorConversationTokenDetails, applyCursorTokenDelta } from "@oh-my-pi/pi-ai/providers/cursor-utils";
 import { streamCursor as lazyStreamCursor, setCursorProviderModule } from "@oh-my-pi/pi-ai/providers/register-builtins";
 import type { AssistantMessage, Context, CursorExecHandlers, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { applyCursorDiscoveredModelPolicy, normalizeCursorModel } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import {
+	AgentClientMessageSchema,
 	type AgentRunRequest,
 	AgentServerMessageSchema,
 	ExecServerMessageSchema,
 	McpArgsSchema,
+	type ModelDetails,
 	ReadArgsSchema,
+	type RequestedModel,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 
 const cursorModel: Model<"cursor-agent"> = buildModel({
@@ -156,6 +163,45 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 
 		// Should get error result (handler threw accessing undefined.sentinel)
 		expect(execResult).toEqual({ tag: "error", message: expect.any(String) });
+	});
+});
+
+describe("Cursor MCP interaction updates", () => {
+	const mcpToolCallStarted = {
+		message: {
+			case: "toolCallStarted",
+			value: {
+				toolCall: {
+					mcpToolCall: {
+						args: {
+							toolCallId: "toolu_task_1",
+							name: "task",
+							toolName: "task",
+						},
+					},
+				},
+			},
+		},
+	};
+
+	it("suppresses provider-executed MCP tool calls from assistant content", () => {
+		const { output, events } = processCursorInteractionUpdatesForTest([mcpToolCallStarted], {
+			suppressMcpToolCalls: true,
+		});
+
+		expect(output.content).toHaveLength(0);
+		expect(events.some(event => event.type === "toolcall_start")).toBe(false);
+	});
+
+	it("preserves MCP tool calls when the Cursor exec bridge is not handling them", () => {
+		const { output, events } = processCursorInteractionUpdatesForTest([mcpToolCallStarted]);
+
+		expect(output.content).toHaveLength(1);
+		const item = output.content[0];
+		expect(item).toMatchObject({ type: "toolCall", id: "toolu_task_1", name: "task" });
+		if (item?.type !== "toolCall") throw new Error("Expected toolCall content item");
+		expect(item.arguments).toEqual({});
+		expect(events.map(event => event.type)).toContain("toolcall_start");
 	});
 });
 
@@ -500,7 +546,6 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			h2Request,
 			execHandlers,
 			undefined,
-			{ sawTokenDelta: false },
 			[],
 		);
 
@@ -561,9 +606,6 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			h2Request,
 			execHandlers,
 			undefined,
-			{
-				sawTokenDelta: false,
-			},
 			[],
 		);
 
@@ -638,5 +680,227 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(providerSignal?.aborted).toBe(true);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Provider stream stalled while waiting for the next event");
+	});
+});
+
+describe("Cursor model discovery metadata", () => {
+	it("flags GPT-5.4/5.5 Cursor models with extendedContext and advertises the base (no-MAX) window", () => {
+		// Real Cursor responses no longer include "1M" in display names — detection
+		// is now purely id-based (/\bgpt-5\.(4|5)\b/).
+		const model = normalizeCursorModel(
+			{
+				modelId: "gpt-5.5-xhigh",
+				displayName: "GPT-5.5 Extra High",
+				displayNameShort: "GPT-5.5 XHigh",
+				displayModelId: "gpt-5.5-xhigh",
+				aliases: [],
+			},
+			undefined,
+			new Map(),
+		);
+
+		expect(model).toMatchObject({
+			id: "gpt-5.5-xhigh",
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		});
+	});
+
+	it("clamps stale GPT-5.4/5.5 base metadata into extendedContext", () => {
+		const staleCachedModel: Model<"cursor-agent"> = buildModel({
+			id: "gpt-5.5-extra-high",
+			name: "GPT-5.5 Extra High",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+		});
+
+		expect(applyCursorDiscoveredModelPolicy(staleCachedModel)).toMatchObject({
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		});
+	});
+
+	it.each([
+		"gpt-5.50-something",
+		"gpt-5.45-fast",
+		"claude-sonnet-4-5",
+		"deepseek-r1",
+	])("does NOT flag %s as MAX-capable (regex boundary / cross-family)", modelId => {
+		const baseModel: Model<"cursor-agent"> = buildModel({
+			id: modelId,
+			name: modelId,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 300_000,
+			maxTokens: 80_000,
+		});
+		const result = applyCursorDiscoveredModelPolicy(baseModel);
+		expect(result.extendedContext).toBeUndefined();
+		expect(result.contextWindow).toBe(300_000);
+		expect(result.maxTokens).toBe(80_000);
+	});
+
+	it("keeps the conservative fallback for non-GPT-5.x Cursor models", () => {
+		const model = normalizeCursorModel(
+			{
+				modelId: "new-cursor-model",
+				displayName: "New Cursor Model",
+				aliases: [],
+			},
+			undefined,
+			new Map(),
+		);
+
+		expect(model).toMatchObject({
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+	});
+});
+
+describe("Cursor conversation token accounting", () => {
+	function createCursorAssistant(outputTokens: number): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "gpt-5.5-xhigh",
+			usage: {
+				input: 0,
+				output: outputTokens,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: outputTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	it("anchors Cursor cumulative context on totalTokens without inflating per-turn input", () => {
+		const message = createCursorAssistant(512);
+
+		applyCursorConversationTokenDetails(message, 100_000);
+
+		// usage.input stays 0: Cursor reports a single cumulative counter, and writing
+		// it into per-turn input would over-count when session aggregators sum across turns.
+		expect(message.usage.input).toBe(0);
+		expect(message.usage.output).toBe(512);
+		expect(message.usage.totalTokens).toBe(100_000);
+	});
+
+	it("does not inflate aggregated input when applied across multiple turns", () => {
+		const turn1 = createCursorAssistant(500);
+		applyCursorConversationTokenDetails(turn1, 10_000);
+		const turn2 = createCursorAssistant(700);
+		applyCursorConversationTokenDetails(turn2, 25_000);
+
+		// Summing usage.input across turns should not be quadratic in cumulative tokens.
+		const totalInput = turn1.usage.input + turn2.usage.input;
+		expect(totalInput).toBe(0);
+		// totalTokens on the latest turn reflects the latest cumulative count.
+		expect(turn2.usage.totalTokens).toBe(25_000);
+	});
+
+	it("ratchets totalTokens up across interleaved tokenDelta-style output growth", () => {
+		const message = createCursorAssistant(0);
+		applyCursorConversationTokenDetails(message, 100_000);
+		// Subsequent per-turn output growth should not erase the cumulative anchor.
+		applyCursorTokenDelta(message, 200);
+		expect(message.usage.totalTokens).toBe(100_000);
+		expect(message.usage.output).toBe(200);
+	});
+});
+
+describe("Cursor MAX-mode wiring on the gRPC request", () => {
+	const maxCursorModel: Model<"cursor-agent"> = buildModel({
+		id: "gpt-5.5-extra-high",
+		name: "GPT-5.5 Extra High",
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 64_000,
+		extendedContext: {
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			baseContextWindow: 272_000,
+			baseMaxTokens: 64_000,
+		},
+	});
+
+	const context: Context = {
+		systemPrompt: ["You are a helpful assistant."],
+		messages: [{ role: "user", content: "hi", timestamp: 0 }],
+		tools: [],
+	};
+
+	function decodeRequest(bytes: Uint8Array): {
+		modelDetails: ModelDetails | undefined;
+		requestedModel: RequestedModel | undefined;
+	} {
+		// `requestBytes` is the bare protobuf-encoded `AgentClientMessage` — Connect
+		// framing (1-byte flags + 4-byte BE length) is added at write time, not here.
+		const clientMessage = fromBinary(AgentClientMessageSchema, bytes);
+		if (clientMessage.message.case !== "runRequest") {
+			throw new Error(`unexpected client message: ${clientMessage.message.case}`);
+		}
+		const runRequest = clientMessage.message.value;
+		return {
+			modelDetails: runRequest.modelDetails,
+			requestedModel: runRequest.requestedModel,
+		};
+	}
+
+	it("omits max_mode on ModelDetails and sets requested_model.max_mode=false when MAX is off", () => {
+		const { requestBytes } = buildGrpcRequest(maxCursorModel, context, undefined, {
+			conversationId: "test-conversation",
+			blobStore: new Map<string, Uint8Array>(),
+		});
+		const { modelDetails, requestedModel } = decodeRequest(requestBytes);
+		expect(modelDetails?.modelId).toBe("gpt-5.5-extra-high");
+		expect(modelDetails?.maxMode).toBeUndefined();
+		expect(requestedModel?.modelId).toBe("gpt-5.5-extra-high");
+		expect(requestedModel?.maxMode).toBe(false);
+	});
+
+	it("sets max_mode=true on both ModelDetails and RequestedModel when MAX is on", () => {
+		const { requestBytes } = buildGrpcRequest(
+			maxCursorModel,
+			context,
+			{ apiKey: "test", maxMode: true },
+			{ conversationId: "test-conversation", blobStore: new Map<string, Uint8Array>() },
+		);
+		const { modelDetails, requestedModel } = decodeRequest(requestBytes);
+		expect(modelDetails?.maxMode).toBe(true);
+		expect(requestedModel?.modelId).toBe("gpt-5.5-extra-high");
+		expect(requestedModel?.maxMode).toBe(true);
 	});
 });

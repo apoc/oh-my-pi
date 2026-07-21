@@ -47,6 +47,14 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
 	now?: () => number;
+	/**
+	 * Optional per-model post-process applied to every resolved model regardless
+	 * of source (static, cache, or dynamic). Must be idempotent. Declared with
+	 * method syntax so TypeScript treats it bivariantly — required because
+	 * ModelManagerOptions<TApi> is widened to ModelManagerOptions<Api> in
+	 * ProviderDescriptor.createModelManagerOptions.
+	 */
+	modelPostProcess?(model: Model<TApi>): Model<TApi>;
 }
 
 /**
@@ -196,7 +204,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		return { models: collapseBuiltModelVariants(restoredCache.models), stale: false };
+		const cached = collapseBuiltModelVariants(restoredCache.models);
+		return {
+			models: options.modelPostProcess ? cached.map(m => options.modelPostProcess!(m)) : cached,
+			stale: false,
+		};
 	}
 
 	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
@@ -217,9 +229,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicModels = fetchedDynamicModels ?? [];
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
 	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
-	const models = collapseBuiltModelVariants(
-		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
-	);
+	const rawModels =
+		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels;
+	const collapsedModels = collapseBuiltModelVariants(rawModels);
+	const models = options.modelPostProcess ? collapsedModels.map(m => options.modelPostProcess!(m)) : collapsedModels;
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
