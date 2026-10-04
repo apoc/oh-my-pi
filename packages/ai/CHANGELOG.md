@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Pro/Max (OAuth) requests now identify as Claude Code 2.1.289 and its bundled Anthropic SDK 0.128.0 ([#14366](https://github.com/can1357/oh-my-pi/pull/14366) by [@apoc](https://github.com/apoc)).
+
+### Fixed
+
+- Fixed Claude Pro/Max (OAuth) requests carrying a billing-header `cch` value that no longer matched current Claude Code, which computes it without the model, `max_tokens` and fallback fields ([#14366](https://github.com/can1357/oh-my-pi/pull/14366) by [@apoc](https://github.com/apoc)).
+
 ## [18.9.2] - 2026-10-11
 
 ### Breaking Changes
@@ -224,13 +232,6 @@
 - Fixed the auth broker exiting when a background OAuth refresh sweep cannot read the credential store; the failure is now logged and the next sweep retries ([#14538](https://github.com/can1357/oh-my-pi/issues/14538))
 - Fixed Anthropic OAuth billing headers changing during developer-first sessions and side turns, preserving the prompt-cache prefix ([#14495](https://github.com/can1357/oh-my-pi/issues/14495)).
 - Fixed OpenAI-compatible chat-completions gateways recording completed turns as client-cancelled because the connection closed before their `[DONE]` sentinel arrived ([#14481](https://github.com/can1357/oh-my-pi/issues/14481)).
-### Changed
-
-- Claude Pro/Max (OAuth) requests now identify as Claude Code 2.1.289 and its bundled Anthropic SDK 0.128.0.
-
-### Fixed
-
-- Fixed Claude Pro/Max (OAuth) requests carrying a billing-header `cch` value that no longer matched current Claude Code, which computes it without the model, `max_tokens` and fallback fields.
 
 ## [18.6.1] - 2026-10-04
 
