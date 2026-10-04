@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Pro/Max (OAuth) requests now identify as Claude Code 2.1.289 and its bundled Anthropic SDK 0.128.0.
+
 ### Fixed
 
 - Fixed Claude Pro/Max (OAuth) requests carrying a billing-header `cch` value that no longer matched current Claude Code, which computes it without the model, `max_tokens` and fallback fields.
