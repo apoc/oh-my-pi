@@ -348,6 +348,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Seance forks: the consulted session's artifacts dir, read in place by history://, artifact://, agent://. */
 	readonly seanceSourceArtifactsDir?: string;
+	/** Seance forks: the consulted session file; every subagent the fork spawns is confined to it too. */
+	readonly seanceSource?: string;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */

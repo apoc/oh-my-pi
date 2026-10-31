@@ -2091,6 +2091,7 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
+			...(options?.seanceSource ? { seanceSource: options.seanceSource } : {}),
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,
@@ -3309,6 +3310,11 @@ export class SessionManager {
 		return artifactsDirectoryFor(this.#sessionFile);
 	}
 
+	/** Source session file a seance fork (or a subagent confined with it) reads in place; null for ordinary sessions. */
+	getSeanceSource(): string | null {
+		return this.#header?.seanceSource ?? null;
+	}
+
 	/** Source artifacts a seance fork reads in place; null for ordinary sessions. */
 	getSeanceSourceArtifactsDir(): string | null {
 		return artifactsDirectoryFor(this.#header?.seanceSource);
@@ -4452,12 +4458,19 @@ export class SessionManager {
 	 * @param options.initialCwd Cwd to use when the file is empty or missing.
 	 * @param options.throwIfMissing Propagate ENOENT instead of creating a new session at a missing path.
 	 * @param options.parentSession Parent session file recorded when the file is empty or missing.
+	 * @param options.seanceSource Seance source recorded when the file is empty or missing; an existing header wins.
 	 */
 	static async open(
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
+		options?: {
+			initialCwd?: string;
+			parentSession?: string;
+			seanceSource?: string;
+			suppressBreadcrumb?: boolean;
+			throwIfMissing?: boolean;
+		},
 	): Promise<SessionManager> {
 		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
@@ -4487,7 +4500,7 @@ export class SessionManager {
 			: probed;
 		await manager.#setSessionFile(filePath, loaded, {
 			throwIfMissing: options?.throwIfMissing,
-			newSession: { parentSession: options?.parentSession },
+			newSession: { parentSession: options?.parentSession, seanceSource: options?.seanceSource },
 		});
 		return manager;
 	}
@@ -4720,9 +4733,10 @@ export class SessionManager {
 	static inMemory(
 		cwd: string = getProjectDir(),
 		storage: SessionStorage = new MemorySessionStorage(),
+		newSession?: NewSessionOptions,
 	): SessionManager {
 		const manager = new SessionManager(cwd, "", false, storage);
-		manager.#resetToNewSession();
+		manager.#resetToNewSession(newSession);
 		return manager;
 	}
 

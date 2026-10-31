@@ -44,6 +44,7 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { renderStepPrompts } from "./steps";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
+import type { HostRestrictions } from "./host-restrictions";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -147,18 +148,17 @@ export interface StructuredSubagentRequest {
 	agentDefinition?: AgentDefinition;
 	/**
 	 * Fork this persisted session file into the child under seance isolation (restricted tools,
-	 * no extensions/MCP/IRC/LSP). `promptSuffix` is appended to the child's system prompt.
+	 * no extensions/MCP/IRC/LSP). `promptSuffix` is appended to the child's system prompt;
+	 * `hostRestrictions` are forced off for the fork and every subagent under it.
 	 * Incompatible with isolated execution and custom tools.
 	 */
-	fork?: { sourceFile: string; promptSuffix?: string };
+	fork?: { sourceFile: string; promptSuffix?: string; hostRestrictions?: HostRestrictions };
 	/**
 	 * Persistent artifacts root for the child instead of the parent session's (transcript, output).
 	 * Mesh responders use a private subdirectory that seance-visible scans skip, so a fork reading
 	 * the parent's `history://` cannot see other responders. Ignored for an in-memory parent session.
 	 */
 	artifactsDir?: string;
-	/** Child setting overrides applied after every inherited value (e.g. `fetch.enabled: false`). */
-	settingsOverrides?: Readonly<Record<string, unknown>>;
 	/**
 	 * Model chosen by host code (SDK callers, `omp cleanse --model`) or, for the
 	 * bundled seance agent, the override of its source session's saved model.
@@ -610,7 +610,12 @@ export async function resolveEffectiveSubagentPolicy(
 	const fork = request.fork;
 	const preparedSession =
 		preparedSeance?.session ??
-		(fork ? { fork: { sourceFile: fork.sourceFile }, promptSuffix: () => fork.promptSuffix ?? "" } : undefined);
+		(fork
+			? {
+					fork: { sourceFile: fork.sourceFile, hostRestrictions: fork.hostRestrictions },
+					promptSuffix: () => fork.promptSuffix ?? "",
+				}
+			: undefined);
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
 	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
@@ -859,7 +864,8 @@ function buildExecutorOptions(
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
-		settingsOverrides: request.settingsOverrides,
+		// A child of a seance-confined session (a mesh `ask` fork's scout) stays within the same source.
+		seanceSource: preparedSession ? undefined : session.seanceSource,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		parentActiveProvider: session.getActiveModel?.()?.provider,
