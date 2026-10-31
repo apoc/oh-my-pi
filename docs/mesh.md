@@ -121,6 +121,8 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 
 Answers to messages sent from `/mesh` appear as `MESH` transcript cards. Hidden peers are left out of tool listings; blocked peers' requests are dropped by the engine. Both flags last for the process only.
 
+On Tern the manager is a native picker sheet: approvals and Local/Remote peer groups on the left, the selected peer or request on the right, and every key above as a button. Details open in the preview and Back (or Esc) leaves them; Approve acts only on the selected row, and activating an approval only selects it. The compose kind is a chip strip; the message and the key phrase are typed into a small input card (the key phrase masked). Terminals without native pickers keep the text overlay.
+
 ## `omp mesh list`
 
 ```

@@ -2,7 +2,8 @@
  * `/mesh` manager contracts: section/row model (side gating, hidden filter, ordering), peer
  * counts, sanitization of untrusted peer text, compose refusal for blocked peers, and the
  * key-driven actions (enable, mode cycle, approvals, hide/block, compose, confirmed key phrase)
- * against a fake runtime.
+ * against a fake runtime, plus the Tern picker/prompt-card contracts (details back-out, pinned
+ * approval selection, compose strip, masked key phrase, rows fallback without pickers).
  */
 import { beforeAll, describe, expect, test, vi } from "bun:test";
 import {
@@ -24,8 +25,37 @@ import type {
 	MeshManagerState,
 	MeshSendOutcome,
 } from "../src/overlays/mesh-manager-types";
+import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { initTheme } from "../src/theme";
 import { visibleWidth } from "../src/utils";
+import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
+
+const pickerCx: DescribeContext = {
+	cols: 120,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+const withoutPicker: DescribeContext = { ...pickerCx, supports: (kind: TspKind) => kind !== "picker" };
+
+function pickerProps(manager: MeshManagerComponent): TspPickerProps {
+	expect(manager.nativeSheet(pickerCx)).toBe(true);
+	const root = manager.describe(pickerCx);
+	if (root?.k !== "picker" || !root.p) throw new Error(`expected a picker root, got ${root?.k}`);
+	return root.p;
+}
+
+/** Every described node, child components (the prompt's `Input`) expanded through their own `describe`. */
+function nodes(child: NativeChild | null): NativeNode[] {
+	if (!child) return [];
+	if (!("k" in child)) return nodes(child.describe?.(pickerCx) ?? null);
+	return [child, ...(child.c ?? []).flatMap(nodes)];
+}
+
+function act(manager: MeshManagerComponent, name: string, value?: string): void {
+	manager.handleNativeEvent({ type: "action", key: "", act: name, value, mods: [] });
+}
 
 function peer(overrides: Partial<MeshManagerPeer> & Pick<MeshManagerPeer, "instanceId">): MeshManagerPeer {
 	return {
@@ -362,5 +392,97 @@ describe("mesh manager component", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("mesh manager on Tern", () => {
+	test("details open in the preview; the close action backs out of them before closing", () => {
+		const { manager, closed } = mount({ ...baseState(), mode: "local" });
+		const list = pickerProps(manager);
+		expect(list.order).toContainEqual(expect.objectContaining({ group: "remote" }));
+		// The side the mode does not reach shows a disabled row that selects nothing.
+		expect(list.items?.find(item => item.id === "off:remote")?.disabled).toBeTruthy();
+		manager.handleNativeEvent({ type: "select", key: "", item: "off:remote" });
+		expect(pickerProps(manager).selected).toBe("approval:ap1");
+
+		manager.handleNativeEvent({ type: "activate", key: "", item: "peer:b" });
+		const details = pickerProps(manager);
+		expect(details).toMatchObject({ selected: "peer:b", focus: "preview" });
+		expect(details.actions?.at(-1)).toMatchObject({ id: "close", label: "Back" });
+
+		act(manager, "close");
+		expect(pickerProps(manager).focus).toBe("list");
+		expect(closed()).toBe(false);
+		act(manager, "close");
+		expect(closed()).toBe(true);
+	});
+
+	test("Approve never resolves an approval the user has not seen selected", async () => {
+		vi.useFakeTimers();
+		try {
+			const { manager, runtime } = mount(baseState());
+			expect(pickerProps(manager).selected).toBe("approval:ap1");
+			// The selected request goes away and a newer one takes the first row before the next frame.
+			const newer = { ...runtime.state.approvals[0]!, id: "ap0", kind: "task", fromName: "mallory" };
+			runtime.state = { ...runtime.state, approvals: [newer] };
+			for (const listener of runtime.listeners) listener();
+			vi.advanceTimersByTime(150);
+			act(manager, "a");
+			expect(runtime.calls).toEqual([]);
+			// Activating a row only selects it; Approve then resolves exactly that row.
+			manager.handleNativeEvent({ type: "activate", key: "", item: "approval:ap0" });
+			expect(runtime.calls).toEqual([]);
+			act(manager, "a");
+			expect(runtime.calls).toEqual(["approval ap0 true"]);
+			manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("compose picks a kind on the strip, then sends from an input card", async () => {
+		const { manager, runtime } = mount({ ...baseState(), approvals: [] });
+		act(manager, "c");
+		const strip = pickerProps(manager);
+		expect(strip.focus).toBe("strip");
+		expect(strip.strip?.items.map(item => item.label)).toEqual(["status", "ask", "steer", "note"]);
+
+		act(manager, "strip", "1");
+		expect(manager.nativeSheet(pickerCx)).toBe(false);
+		expect(manager.nativeOverlay).toMatchObject({ role: "omp.overlay.mesh" });
+		typeText(manager, "what is 4*4?");
+		const card = nodes(manager.describe(pickerCx));
+		expect(card.find(entry => entry.k === "input")?.p).toMatchObject({ text: "what is 4*4?" });
+		act(manager, "submit");
+		await runtime.pending;
+		expect(runtime.calls).toEqual(["send a ask what is 4*4?"]);
+		expect(manager.nativeSheet(pickerCx)).toBe(true);
+		manager.dispose();
+	});
+
+	test("the key phrase never reaches the described tree", async () => {
+		const { manager, runtime } = mount(baseState());
+		act(manager, "k");
+		typeText(manager, "correct horse battery");
+		act(manager, "submit");
+		typeText(manager, "correct horse battery");
+		const described = JSON.stringify(nodes(manager.describe(pickerCx)));
+		expect(described).not.toContain("correct horse");
+		expect(described).toContain("•".repeat(21));
+		act(manager, "submit");
+		await runtime.pending;
+		expect(runtime.calls).toEqual(["key=correct horse battery"]);
+		manager.dispose();
+	});
+
+	test("a terminal without pickers keeps the rendered page, prompts included", () => {
+		const { manager } = mount(baseState());
+		expect(manager.nativeSheet(withoutPicker)).toBe(false);
+		expect(manager.describe(withoutPicker)).toBeNull();
+		act(manager, "k");
+		expect(manager.nativeSheet(withoutPicker)).toBe(false);
+		expect(manager.nativeOverlay).toBeUndefined();
+		expect(manager.describe(withoutPicker)).toBeNull();
+		manager.dispose();
 	});
 });
