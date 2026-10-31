@@ -1,8 +1,9 @@
 /**
  * Answers inbound thread questions. `status` is an ephemeral side turn over the main context (no
- * tools); `ask` runs a read-only `mesh-responder` fork of the main session, continued for follow-ups
- * while the main leaf is unchanged; `task` runs the bundled `task` agent with a fresh context in
- * the main cwd. Responders never get mesh tools, so mesh-triggered work cannot send mesh requests.
+ * tools); `ask` runs a read-only `mesh-responder` fork of the main session that may delegate to
+ * read-only `scout` subagents, continued for follow-ups while the main leaf is unchanged; `task`
+ * runs the bundled `task` agent (which may spawn any subagent) with a fresh context in the main cwd.
+ * Responders and their subagents never get mesh tools, so mesh-triggered work cannot send mesh requests.
  */
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -20,6 +21,7 @@ import { getBundledAgent, parseAgent } from "../task/agents";
 import { runSubagentFollowUpTurn } from "../task/executor";
 import { runStructuredSubagent } from "../task/structured-subagent";
 import type { AgentDefinition } from "../task/types";
+import type { HostRestrictions } from "../task/host-restrictions";
 import { type MeshAnswerer, MeshPeerError, type MeshResponderResult } from "./inbound";
 import { isMeshThreadResponder, meshResponderArtifactsDir } from "./paths";
 import { decideAskRoute, type MeshThreadRecord, meshConversationKey, meshThreadHistory } from "./threads";
@@ -37,6 +39,8 @@ function assertNoMeshTools(agent: AgentDefinition): void {
 		throw new Error(`Mesh responder agent "${agent.name}" must not carry mesh tools.`);
 	}
 }
+
+const MESH_ASK_RESTRICTIONS: HostRestrictions = { "fetch.enabled": false, "web_search.enabled": false };
 
 /** The child's answer; failure details (local paths, salvage hints) stay in the local log. */
 function resultText(result: SingleResult): string {
@@ -206,10 +210,9 @@ export class MeshResponder implements MeshAnswerer {
 			invocationKind: "task",
 			assignment,
 			agentDefinition: agent,
-			// A read-only fork must not become a URL fetcher for the asking peer (localhost, LAN).
-			...(forkSourceFile
-				? { fork: { sourceFile: forkSourceFile }, settingsOverrides: { "fetch.enabled": false } }
-				: {}),
+			// A peer-triggered read-only fork must not become a URL fetcher (localhost, LAN) or a web
+			// search proxy; the restrictions bind every scout it spawns, which stays seance-confined too.
+			...(forkSourceFile ? { fork: { sourceFile: forkSourceFile, hostRestrictions: MESH_ASK_RESTRICTIONS } } : {}),
 			...(artifactsDir ? { artifactsDir } : {}),
 			structured: false,
 			keepAlive: true,

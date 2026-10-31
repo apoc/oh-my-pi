@@ -18,6 +18,7 @@ import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { getBundledAgent } from "./agents";
+import type { HostRestrictions } from "./host-restrictions";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
 import type { AgentDefinition, SeanceTaskSchemaFields } from "./types";
 
@@ -31,6 +32,11 @@ export interface ResolvedSeanceSource {
 export interface PreparedSeanceSession {
 	fork: {
 		sourceFile: string;
+		/**
+		 * Settings forced off for the fork and every subagent under it. Restrictions exist only on
+		 * forks: a fork's tree is seance-confined, so it is never cold-revived and they are never lost.
+		 */
+		hostRestrictions?: HostRestrictions;
 	};
 	promptSuffix: (resolvedModel?: string) => string;
 }

@@ -59,15 +59,15 @@ Peers known through several sources are merged, local first. A peer that fails t
 
 Every request carries the sender's instance id, agent id (`Main`, a subagent id, or `user` for the TUI human), display name and host.
 
-| Kind     | Reaches                                                                           | Answer                                             | Default policy |
-| -------- | --------------------------------------------------------------------------------- | -------------------------------------------------- | -------------- |
-| `status` | An ephemeral side turn over the main context, no tools                            | Thread reply                                       | `allow`        |
-| `ask`    | A read-only fork of the main session (`read`/`grep`/`glob`/`find`)                | Thread reply                                       | `allow`        |
-| `task`   | The bundled `task` agent, fresh context, in the recipient's cwd, with write tools | Thread reply                                       | `deny`         |
-| `steer`  | The main agent's own conversation (wakes it if idle)                              | Optional `reply` sent by that agent with `replyTo` | `ask`          |
-| `note`   | The human only, as a `MESH` transcript card; never the agent                      | None                                               | `allow`        |
-| `watch`  | One-shot notification on `idle` or `turn_end`                                     | `watch_event` when it fires                        | always on      |
-| `reply`  | Answers a `steer` (or delivers a thread answer)                                   | —                                                  | always on      |
+| Kind     | Reaches                                                                                                               | Answer                                             | Default policy |
+| -------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------------- |
+| `status` | An ephemeral side turn over the main context, no tools                                                                | Thread reply                                       | `allow`        |
+| `ask`    | A read-only fork of the main session (`read`/`grep`/`glob`/`find`), which may delegate to read-only `scout` subagents | Thread reply                                       | `allow`        |
+| `task`   | The bundled `task` agent, fresh context, in the recipient's cwd, with write tools; it may spawn any subagent          | Thread reply                                       | `deny`         |
+| `steer`  | The main agent's own conversation (wakes it if idle)                                                                  | Optional `reply` sent by that agent with `replyTo` | `ask`          |
+| `note`   | The human only, as a `MESH` transcript card; never the agent                                                          | None                                               | `allow`        |
+| `watch`  | One-shot notification on `idle` or `turn_end`                                                                         | `watch_event` when it fires                        | always on      |
+| `reply`  | Answers a `steer` (or delivers a thread answer)                                                                       | —                                                  | always on      |
 
 **Threads and follow-ups.** `status`, `ask` and `task` are acknowledged at once with a message id and a thread id; the answer comes later as a separate `reply` request to the sender. `xd://mesh_send` waits for it (default 300 s, max 1800 s); on timeout it returns the thread id and the answer later arrives as a hidden `mesh:reply` message to the asking agent, waking it if idle. A late answer is dropped when the asking session has closed or its conversation was replaced (`/new`, context reset, resume, fork). Passing `thread` continues an existing thread; omitting it starts a new one. A thread runs one turn at a time; follow-ups queue. An `ask` follow-up continues the same fork while the peer's main session has not moved on; otherwise it re-forks the current head and replays the earlier question/answer pairs. `status` follow-ups replay the thread history.
 
@@ -81,7 +81,7 @@ Threads belong to the recipient's current session: they are persisted under the 
 
 `mesh.inbound.<kind>` (`status`, `ask`, `steer`, `task`, `note`) is `allow`, `ask` or `deny`. `ask` queues the request in `/mesh` with a toast (`mesh: approval needed`); unanswered approvals are denied after two minutes. Headless hosts (RPC, ACP) have no UI, so `ask` means deny there, and notes are always refused. A denial reaches the sender as the thread's (or steer's) error reply.
 
-`mesh.maxConcurrentAsks` bounds `ask` and `task` responders running at once; more queue. Responders never get mesh tools, and the engine refuses relayed envelopes (`hop` > 0), so mesh-triggered work cannot fan out over the mesh.
+`mesh.maxConcurrentAsks` bounds `ask` and `task` responders running at once; more queue. Subagents count against the usual `task.maxRecursionDepth`; with a limit of 1 a responder cannot spawn. An `ask` fork and every subagent under it run with URL fetching and web search off (`fetch.enabled`, `web_search.enabled`) and read `history://`, `agent://` and `artifact://` only within the main session, never other peers' threads; such a tree is never revived after a restart (a follow-up forks afresh). Responders and their subagents never get mesh tools, and the engine refuses relayed envelopes (`hop` > 0), so mesh-triggered work cannot fan out over the mesh.
 
 ## Agent tools
 

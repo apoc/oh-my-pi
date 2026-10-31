@@ -120,6 +120,7 @@ import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
+import { type HostRestrictions, mergeHostRestrictions } from "./host-restrictions";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -590,8 +591,8 @@ export interface ExecutorOptions {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name `task.agentCompactionThresholdOverrides` pair selected by dispatch. */
 	compactionThresholdOverride?: CompactionThresholdPair;
-	/** Host-imposed child setting overrides (e.g. mesh responders disable `fetch.enabled`), applied last. */
-	settingsOverrides?: Readonly<Record<string, unknown>>;
+	/** Seance source the child session is confined to (its parent's); never set alongside `preparedSession`. */
+	seanceSource?: string;
 	/** Exact-name `task.agentAccountPools` entry selected by dispatch; see `CreateAgentSessionOptions.oauthAccountPools`. */
 	oauthAccountPools?: OAuthAccountPools;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
@@ -1180,15 +1181,18 @@ function inheritedSubagentServiceTiers(
  * root values, not an ancestor's override.
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
+/** The chain's {@link HostRestrictions}: set by a seance fork, inherited by every descendant. */
+const kHostRestrictions = Symbol("task.hostRestrictions");
 
 /** Root compaction thresholds a subagent chain pins (see {@link kRootCompactionThresholds}). */
 export interface RootCompactionThresholds extends CompactionThresholdPair {
 	modelThresholdsEnabled: boolean;
 }
 
-/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds and host restrictions. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
+	[kHostRestrictions]?: HostRestrictions;
 }
 
 /**
@@ -1208,10 +1212,15 @@ export function compactionThresholdSettings(
 			};
 }
 
+/**
+ * `hostRestrictions` join the restrictions inherited from `baseSettings`; the merged set is applied
+ * after every other override, so no per-agent override in the chain can switch a restriction back on.
+ */
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
 	inheritedServiceTier?: ServiceTierByFamily | null,
+	hostRestrictions?: HostRestrictions,
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -1222,6 +1231,7 @@ export function createSubagentSettings(
 	// A parent subagent's own per-agent threshold must not leak to its children: descendants
 	// of a subagent pin the root's thresholds. A root parent's children read them through live.
 	const inheritedRootThresholds = baseSettings[kRootCompactionThresholds];
+	const restrictions = mergeHostRestrictions(baseSettings[kHostRestrictions], hostRestrictions);
 	const rootThresholds = inheritedRootThresholds ?? {
 		thresholdPercent: cfgCompactionThresholdPercent.get(baseSettings),
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
@@ -1264,10 +1274,12 @@ export function createSubagentSettings(
 			// rejected the context (#13211). A per-spawn override still wins.
 			"compaction.midTurnEnabled": true,
 			...overrides,
+			...restrictions,
 		},
 		{ derived: true },
 	);
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
+	subagentSettings[kHostRestrictions] = restrictions;
 	return subagentSettings;
 }
 
@@ -4222,15 +4234,22 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: RootCompactionThresholds | undefined;
+	hostRestrictions: HostRestrictions | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+	return {
+		parent,
+		layers: settings.overlayLayers(),
+		rootThresholds: settings[kRootCompactionThresholds],
+		hostRestrictions: settings[kHostRestrictions],
+	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	settings[kHostRestrictions] = recipe.hostRestrictions;
 	return settings;
 }
 
@@ -4523,9 +4542,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
 				: undefined),
-			...options.settingsOverrides,
 		},
 		options.parentServiceTier,
+		preparedSession?.fork.hostRestrictions,
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
@@ -4851,9 +4870,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					? SessionManager.open(sessionFile, undefined, undefined, {
 							initialCwd: effectiveCwd,
 							parentSession: options.sessionFile ?? undefined,
+							seanceSource: options.seanceSource,
 							suppressBreadcrumb: true,
 						})
-					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+					: Promise.resolve(
+							SessionManager.inMemory(effectiveCwd, undefined, { seanceSource: options.seanceSource }),
+						);
 			if (preparedSession) pendingSessionManager = sessionManagerPromise;
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
@@ -5014,8 +5036,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
-					// Seance isolation overrides every inherited field above in one place.
-					...(preparedSession ? seanceIsolationOptions(effectiveCwd) : {}),
+					// Seance isolation overrides every inherited field above in one place; a fork keeps only
+					// its own agent's spawn allow-list.
+					...(preparedSession ? seanceIsolationOptions(effectiveCwd, spawnsEnv) : {}),
 				},
 				preparedSession: preparedSession ? { promptSuffix: preparedSession.promptSuffix } : undefined,
 				prompt: {

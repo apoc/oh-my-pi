@@ -2,8 +2,11 @@ import type { CreateAgentSessionOptions } from "../sdk";
 
 export const SEANCE_AGENT_NAME = "seance";
 
-/** Session capabilities shared by fresh startup and cold restoration. */
-export function seanceIsolationOptions(cwd: string) {
+/**
+ * Session capabilities shared by fresh startup and cold restoration. `spawns` is the forked agent's
+ * own allow-list (a mesh `ask` responder may delegate to `scout`); the bundled seance spawns nothing.
+ */
+export function seanceIsolationOptions(cwd: string, spawns = "") {
 	return {
 		disableExtensionDiscovery: true,
 		restrictToolNames: true,
@@ -12,7 +15,7 @@ export function seanceIsolationOptions(cwd: string) {
 		mcpTools: [],
 		enableIrc: false,
 		enableLsp: false,
-		spawns: "",
+		spawns,
 		additionalDirectories: [],
 		inheritedSessionAgents: undefined,
 		contextFiles: [],

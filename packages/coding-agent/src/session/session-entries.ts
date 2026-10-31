@@ -88,6 +88,11 @@ export interface NewSessionOptions {
 	additionalDirectories?: string[];
 	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
 	sessionDir?: string;
+	/**
+	 * Seance source the new session is confined to: a subagent of a seance fork reads `history://`,
+	 * `agent://` and `artifact://` only within that source's artifacts, like the fork itself.
+	 */
+	seanceSource?: string;
 }
 
 export interface SessionEntryBase {

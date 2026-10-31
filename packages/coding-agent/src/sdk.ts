@@ -2613,6 +2613,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get seanceSourceArtifactsDir() {
 				return sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
 			},
+			get seanceSource() {
+				return sessionManager.getSeanceSource() ?? undefined;
+			},
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
