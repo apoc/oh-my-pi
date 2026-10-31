@@ -34,9 +34,10 @@ Sends to a blocked peer fail before anything is sent, except `note`: the engine 
 ## Outputs
 
 - `status`/`ask`/`task`: the message is acknowledged with a msgId and thread; the tool then waits on the msgId. An answer returns `Answer from <peer> (thread <id> …)` followed by the peer's text (harness-tag escaped); a peer error returns `could not answer`. Timeout returns the thread id and msgId without failing; the answer is later delivered to the asking agent as a hidden `mesh:reply` message, or dropped if that session has closed or its conversation was replaced (`/new`, context reset, resume, fork).
+- Auto-background (`mesh.autoBackground.enabled`, default on): when `timeoutSec` exceeds `mesh.autoBackground.thresholdMs` (default 10 s), the wait runs as a `mesh` job in the session's async job manager. An answer within the threshold returns inline; otherwise (or as soon as user steering queues) the call returns the job id, thread and msgId, and the job keeps waiting up to `timeoutSec`. Its answer is delivered as an `async-result` follow-up that wakes an idle agent; `wait` blocks on it and `proc://<id>/kill` stops it (a later answer then arrives as `mesh:reply`). A job that runs out of time ends `cancelled` without a delivery, so only the eventual `mesh:reply` wakes the agent. Without a job manager, at the job cap, or with the setting off, the call waits inline as before.
 - `steer`/`note`: delivery ack with the msgId; replies to a steer arrive later as messages.
 - `watch`: the watch id; the event arrives later as a hidden `mesh:watch` message.
 - `reply`: delivery ack.
 - Peer refusals (`denied`, `busy`, …) and transport failures (`unreachable`, `timeout`, …) are tool errors.
 
-`details = { kind, to, msgId?, thread?, watchId?, answered? }`. The sender agent id is the calling session's agent id (`Main` for the main session).
+`details = { kind, to, msgId?, thread?, watchId?, answered?, jobId? }`. The sender agent id is the calling session's agent id (`Main` for the main session).

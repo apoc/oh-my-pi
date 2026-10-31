@@ -1,10 +1,18 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { MeshEngineError } from "../mesh/engine";
-import type { MeshIncomingReply } from "../mesh/outbound";
+import type { MeshIncomingReply, MeshOutbound } from "../mesh/outbound";
 import { meshPeerLabel, resolveMeshPeer } from "../mesh/peers";
+import { cfgMeshAutoBackgroundEnabled, cfgMeshAutoBackgroundThresholdMs } from "../mesh/settings";
 import { MAX_TEXT_CHARS, MAX_WATCH_TTL_SEC, type MeshErrorCode } from "../mesh/wire";
 import meshSendDescription from "../prompts/tools/mesh-send.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -48,8 +56,20 @@ export interface MeshSendDetails {
 	msgId?: string;
 	thread?: string;
 	watchId?: string;
-	/** status/ask/task: whether the answer arrived before the wait ended. */
+	/** status/ask/task: whether the answer arrived before the call returned. */
 	answered?: boolean;
+	/** status/ask/task: background job still waiting for the answer (`mesh.autoBackground`). */
+	jobId?: string;
+}
+
+/** A sent status/ask/task whose answer the call waits for. */
+interface PendingAnswer {
+	kind: MeshSendKind;
+	label: string;
+	text: string;
+	msgId: string;
+	threadNote: string;
+	timeoutSec: number;
 }
 
 /** Refusal by the peer; its message is peer text. */
@@ -76,7 +96,12 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 	}
 
 	get description(): string {
-		return prompt.render(meshSendDescription, { toolRefs: meshToolRefs(this.#session) });
+		const settings = this.#session.settings;
+		return prompt.render(meshSendDescription, {
+			toolRefs: meshToolRefs(this.#session),
+			autoBackgroundEnabled: cfgMeshAutoBackgroundEnabled.get(settings),
+			autoBackgroundSeconds: Math.max(0, cfgMeshAutoBackgroundThresholdMs.get(settings)) / 1000,
+		});
 	}
 
 	static createIf(session: ToolSession): MeshSendTool | null {
@@ -87,6 +112,8 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 		_toolCallId: string,
 		params: MeshSendParams,
 		signal?: AbortSignal,
+		_onUpdate?: AgentToolUpdateCallback<MeshSendDetails>,
+		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<MeshSendDetails>> {
 		const { engine, frontend } = requireMeshRuntime(this.#session);
 		const { kind } = params;
@@ -165,17 +192,16 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 					if (!result.ok) throw refused(label, result.code, result.message);
 					details.msgId = result.msgId;
 					details.thread = result.thread;
-					const reply = await outbound.awaitReply(result.msgId, timeoutSec * 1000, signal);
-					throwIfAborted(signal);
-					details.answered = reply !== undefined;
-					const threadNote = result.thread ? `thread ${meshPeerText(result.thread)}` : "no thread";
-					if (!reply) {
-						return done(
-							`No answer from ${label} within ${timeoutSec}s (${threadNote}, msgId ${meshPeerText(result.msgId)}). The answer will arrive later as a message; do not resend.`,
-							details,
-						);
-					}
-					return done(answerText(label, threadNote, reply), details);
+					const pending: PendingAnswer = {
+						kind,
+						label,
+						text,
+						msgId: result.msgId,
+						threadNote: result.thread ? `thread ${meshPeerText(result.thread)}` : "no thread",
+						timeoutSec,
+					};
+					// Every path from here reaches `awaitReply`: a held answer is never stranded.
+					return await this.#awaitAnswer(outbound, pending, details, signal, ctx?.toolCall?.steeringSignal);
 				}
 			}
 		} catch (error) {
@@ -186,14 +212,105 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 			throw error;
 		}
 	}
+
+	/**
+	 * Wait for the answer to a sent status/ask/task. With `mesh.autoBackground` on, the wait runs
+	 * as a `mesh` job: the call returns the answer if it lands within the threshold, else hands the
+	 * job to the background (early when a user message queues) so the agent can keep working; the
+	 * job's completion is delivered as a follow-up message that wakes the agent.
+	 */
+	async #awaitAnswer(
+		outbound: MeshOutbound,
+		pending: PendingAnswer,
+		details: MeshSendDetails,
+		signal: AbortSignal | undefined,
+		steeringSignal: AbortSignal | undefined,
+	): Promise<AgentToolResult<MeshSendDetails>> {
+		const settings = this.#session.settings;
+		const manager = this.#session.asyncJobManager;
+		const timeoutMs = pending.timeoutSec * 1000;
+		const thresholdMs = Math.max(0, Math.floor(cfgMeshAutoBackgroundThresholdMs.get(settings)));
+		// A wait no longer than the threshold never backgrounds; at the job cap the call waits inline.
+		if (!cfgMeshAutoBackgroundEnabled.get(settings) || !manager || manager.atCapacity || timeoutMs <= thresholdMs) {
+			const reply = await outbound.awaitReply(pending.msgId, timeoutMs, signal);
+			throwIfAborted(signal);
+			return answerResult(pending, reply, details);
+		}
+
+		const waitMs = resolveAutoBackgroundWaitMs(thresholdMs, timeoutMs);
+		const settled = Promise.withResolvers<{ kind: "settled"; reply: MeshIncomingReply | undefined }>();
+		// `register` runs the body synchronously up to its first await, so the waiter is in place
+		// before any answer stored for this msgId could be missed.
+		const jobId = manager.register(
+			"mesh",
+			jobLabel(pending),
+			async ({ jobId: ownId, signal: jobSignal }) => {
+				const reply = await outbound.awaitReply(pending.msgId, timeoutMs, jobSignal);
+				settled.resolve({ kind: "settled", reply });
+				if (reply) return answerText(pending, reply);
+				// Out of time: a later answer still arrives as a mesh reply message, so this job ends
+				// without a delivery of its own instead of waking the agent with nothing to report.
+				if (!jobSignal.aborted) manager.cancel(ownId);
+				return noAnswerText(pending);
+			},
+			{ ownerId: this.#session.getAgentId?.() ?? undefined, foreground: waitMs > 0 },
+		);
+
+		let steered = false;
+		if (waitMs > 0) {
+			const waited = await raceJobSettlement(settled.promise, waitMs, signal, steeringSignal);
+			if (waited.kind === "settled") {
+				manager.releaseForegroundJob(jobId);
+				return answerResult(pending, waited.reply, details);
+			}
+			if (waited.kind === "aborted") {
+				manager.cancel(jobId);
+				manager.releaseForegroundJob(jobId);
+				throwIfAborted(signal);
+			}
+			steered = waited.kind === "steer";
+			manager.backgroundJob(jobId);
+		}
+		details.answered = false;
+		details.jobId = jobId;
+		return done(backgroundText(pending, jobId, steered), details);
+	}
 }
 
 function done(text: string, details: MeshSendDetails): AgentToolResult<MeshSendDetails> {
 	return { content: [{ type: "text", text }], details };
 }
 
-function answerText(label: string, threadNote: string, reply: MeshIncomingReply): string {
+/** The call's result once the wait ended inline: the answer, or where it will arrive instead. */
+function answerResult(
+	pending: PendingAnswer,
+	reply: MeshIncomingReply | undefined,
+	details: MeshSendDetails,
+): AgentToolResult<MeshSendDetails> {
+	details.answered = reply !== undefined;
+	return done(reply ? answerText(pending, reply) : noAnswerText(pending), details);
+}
+
+function answerText(pending: PendingAnswer, reply: MeshIncomingReply): string {
+	const { label, threadNote } = pending;
 	if (reply.op !== "reply") return `${label} reported ${reply.event} (${threadNote}).`;
 	if (reply.error) return `${label} could not answer (${threadNote}): ${meshPeerText(reply.error)}`;
 	return `Answer from ${label} (${threadNote}; pass thread to follow up):\n\n${meshPeerText(reply.text)}`;
+}
+
+function noAnswerText(pending: PendingAnswer): string {
+	return `No answer from ${pending.label} within ${pending.timeoutSec}s (${pending.threadNote}, msgId ${meshPeerText(pending.msgId)}). The answer will arrive later as a message; do not resend.`;
+}
+
+function backgroundText(pending: PendingAnswer, jobId: string, steered: boolean): string {
+	const lead = steered
+		? "Moved to the background early to handle an incoming message."
+		: `No answer from ${pending.label} yet.`;
+	return `${lead} Background job ${jobId} waits up to ${pending.timeoutSec}s (${pending.threadNote}, msgId ${meshPeerText(pending.msgId)}); the answer arrives automatically as a follow-up message. If none comes by then, the job ends silently and a later answer still arrives as a mesh reply. Continue with other work; do not resend or poll.`;
+}
+
+/** Job-row label: kind, peer, and the first line of the question. */
+function jobLabel(pending: PendingAnswer): string {
+	const label = `${pending.kind} → ${pending.label}: ${pending.text.trim().split("\n", 1)[0] ?? ""}`;
+	return label.length > 120 ? `${label.slice(0, 117)}...` : label;
 }

@@ -211,3 +211,21 @@ export const cfgMeshThreadTtlHours = register({
 		description: "Idle status/ask threads are forgotten after this many hours",
 	},
 });
+
+export const cfgMeshAutoBackgroundEnabled = register({
+	id: "mesh.autoBackground.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Mesh",
+		label: "Auto-Background Asks",
+		description: "Move unanswered status/ask/task waits to a background job; the answer wakes the agent later",
+	},
+});
+
+export const cfgMeshAutoBackgroundThresholdMs = register({
+	id: "mesh.autoBackground.thresholdMs",
+	type: "number",
+	default: 10_000,
+});
