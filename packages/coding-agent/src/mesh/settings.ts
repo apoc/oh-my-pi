@@ -212,6 +212,18 @@ export const cfgMeshThreadTtlHours = register({
 	},
 });
 
+export const cfgMeshAnnouncePeers = register({
+	id: "mesh.announcePeers",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Mesh",
+		label: "Announce Peers",
+		description: "Tell the agent which other agents are on the mesh and when they appear or leave",
+	},
+});
+
 export const cfgMeshAutoBackgroundEnabled = register({
 	id: "mesh.autoBackground.enabled",
 	type: "boolean",

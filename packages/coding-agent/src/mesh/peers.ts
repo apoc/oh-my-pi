@@ -2,11 +2,15 @@
  * Peer addressing and plain-text peer listings shared by the mesh tools and `mesh://`. Every
  * peer-supplied string is harness-tag escaped: listings land in the agent's context.
  */
-import { formatAge } from "@oh-my-pi/pi-utils";
+import { formatAge, truncate } from "@oh-my-pi/pi-utils";
 import type { MeshEngine, MeshPeerView } from "./engine";
 import { meshPeerText } from "./text";
+import type { MeshSnapshot } from "./wire";
 
 export type MeshPeerResolution = { ok: true; peer: MeshPeerView } | { ok: false; message: string };
+
+/** How long a freshly started engine needs before its peer list means "these are all the peers". */
+export const MESH_DISCOVERY_WINDOW_MS = 2500;
 
 /**
  * Whether a peer shows up in listings and resolves as a `to`: not hidden by the user and verified
@@ -73,6 +77,11 @@ function flag(label: string, value: string | null | undefined): string | undefin
 	return value ? `${label}: ${meshPeerText(value)}` : undefined;
 }
 
+/** The branch a peer works on, or its short head commit when detached. */
+function branchOf(snapshot: MeshSnapshot): string | undefined {
+	return snapshot.repo?.branch ?? snapshot.repo?.head?.slice(0, 12);
+}
+
 /** A compact multi-line description of one peer. */
 export function formatMeshPeer(peer: MeshPeerView, now: number = Date.now()): string {
 	const snapshot = peer.snapshot;
@@ -88,11 +97,10 @@ export function formatMeshPeer(peer: MeshPeerView, now: number = Date.now()): st
 			.join(" · "),
 	);
 	if (snapshot) {
-		const repo = snapshot.repo?.branch ?? snapshot.repo?.head?.slice(0, 12);
 		lines.push(
 			[
 				flag("cwd", snapshot.cwd),
-				flag("branch", repo),
+				flag("branch", branchOf(snapshot)),
 				flag("model", snapshot.model),
 				`agents: ${snapshot.agents.length}`,
 			]
@@ -102,6 +110,27 @@ export function formatMeshPeer(peer: MeshPeerView, now: number = Date.now()): st
 		if (snapshot.summary) lines.push(`summary: ${meshPeerText(snapshot.summary.text)}`);
 	}
 	return lines.map((line, index) => (index === 0 ? line : `  ${line}`)).join("\n");
+}
+
+/** Summary characters a {@link meshPeerBrief} keeps: notices list many peers at once. */
+const BRIEF_SUMMARY_CHARS = 150;
+
+/** One peer for agent notices: label, session, state, cwd and branch, then a short summary line. */
+export function meshPeerBrief(peer: MeshPeerView): string {
+	const snapshot = peer.snapshot;
+	const states = [snapshot?.busy ? "busy" : "idle"];
+	if (peer.state === "stale") states.push("stale");
+	if (peer.blocked) states.push("blocked");
+	const line = [
+		`${meshPeerLabel(peer)} [${states.join(", ")}]`,
+		flag("session", snapshot?.sessionName),
+		flag("cwd", snapshot?.cwd),
+		flag("branch", snapshot && branchOf(snapshot)),
+	]
+		.filter(Boolean)
+		.join(" · ");
+	const summary = snapshot?.summary?.text;
+	return summary ? `${line}\n  summary: ${meshPeerText(truncate(summary, BRIEF_SUMMARY_CHARS))}` : line;
 }
 
 /** Every listed peer ({@link isListedMeshPeer}), one block each; `mesh_peers` without a query and `mesh://`. */

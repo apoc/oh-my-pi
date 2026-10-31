@@ -306,6 +306,7 @@
 - `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
 - Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks inline with the answer as a `MESH` card, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
 - `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
+- The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`)
 
 ## [18.14.1] - 2026-10-31
 
