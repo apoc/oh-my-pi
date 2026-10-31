@@ -27,6 +27,7 @@ import { CustomMessageComponent } from "./custom-message";
 import type { MessageRenderer } from "./extension-types";
 import { type TranscriptBlock } from "../chrome/transcript-container";
 import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/transcript-status";
+import { meshDisplayBlock, meshDisplayText, meshSenderLabel } from "../overlays/mesh-manager";
 import { theme } from "../theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
@@ -222,6 +223,63 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			getExpanded,
 			theme,
 		),
+	);
+}
+
+/** One unit of mesh traffic between this instance and a peer, as the human sees it. */
+export interface MeshMessageCard {
+	direction: "incoming" | "outgoing";
+	/** The remote end; peer-declared, sanitized here. */
+	peer: { displayName?: string; instanceId?: string; host?: string } | undefined;
+	/** Message kind (`ask`, `steer`, `note`, …), `reply`, or a watch event. */
+	kind: string;
+	text: string;
+	thread?: string;
+	error?: boolean;
+	timestamp?: number;
+}
+
+/**
+ * Render mesh traffic as a `MESH ←/→ peer` card in the IRC card style. Peer text is untrusted:
+ * control sequences and bidi controls are stripped before anything renders.
+ */
+export function createMeshMessageCard(card: MeshMessageCard, getExpanded: () => boolean): Component {
+	const name = meshDisplayText(card.peer?.displayName) || meshDisplayText(card.peer?.instanceId) || "?";
+	const peer = meshSenderLabel(name, meshDisplayText(card.peer?.host));
+	const tags = [meshDisplayText(card.kind)];
+	if (card.thread) tags.push(`thread ${meshDisplayText(card.thread)}`);
+	if (card.error) tags.push("error");
+	return createIrcMessageCard(
+		{
+			kind: card.direction === "incoming" ? "mesh-incoming" : "mesh-outgoing",
+			...(card.direction === "incoming" ? { from: peer } : { to: peer }),
+			body: meshDisplayBlock(card.text),
+			timestamp: card.timestamp,
+			tags,
+		},
+		getExpanded,
+		theme,
+	);
+}
+
+/** Render a persisted `mesh:incoming` custom message (a peer's steer) as a mesh card. */
+export function buildMeshMessageCard(message: CustomOrHookMessage, getExpanded: () => boolean): Component {
+	const details = (
+		message as CustomMessage<{
+			kind?: string;
+			from?: { displayName?: string; instanceId?: string; host?: string };
+			message?: string;
+		}>
+	).details;
+	return createMeshMessageCard(
+		{
+			direction: "incoming",
+			peer: details?.from,
+			kind: details?.kind ?? "steer",
+			text: details?.message ?? "",
+			timestamp: message.timestamp,
+		},
+		getExpanded,
 	);
 }
 

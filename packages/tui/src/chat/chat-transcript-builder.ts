@@ -40,6 +40,7 @@ import {
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildMeshMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -643,6 +644,10 @@ export class ChatTranscriptBuilder {
 			message.customType === "irc:workpool"
 		) {
 			this.container.addChild(buildIrcMessageCard(message, () => this.#expanded));
+			return;
+		}
+		if (message.customType === "mesh:incoming") {
+			this.container.addChild(buildMeshMessageCard(message, () => this.#expanded));
 			return;
 		}
 		if (message.customType === "advisor") {

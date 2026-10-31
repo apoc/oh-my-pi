@@ -84,6 +84,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
+import { MESH_INCOMING_MESSAGE_TYPE } from "../../mesh/bridge";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { listSessionRecaps } from "../../session/session-index";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -100,6 +101,7 @@ import {
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildMeshMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -378,6 +380,11 @@ export class UiHelpers {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(card);
 						return [card];
+					}
+					if (message.customType === MESH_INCOMING_MESSAGE_TYPE) {
+						const card = buildMeshMessageCard(message, () => this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(card);
+						break;
 					}
 					if (message.customType === "advisor") {
 						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
