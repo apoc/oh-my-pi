@@ -784,6 +784,17 @@
 - Local dictation stops live previews when the speech model repeatedly cannot keep up, so final transcripts no longer wait behind repeated previews ([#17410](https://github.com/can1357/oh-my-pi/issues/17410)).
 - ACP clients now receive `_omp/compaction/start` and `_omp/compaction/end` notifications, including failures and cancellations, without requiring an active prompt. ([#16969](https://github.com/can1357/oh-my-pi/issues/16969); [#17384](https://github.com/can1357/oh-my-pi/pull/17384) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
 - Fixed `cd` (and `pushd`/`popd`/`z`) failing with `command not found: __zsh_like_cd` in agent shells when `mise activate` or `zoxide init` installed wrapper functions: the shell snapshot now keeps the underscore-prefixed helper functions those wrappers call, instead of dropping every private-looking function ([#17448](https://github.com/can1357/oh-my-pi/pull/17448) by [@KamijoToma](https://github.com/KamijoToma))
+- Added oh my pi mesh (`mesh.enabled`, off by default): running omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`, mDNS plus static `mesh.peers`, sealed with a key from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, governed per kind by `mesh.inbound.*` policies ([docs](../../docs/mesh.md))
+- Added `/mesh`, a manager for mesh peers, pending approvals, mode, key phrase, hide/block and composing messages, plus a `mesh: N local · M remote` status line
+- Added the `xd://mesh_peers` and `xd://mesh_send` tools so the main agent can list peers (optionally ranked by relevance to a need) and message them
+- Added the read-only `mesh://` scheme for peer snapshots and the threads this instance opened with a peer
+- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
+- Mesh traffic now shows in the TUI transcript as IRC-style `MESH ← peer` / `MESH → peer` cards: incoming questions, notes, steers and replies, plus the answers this instance sends back
+- Mesh `ask` responders can delegate read-only research to `scout` subagents, which keep URL fetching and web search off and see only this session's history, never other peers' threads
+- `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
+- Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks and opens that dialog on the new thread, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
+- `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
+- The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`); an agent is announced once its session has a name and a summary, which comes after 3 model turns
 
 ## [18.14.2] - 2026-10-31
 
@@ -819,19 +830,6 @@
 - Fixed `read` of a whole URL returning no content when the page's first line is over the 50 KB output budget, as on minified pages read with `:raw`; it now shows that line's first 50 KB ([#17500](https://github.com/can1357/oh-my-pi/pull/17500) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an advisor whose usage-limited account kept being reported as switchable retrying the same capped account thousands of times; it now tries each sibling account at most once per provider per failing review, then falls back, waits, or pauses on the quota ([#17472](https://github.com/can1357/oh-my-pi/issues/17472))
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-### Added
-
-- Added oh my pi mesh (`mesh.enabled`, off by default): running omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`, mDNS plus static `mesh.peers`, sealed with a key from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, governed per kind by `mesh.inbound.*` policies ([docs](../../docs/mesh.md))
-- Added `/mesh`, a manager for mesh peers, pending approvals, mode, key phrase, hide/block and composing messages, plus a `mesh: N local · M remote` status line
-- Added the `xd://mesh_peers` and `xd://mesh_send` tools so the main agent can list peers (optionally ranked by relevance to a need) and message them
-- Added the read-only `mesh://` scheme for peer snapshots and the threads this instance opened with a peer
-- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
-- Mesh traffic now shows in the TUI transcript as IRC-style `MESH ← peer` / `MESH → peer` cards: incoming questions, notes, steers and replies, plus the answers this instance sends back
-- Mesh `ask` responders can delegate read-only research to `scout` subagents, which keep URL fetching and web search off and see only this session's history, never other peers' threads
-- `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
-- Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks and opens that dialog on the new thread, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
-- `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
-- The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`)
 
 ## [18.14.1] - 2026-10-31
 

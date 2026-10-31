@@ -966,7 +966,7 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `mesh.displayName`       | string  | empty   | Name shown to peers; empty falls back to `collab.displayName`, then `user@host`.                                               |
 | `mesh.port`              | number  | `0`     | TCP port of the LAN listener, 0–65535; `0` picks a free port.                                                                  |
 | `mesh.peers`             | array   | `[]`    | `host:port` endpoints dialed directly when mDNS cannot reach them; never same-machine filtered.                                |
-| `mesh.summary`           | boolean | `true`  | Publish a short smol-model summary of the session in the snapshot peers see.                                                   |
+| `mesh.summary`           | boolean | `true`  | Publish a short smol-model summary peers see (first after 3 model turns); peers announce an agent only once it has one. |
 | `mesh.inbound.status`    | enum    | `allow` | `allow`, `ask` (TUI approval; denied when headless), `deny`. Status questions answered from the main context without tools.   |
 | `mesh.inbound.ask`       | enum    | `allow` | Same values. Questions answered by a read-only fork of the main session.                                                       |
 | `mesh.inbound.steer`     | enum    | `ask`   | Same values. Messages injected into the main agent's own conversation.                                                         |

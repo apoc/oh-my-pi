@@ -3,7 +3,7 @@
 {{#if added.length}}
 Other omp agents on the mesh now. Reach them with `{{toolRefs.mesh_send}}`; `{{toolRefs.mesh_peers}}` shows current details. You will be told when agents appear or leave.
 {{else}}
-No other omp agents are on the mesh now. You will be told when one appears.
+No other omp agents to report on the mesh yet; ones still starting up are listed by `{{toolRefs.mesh_peers}}`. You will be told when one appears.
 {{/if}}
 {{else}}
 Mesh agents changed; anyone not named here is unchanged.{{#if midRun}} Informational: no reply needed; act on it only if it helps your task.{{/if}}

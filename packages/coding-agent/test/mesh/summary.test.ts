@@ -8,6 +8,7 @@ import {
 	MeshSummaryGenerator,
 	type MeshSummaryState,
 	SUMMARY_MIN_INTERVAL_MS,
+	SUMMARY_MIN_TURNS,
 	type SummaryTriggerState,
 	shouldRegenerateSummary,
 } from "@oh-my-pi/pi-coding-agent/mesh/summary";
@@ -16,7 +17,12 @@ import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/sessio
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const T0 = 1_700_000_000_000;
-const RESET: SummaryTriggerState = { lastAttemptAt: null, summarizedUserTurnAt: null, latestUserTurnAt: null };
+const RESET: SummaryTriggerState = {
+	lastAttemptAt: null,
+	summarizedUserTurnAt: null,
+	latestUserTurnAt: null,
+	turns: SUMMARY_MIN_TURNS,
+};
 
 describe("shouldRegenerateSummary", () => {
 	it("waits for the operator's first turn", () => {
@@ -27,8 +33,16 @@ describe("shouldRegenerateSummary", () => {
 		expect(shouldRegenerateSummary({ ...RESET, latestUserTurnAt: T0 }, T0 + 1)).toBe(true);
 	});
 
+	it("holds the first summary until the session made enough model turns", () => {
+		const state: SummaryTriggerState = { ...RESET, latestUserTurnAt: T0, turns: SUMMARY_MIN_TURNS - 1 };
+		expect(shouldRegenerateSummary(state, T0 + 1)).toBe(false);
+		// Only the first one waits: a loaded or generated summary is refreshed as before.
+		expect(shouldRegenerateSummary({ ...state, summarizedUserTurnAt: T0 - 10 }, T0 + 1)).toBe(true);
+	});
+
 	it("holds a new turn until the interval since the last attempt elapses", () => {
 		const state: SummaryTriggerState = {
+			...RESET,
 			lastAttemptAt: T0,
 			summarizedUserTurnAt: T0 - 10,
 			latestUserTurnAt: T0 + 30_000,
@@ -39,6 +53,7 @@ describe("shouldRegenerateSummary", () => {
 
 	it("skips when no user turn arrived since the covered one, however long ago", () => {
 		const state: SummaryTriggerState = {
+			...RESET,
 			lastAttemptAt: T0,
 			summarizedUserTurnAt: T0 - 10,
 			latestUserTurnAt: T0 - 10,
@@ -47,7 +62,7 @@ describe("shouldRegenerateSummary", () => {
 	});
 
 	it("retries a failed first attempt only after the interval", () => {
-		const state: SummaryTriggerState = { lastAttemptAt: T0, summarizedUserTurnAt: null, latestUserTurnAt: T0 - 10 };
+		const state: SummaryTriggerState = { ...RESET, lastAttemptAt: T0, latestUserTurnAt: T0 - 10 };
 		expect(shouldRegenerateSummary(state, T0 + 1000)).toBe(false);
 		expect(shouldRegenerateSummary(state, T0 + SUMMARY_MIN_INTERVAL_MS)).toBe(true);
 	});
@@ -111,8 +126,15 @@ class FakeSession {
 		return [];
 	}
 
-	userTurn(text: string, timestamp: number): void {
+	/** One settled run: the operator's prompt, then the model's reply ending with `stopReason`. */
+	userTurn(text: string, timestamp: number, stopReason: ai.StopReason = "stop"): void {
 		this.messages.push({ role: "user", content: text, attribution: "user", timestamp } as AgentMessage);
+		this.messages.push({
+			...reply(`Working on: ${text}`),
+			role: "assistant",
+			stopReason,
+			timestamp,
+		} as AgentMessage);
 		for (const listener of this.#listeners) listener({ type: "agent_end", messages: [], isTerminal: true });
 	}
 
@@ -158,7 +180,7 @@ describe("MeshSummaryGenerator", () => {
 			return pending.promise as never;
 		});
 		const session = new FakeSession("session-a", tempDir.join("a"));
-		const generator = new MeshSummaryGenerator();
+		const generator = new MeshSummaryGenerator({ minTurns: 1 });
 		const published: (MeshSummaryState | null)[] = [];
 		generator.onChange(summary => published.push(summary));
 		const detach = generator.attach(session.asSession);
@@ -209,7 +231,7 @@ describe("MeshSummaryGenerator", () => {
 			return reply("Adding jitter to retry backoff.") as never;
 		});
 		const session = new FakeSession("session-a", tempDir.join("a"));
-		const generator = new MeshSummaryGenerator({ minIntervalMs: 0 });
+		const generator = new MeshSummaryGenerator({ minIntervalMs: 0, minTurns: 1 });
 		const detach = generator.attach(session.asSession);
 
 		session.userTurn("Fix the retry queue dropping jobs", Date.now());
@@ -225,6 +247,29 @@ describe("MeshSummaryGenerator", () => {
 		const secondInput = JSON.stringify(completeSimple.mock.calls[1]?.[1].messages);
 		expect(secondInput).toContain("Now add jitter to the backoff");
 		expect(session.spent).toBeCloseTo(0.02);
+		detach();
+	});
+
+	it("writes the first summary only once the session made enough completed model turns", async () => {
+		const completeSimple = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(async () => reply("Exporting invoices to CSV.") as never);
+		const session = new FakeSession("session-a", tempDir.join("a"));
+		const generator = new MeshSummaryGenerator();
+		const detach = generator.attach(session.asSession);
+
+		const turns = Array.from({ length: SUMMARY_MIN_TURNS - 1 }, (_, index) => `step ${index}`);
+		for (const [index, text] of turns.entries()) session.userTurn(text, Date.now() + index);
+		// A failed or aborted reply is no turn of work.
+		session.userTurn("interrupted", Date.now() + 10, "aborted");
+		session.userTurn("failed", Date.now() + 11, "error");
+		await generator.settled();
+		expect(completeSimple).not.toHaveBeenCalled();
+		expect(generator.current).toBeNull();
+
+		const summary = nextSummary(generator);
+		session.userTurn("export the invoices", Date.now() + 20);
+		expect((await summary)?.text).toBe("Exporting invoices to CSV.");
 		detach();
 	});
 });

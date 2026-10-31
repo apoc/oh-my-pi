@@ -10,6 +10,10 @@
  * peers: before that, an empty list means "not found yet", not "gone". Departures then follow
  * discovery: a local instance leaves as soon as its registry entry goes, a remote one only after the
  * engine's stale sweep, so a brief network blip announces nothing.
+ *
+ * An agent is announced only once it can be described: it has a session name and a summary (which
+ * waits for a few model turns, see `SUMMARY_MIN_TURNS`). Until then it stays out of the notices,
+ * though `mesh_peers` lists it; one that leaves before it was announced is never mentioned.
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import meshPeersNoticeTemplate from "../prompts/system/mesh-peers-notice.md" with { type: "text" };
@@ -70,7 +74,8 @@ export function takeMeshPeersNotice(
 	if (Date.now() - runtime.identity.startedAt < MESH_DISCOVERY_WINDOW_MS) return undefined;
 	const known = knownMeshPeers(session);
 	const peers = runtime.engine.peers();
-	const live = peers.filter(isListedMeshPeer);
+	// Announced only once describable: a session name and a summary say what the agent is doing.
+	const live = peers.filter(peer => isListedMeshPeer(peer) && peer.snapshot?.sessionName && peer.snapshot.summary);
 	const added = known ? live.filter(peer => !known.has(peer.instanceId)) : live;
 	// A peer the user hid is still there (and still reachable by id): hiding it is no departure.
 	const present = new Set(peers.flatMap(peer => (peer.snapshot ? [peer.instanceId] : [])));

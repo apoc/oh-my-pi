@@ -236,15 +236,15 @@
 
 - Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise ([#17668](https://github.com/can1357/oh-my-pi/pull/17668) by [@sjawhar](https://github.com/sjawhar))
 - `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it) ([#17628](https://github.com/can1357/oh-my-pi/pull/17628) by [@sjawhar](https://github.com/sjawhar))
+### Added
+
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through an owner-only registry over a Unix socket or current-user named pipe, LAN discovery over mDNS and static peers, AES-256-GCM sealed transport on both, snapshots and request/response messaging
 
 ## [18.14.2] - 2026-10-31
 
 ### Added
 
 - Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
-### Added
-
-- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through an owner-only registry over a Unix socket or current-user named pipe, LAN discovery over mDNS and static peers, AES-256-GCM sealed transport on both, snapshots and request/response messaging
 
 ## [18.14.1] - 2026-10-31
 
