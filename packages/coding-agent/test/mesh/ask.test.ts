@@ -185,35 +185,26 @@ async function until(check: () => boolean): Promise<void> {
 }
 
 describe("/ask conversations", () => {
-	it("folds an inline question's answer into the conversation /ask <peer> reopens", async () => {
+	it("/ask <peer> <message> opens the dialog on the new thread and shows the answer there", async () => {
 		const h = harness();
 		expect(await h.controller.handleCommand("b93faeff1b87b3c5 what is ARBTR?")).toBe(true);
 		expect(h.engine.sent[0]).toEqual({ op: "message", kind: "ask", text: "what is ARBTR?" });
-		// Question card now; the answer gets its own card when it arrives.
-		expect(h.cards).toHaveLength(1);
+		expect(h.screen()).toContain("what is ARBTR?");
 		h.outbound.deliverIncomingReply(
 			{ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "a fact checker" },
 			ARBITER,
 		);
-		await until(() => h.cards.length === 2);
-
-		expect(await h.controller.handleCommand("b93f")).toBe(true);
-		const screen = h.screen();
-		expect(screen).toContain("what is ARBTR?");
-		expect(screen).toContain("a fact checker");
+		await until(() => h.screen().includes("a fact checker"));
+		expect(h.screen()).not.toContain("Waiting for the agent");
+		expect(h.cards).toHaveLength(0);
 	});
 
-	it("keeps an inline answer that overtakes its acknowledgement, after the question card", async () => {
+	it("keeps an answer that overtakes its acknowledgement in the opened dialog", async () => {
 		const h = harness();
 		h.engine.answer = msgId =>
 			h.outbound.deliverIncomingReply({ op: "reply", replyTo: msgId, thread: "thread-1", text: "fast" }, ARBITER);
 		expect(await h.controller.handleCommand("b93faeff1b87b3c5 quick?")).toBe(true);
-		await until(() => h.cards.length === 2);
-		const cards = h.cards.map(card => Bun.stripANSI(card.render(120).join("\n")));
-		expect(cards[0]).toContain("quick?");
-		expect(cards[1]).toContain("fast");
-		expect(await h.controller.handleCommand("b93f")).toBe(true);
-		expect(h.screen()).toContain("fast");
+		await until(() => h.screen().includes("fast"));
 		expect(h.screen()).not.toContain("Waiting for the agent");
 	});
 

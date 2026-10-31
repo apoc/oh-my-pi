@@ -464,7 +464,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	{
 		name: "ask",
 		icon: "question",
-		description: "Ask a mesh agent: open a conversation, or send /ask <agent> <message> inline",
+		description: "Ask a mesh agent in a /btw-style dialog: /ask [agent] [message]",
 		inlineHint: "[agent] [message]",
 		allowArgs: true,
 		// Exists only while the mesh is on: hidden from autocomplete and not run when typed.

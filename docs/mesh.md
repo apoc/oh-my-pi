@@ -134,7 +134,7 @@ A `/btw`-style side conversation answered by another instance: each question is 
 | ------------------------ | ---------------------------------------------------------------------------------------- |
 | `/ask`                   | Pick a peer, then open the conversation dialog                                           |
 | `/ask <agent>`           | Open the dialog with that peer                                                           |
-| `/ask <agent> <message>` | Ask inline: the question and the answer show as `MESH` cards; `/ask <agent>` follows up  |
+| `/ask <agent> <message>` | Ask that peer and open the dialog on the new thread, like `/btw <question>`              |
 
 `<agent>` resolves like `mesh_send`'s `to` (instance id, unique id prefix, or unique display/session name). Autocomplete lists peers by session name, with display name, short id, busy/idle and branch, and inserts the instance id.
 
