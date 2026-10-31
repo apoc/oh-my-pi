@@ -128,14 +128,10 @@ export class MeshResponder implements MeshAnswerer {
 		const forkLeafId = sessionManager.getLeafId();
 		const result = await this.#spawn(
 			agent,
-			prompt.render(meshAskAssignmentTemplate, {
-				from: meshPeerText(record.peer.displayName),
-				host: meshPeerText(record.peer.host),
-				history: replayHistory(record, turnIndex),
-				question: meshPeerText(record.turns[turnIndex]!.question),
-			}),
+			meshAskAssignmentTemplate,
 			"MeshAsk",
-			record.threadId,
+			record,
+			turnIndex,
 			signal,
 			sourceFile,
 		);
@@ -150,18 +146,7 @@ export class MeshResponder implements MeshAnswerer {
 			const text = await this.#continue(forkAgentId, agent, record, turnIndex, signal);
 			if (text !== undefined) return { text, responder: { forkAgentId } };
 		}
-		const result = await this.#spawn(
-			agent,
-			prompt.render(meshTaskAssignmentTemplate, {
-				from: meshPeerText(record.peer.displayName),
-				host: meshPeerText(record.peer.host),
-				history: replayHistory(record, turnIndex),
-				question: meshPeerText(record.turns[turnIndex]!.question),
-			}),
-			"MeshTask",
-			record.threadId,
-			signal,
-		);
+		const result = await this.#spawn(agent, meshTaskAssignmentTemplate, "MeshTask", record, turnIndex, signal);
 		return { text: resultText(result), responder: { forkAgentId: result.id } };
 	}
 
@@ -193,22 +178,29 @@ export class MeshResponder implements MeshAnswerer {
 		return resultText(result);
 	}
 
+	/** Spawn a responder for `record`'s turn `turnIndex`, assigned through `template` with the peer's text sanitized. */
 	async #spawn(
 		agent: AgentDefinition,
-		assignment: string,
+		template: string,
 		label: string,
-		threadId: string,
+		record: MeshThreadRecord,
+		turnIndex: number,
 		signal: AbortSignal,
 		forkSourceFile?: string,
 	): Promise<SingleResult> {
 		assertNoMeshTools(agent);
 		const toolSession = this.#session.toolSession;
 		if (!toolSession) throw new MeshPeerError("This instance cannot run mesh responders.");
-		const artifactsDir = this.#responderDir(threadId);
+		const artifactsDir = this.#responderDir(record.threadId);
 		const { result } = await runStructuredSubagent({
 			session: toolSession,
 			invocationKind: "task",
-			assignment,
+			assignment: prompt.render(template, {
+				from: meshPeerText(record.peer.displayName),
+				host: meshPeerText(record.peer.host),
+				history: replayHistory(record, turnIndex),
+				question: meshPeerText(record.turns[turnIndex]!.question),
+			}),
 			agentDefinition: agent,
 			// A peer-triggered read-only fork must not become a URL fetcher (localhost, LAN) or a web
 			// search proxy; the restrictions bind every scout it spawns, which stays seance-confined too.

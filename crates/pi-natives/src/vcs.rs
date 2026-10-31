@@ -9,7 +9,6 @@ use std::{
 use napi::{Env, Result, bindgen_prelude::*};
 use napi_derive::napi;
 use pi_vcs::types as core;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
 	iso::{IsoBackendKind, from_napi_kind, to_napi_kind},
@@ -69,19 +68,6 @@ type Promise<T> = task::MappedPromise<T, pi_vcs::Error>;
 
 fn path_string(path: impl AsRef<Path>) -> String {
 	path.as_ref().to_string_lossy().into_owned()
-}
-fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
-	signal.and_then(|value| {
-		let token = CancellationToken::new();
-		if task::signal_aborted(&value) {
-			token.cancel();
-			return Some(token);
-		}
-		let signal = AbortSignal::from_unknown(value).ok()?;
-		let abort = token.clone();
-		signal.on_abort(move || abort.cancel());
-		Some(token)
-	})
 }
 
 /// Discovered Git repository paths.
@@ -1357,7 +1343,7 @@ impl VcsGitRepo {
 	) -> Result<Object<'e>> {
 		let repo = self.inner.clone();
 		let options = options.into();
-		let cancel = cancellation_token(signal);
+		let cancel = task::cancellation_token(signal);
 		vcs_future(env, "vcs.push", async move { repo.push(&options, cancel).await })
 	}
 
@@ -1373,7 +1359,7 @@ impl VcsGitRepo {
 		env: &'e Env,
 	) -> Result<Object<'e>> {
 		let repo = self.inner.clone();
-		let cancel = cancellation_token(signal);
+		let cancel = task::cancellation_token(signal);
 		vcs_future(env, "vcs.fetch", async move {
 			repo
 				.fetch(
@@ -1398,7 +1384,7 @@ pub fn vcs_git_clone<'e>(
 	signal: Option<Unknown>,
 ) -> Result<Object<'e>> {
 	let options = options.into();
-	let cancel = cancellation_token(signal);
+	let cancel = task::cancellation_token(signal);
 	vcs_future(env, "vcs.clone", async move {
 		pi_vcs::git::clone(&url, Path::new(&target), &options, cancel).await
 	})

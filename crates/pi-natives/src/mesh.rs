@@ -23,7 +23,6 @@ use pi_mesh::{
 };
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::task;
 
@@ -309,7 +308,7 @@ impl MeshNode {
 		#[napi(ts_arg_type = "AbortSignal")] signal: Option<Unknown<'env>>,
 	) -> Result<PromiseRaw<'env, String>> {
 		let body: MeshRequest = serde_json::from_str(&body_json).map_err(invalid_arg)?;
-		let cancel = cancellation_token(signal);
+		let cancel = task::cancellation_token(signal);
 		let node = Arc::clone(&self.node);
 		task::future(env, "mesh_request", async move {
 			let work =
@@ -359,19 +358,4 @@ impl Drop for MeshNode {
 			pump.abort();
 		}
 	}
-}
-
-/// Cancelled when `signal` aborts (or already has).
-fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
-	signal.and_then(|value| {
-		let token = CancellationToken::new();
-		if task::signal_aborted(&value) {
-			token.cancel();
-			return Some(token);
-		}
-		let signal = AbortSignal::from_unknown(value).ok()?;
-		let abort = token.clone();
-		signal.on_abort(move || abort.cancel());
-		Some(token)
-	})
 }

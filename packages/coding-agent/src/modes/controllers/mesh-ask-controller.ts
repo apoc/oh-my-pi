@@ -99,12 +99,16 @@ export class MeshAskController {
 	openForPeer(instanceId: string): boolean {
 		const runtime = this.#runtime();
 		if (!runtime) return false;
+		const view = this.#liveView(runtime, instanceId, "That mesh peer");
+		return view ? this.#open(peerOf(view, view.snapshot!)) : false;
+	}
+
+	/** The peer's live view; `undefined`, with an error shown, once it left or never served a snapshot. */
+	#liveView(runtime: MeshRuntime, instanceId: string, title: string): MeshPeerView | undefined {
 		const view = runtime.engine.peers().find(peer => peer.instanceId === instanceId);
-		if (!view?.snapshot) {
-			this.ctx.showError("That mesh peer is no longer available.");
-			return false;
-		}
-		return this.#open(peerOf(view, view.snapshot));
+		if (view?.snapshot) return view;
+		this.ctx.showError(`${title} is no longer available.`);
+		return undefined;
 	}
 
 	/**
@@ -241,11 +245,8 @@ export class MeshAskController {
 		if (!text || conversation?.sending) return false;
 		const runtime = this.#runtime();
 		if (!runtime) return false;
-		const view = runtime.engine.peers().find(entry => entry.instanceId === peer.instanceId);
-		if (!view?.snapshot) {
-			this.ctx.showError(`${peerTitle(peer)} is no longer available.`);
-			return false;
-		}
+		const view = this.#liveView(runtime, peer.instanceId, peerTitle(peer));
+		if (!view) return false;
 		// The engine drops everything a blocked peer sends, answers included.
 		if (view.blocked) {
 			this.ctx.showError(`${peerTitle(peer)} is blocked: it cannot answer. Unblock it in /mesh first.`);
