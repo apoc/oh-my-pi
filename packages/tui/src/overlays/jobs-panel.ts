@@ -107,6 +107,11 @@ const STATUS_GLYPH: Record<JobsPanelJob["status"], TspSpan> = {
 /** The list row's icon per job type (Tern icon names); other types read as a generic job. */
 const TYPE_ICON: Record<string, string> = { bash: "bash", task: "agent" };
 
+/** Jobs whose label is prose (a subagent's name, a mesh question), not a command line. */
+function isProseLabel(type: string): boolean {
+	return type === "task" || type === "mesh";
+}
+
 /** Output tail rows the terminal fallback shows under the selected job. */
 const FALLBACK_TAIL_LINES = 8;
 
@@ -401,7 +406,7 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
 			job.intent
 				? span(job.intent)
-				: job.type === "task"
+				: isProseLabel(job.type)
 					? span(job.label)
 					: span(collapseCommand(job.label), "mono"),
 		]),
@@ -455,7 +460,7 @@ function describeDetail(
 	const settled = job.status !== "running";
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
-	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const command = detail?.command ?? (isProseLabel(job.type) ? undefined : job.label);
 	const title = job.intent ?? (command ? undefined : job.label);
 	const pids = detail?.pids ?? [];
 	const facts = compact([

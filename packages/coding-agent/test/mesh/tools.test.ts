@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import { MeshProtocolHandler } from "../../src/internal-urls/mesh-protocol";
 import type { MeshEngine, MeshPeerView, MeshRequestOptions, MeshStatus } from "../../src/mesh/engine";
@@ -232,6 +233,74 @@ describe("mesh_send ask", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("idle, on main");
 		expect(result.details?.answered).toBe(true);
+	});
+
+	describe("auto-background", () => {
+		const CAROL = { instanceId: "c0ffee", agentId: "Main", displayName: "Carol", host: "box" };
+
+		function backgroundSetup(timeoutSec?: number) {
+			const { outbound } = installRuntime();
+			const manager = new AsyncJobManager({ retentionMs: 60_000 });
+			const delivered: string[] = [];
+			manager.registerDeliverySink("Main", (_jobId, text) => {
+				delivered.push(text);
+			});
+			const tool = new MeshSendTool(
+				toolSession({
+					getAgentId: () => "Main",
+					asyncJobManager: manager,
+					settings: Settings.isolated({ "mesh.enabled": true, "mesh.autoBackground.thresholdMs": 20 }),
+				}),
+			);
+			const run = () => tool.execute("call-bg", { to: "carol", kind: "ask", message: "what branch?", timeoutSec });
+			return { outbound, manager, delivered, run };
+		}
+
+		it("returns after the threshold and delivers the later answer as the job's result", async () => {
+			const { outbound, manager, delivered, run } = backgroundSetup();
+			const result = await run();
+			expect(result.details?.answered).toBe(false);
+			const jobId = result.details?.jobId;
+			expect(jobId).toBeDefined();
+			expect(manager.getRunningJobs({ ownerId: "Main" }).map(job => job.id)).toEqual([jobId!]);
+
+			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			await manager.getJob(jobId!)!.promise;
+			await manager.drainDeliveries({ timeoutMs: 1_000 });
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("on main");
+		});
+
+		it("ends an expired background wait without a delivery and routes the late answer to the asking session", async () => {
+			const { outbound, manager, delivered, run } = backgroundSetup(0.5);
+			const late = vi.fn(async () => "woken" as const);
+			outbound.setMain({ isDisposed: false, conversationId: "conversation-1", deliverMeshMessage: late });
+			const { details } = await run();
+			const job = manager.getJob(details!.jobId!)!;
+			await job.promise;
+			expect(job.status).toBe("cancelled");
+			await manager.drainDeliveries({ timeoutMs: 1_000 });
+			expect(delivered).toEqual([]);
+
+			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			await Bun.sleep(0);
+			expect(late).toHaveBeenCalledTimes(1);
+		});
+
+		it("answers inline when the reply lands within the threshold", async () => {
+			const { outbound, manager, run } = backgroundSetup();
+			const register = vi.spyOn(manager, "register");
+			const pending = run();
+			await Bun.sleep(0);
+			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			const result = await pending;
+			expect(result.details?.answered).toBe(true);
+			expect(result.details?.jobId).toBeUndefined();
+			// The foreground-backed job row is released, not left hidden until retention.
+			expect(register).toHaveBeenCalledTimes(1);
+			const jobId = register.mock.results[0]?.value as string;
+			expect(manager.getJob(jobId)).toBeUndefined();
+		});
 	});
 });
 
