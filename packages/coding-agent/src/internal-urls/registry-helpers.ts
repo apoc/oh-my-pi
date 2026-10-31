@@ -7,11 +7,17 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { MESH_THREADS_DIRNAME } from "../mesh/paths";
 import { AgentRegistry } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
 const MAX_SCAN_DEPTH = 8;
+/**
+ * Artifact subdirectories holding other parties' data (mesh peers' threads and their responders'
+ * transcripts). A seance fork reads its source's tree (`onlyPreferred` scans) but never these.
+ */
+export const PRIVATE_ARTIFACT_SUBDIRS: ReadonlySet<string> = new Set([MESH_THREADS_DIRNAME]);
 
 export function registerArtifactsDir(dir: string): () => void {
 	extraArtifactsDirs.add(dir);
@@ -103,7 +109,9 @@ export async function sessionFilesFromDisk(
 			entries => {
 				if (!entries || depth >= MAX_SCAN_DEPTH) return;
 				for (const entry of entries) {
-					if (entry.isDirectory()) list(path.join(dir, entry.name), depth + 1);
+					if (!entry.isDirectory()) continue;
+					if (options?.onlyPreferred && PRIVATE_ARTIFACT_SUBDIRS.has(entry.name)) continue;
+					list(path.join(dir, entry.name), depth + 1);
 				}
 			},
 			() => {},
@@ -138,7 +146,8 @@ export async function sessionFilesFromDisk(
 			// Prefer a direct transcript over a nested same-id copy.
 			for (const entry of entries) recordFile(dir, entry);
 			for (const entry of entries) {
-				if (entry.isDirectory()) await scan(path.join(dir, entry.name), depth + 1);
+				if (!entry.isDirectory() || PRIVATE_ARTIFACT_SUBDIRS.has(entry.name)) continue;
+				await scan(path.join(dir, entry.name), depth + 1);
 			}
 			return;
 		}

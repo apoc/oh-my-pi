@@ -56,6 +56,7 @@ import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
+import { startMeshHost } from "../../mesh/host";
 import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -1832,6 +1833,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	const disposeAndExit = async (): Promise<never> => {
 		try {
+			await meshHost.dispose();
 			// The process ends regardless; report an unsaved side answer instead of skipping dispose.
 			await btw.close().catch(btwError => {
 				const message = toError(btwError).message;
@@ -2946,6 +2948,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
 		acceptInput: command => inputGate.accept(command),
 	});
+
+	// Headless mesh participation: no UI hooks, so `ask` inbound policies deny.
+	const meshHost = startMeshHost({ session });
 
 	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.
 	// Side-channel frames dispatch immediately, ordinary commands serialize through inputDispatcher, and bash

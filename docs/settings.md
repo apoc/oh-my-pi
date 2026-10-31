@@ -954,6 +954,27 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `startup.setupWizard`          | boolean | `true`          | Show newly added onboarding steps once per setup version.                                                                                                                                                                                                   |
 | `update.auto`                  | boolean | `false`         | Install a newer release in the background on interactive startup, through whatever owns the install (standalone binary, Homebrew, mise, bun, npm); progress shows after the welcome banner's version and the next launch runs the new build. Ignored under Tern, Nix, and source checkouts. Status and worker log: `~/.omp/update/`. |
 
+### Mesh
+
+[Mesh](./mesh.md) settings. Changes apply live to running hosts.
+
+| Key                      | Type    | Default | Values                                                                                                                         |
+| ------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `mesh.enabled`           | boolean | `false` | Join the mesh (interactive, RPC and ACP hosts); enables `/mesh`, `xd://mesh_peers`, `xd://mesh_send` and `mesh://`.            |
+| `mesh.mode`              | enum    | `local` | `local` (same PC, same user; no network listener), `remote` (LAN via mDNS; needs `mesh.key`), `both`.                          |
+| `mesh.key`               | string  | empty   | Credential: key derived from the key phrase by `/mesh` → `k` or `omp mesh set-key`. The phrase is never stored.                |
+| `mesh.displayName`       | string  | empty   | Name shown to peers; empty falls back to `collab.displayName`, then `user@host`.                                               |
+| `mesh.port`              | number  | `0`     | TCP port of the LAN listener, 0–65535; `0` picks a free port.                                                                  |
+| `mesh.peers`             | array   | `[]`    | `host:port` endpoints dialed directly when mDNS cannot reach them; never same-machine filtered.                                |
+| `mesh.summary`           | boolean | `true`  | Publish a short smol-model summary of the session in the snapshot peers see.                                                   |
+| `mesh.inbound.status`    | enum    | `allow` | `allow`, `ask` (TUI approval; denied when headless), `deny`. Status questions answered from the main context without tools.   |
+| `mesh.inbound.ask`       | enum    | `allow` | Same values. Questions answered by a read-only fork of the main session.                                                       |
+| `mesh.inbound.steer`     | enum    | `ask`   | Same values. Messages injected into the main agent's own conversation.                                                         |
+| `mesh.inbound.task`      | enum    | `deny`  | Same values. Remote task delegation: a subagent with write tools runs in this project.                                         |
+| `mesh.inbound.note`      | enum    | `allow` | Same values. Notes shown to the human only; always refused without a UI.                                                       |
+| `mesh.maxConcurrentAsks` | number  | `2`     | `ask`/`task` responders running at once; more queue.                                                                          |
+| `mesh.threadTtlHours`    | number  | `24`    | Idle inbound threads are forgotten after this many hours.                                                                      |
+
 ### Providers and services
 
 Model/backend ordering for image generation, web search, speech, dictation, and judgments is configured through the corresponding `modelRoles` and `retry.fallbackChains` entries in [Models](#models). This section contains transport and service behavior that remains independent of model selection.

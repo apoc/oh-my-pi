@@ -190,6 +190,7 @@ import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
+import { deliverMeshMessage } from "../mesh/bridge";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -1411,6 +1412,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
+	/** Bumped only by {@link resetSessionContext}: it empties the conversation but keeps the session id. */
+	#contextResets = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -7099,6 +7102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
+		this.#contextResets++;
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -13602,6 +13606,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		// The sender's context is active here; the delivery is the recipient's work.
 		return this.#inLogContext(() => this.#irc.deliver(msg));
+	}
+
+	/**
+	 * Delivers a mesh message: a non-interrupting aside while streaming, an agent-initiated turn when
+	 * idle. Resolves after queueing, or after the woken turn settles.
+	 */
+	deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken"> {
+		return deliverMeshMessage(this, message);
+	}
+
+	/** Tool context the SDK built for this session (eval cells, host services like mesh responders). */
+	get toolSession(): ToolSession | undefined {
+		return this.#evalToolSession;
+	}
+
+	/**
+	 * Id of the conversation this session currently holds: the session id (changes on `/new`, resume,
+	 * fork) plus the in-place context-reset count. A same-file reload keeps it.
+	 */
+	get conversationId(): string {
+		return `${this.sessionManager.getSessionId()}#${this.#contextResets}`;
 	}
 
 	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */

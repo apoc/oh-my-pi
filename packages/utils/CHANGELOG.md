@@ -85,6 +85,9 @@
 ### Added
 
 - Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+### Added
+
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
 
 ## [18.14.1] - 2026-10-31
 

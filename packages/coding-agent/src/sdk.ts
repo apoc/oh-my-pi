@@ -169,6 +169,7 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
+import { onMeshRuntimeChanged } from "./mesh/runtime";
 import type { MnemopiSessionStateApi } from "./mnemopi/state";
 import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
@@ -4459,6 +4460,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				securityEnabled: cfgSecurityEnabled.get(settings),
 				settingsApproval: toolSession.settingsApproval === true,
 				outReplies: outRepliesActive(settings, tuiTranscript),
+				meshEnabled: hasSession ? session.hasBuiltInTool("mesh_peers") : builtInRegistryToolNames.has("mesh_peers"),
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
@@ -5391,6 +5393,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
+			// Mesh tools are offered only to the session the mesh runtime is bound to: follow
+			// installs, removals and rebinds (ACP moves it to the newest session).
+			if (taskDepth === 0) {
+				session.addDisposer(
+					onMeshRuntimeChanged(() => {
+						if (!session.isDisposed) void reconcileGatedTools();
+					}),
+				);
+			}
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

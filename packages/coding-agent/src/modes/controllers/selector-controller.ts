@@ -114,6 +114,8 @@ import { COPY_SELECTOR_OVERLAY_OPTIONS, CopySelectorComponent } from "@oh-my-pi/
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
+import { MeshManagerComponent } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
+import { createMeshManagerRuntime } from "../components/mesh/mesh-manager-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
@@ -179,7 +181,8 @@ type MenuKind =
 	| "model-hub"
 	| "agents-dashboard"
 	| "agent-hub"
-	| "usage-dashboard";
+	| "usage-dashboard"
+	| "mesh-manager";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -703,6 +706,23 @@ export class SelectorController {
 			throw error;
 		}
 		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
+	}
+
+	/** Fullscreen `/mesh` manager: approvals, local/remote peers, mode, key phrase and compose. */
+	showMeshManager(): void {
+		if (this.#focusOpenMenu("mesh-manager")) return;
+		const menu = this.#claimMenu("mesh-manager");
+		const manager = new MeshManagerComponent(createMeshManagerRuntime(this.ctx.settings), {
+			requestRender: () => this.ctx.ui.requestRender(),
+			rows: () => this.ctx.ui.terminal.rows,
+			onClose: () => {
+				menu.handle?.hide();
+				this.#releaseMenu("mesh-manager", menu);
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			},
+		});
+		this.#mountMenu(menu, manager, () => this.#showFullscreenMenu(manager));
 	}
 
 	/**

@@ -23,6 +23,9 @@ import { formatDumpArchiveReport } from "../session/session-dump-format";
 import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
+import { meshPeerCountsText } from "../modes/components/mesh/mesh-manager-runtime";
+import { getMeshRuntime } from "../mesh/runtime";
+import { cfgMeshEnabled } from "../mesh/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
@@ -442,6 +445,20 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			let heading = existing ? "Collab session restarted with control access" : "Collab session started!";
 			if (host === existing) heading = view ? "Read-only collab session active" : "Collab session active";
 			showCollabLink(ctx, host, heading, view);
+		},
+	},
+	{
+		name: "mesh",
+		icon: "globe",
+		description: "Manage the omp mesh: peers, approvals, mode, key phrase and messages",
+		getTuiAutocompleteDescription: runtime => {
+			if (!cfgMeshEnabled.get(runtime.ctx.settings)) return "Mesh: disabled (open and press e to enable)";
+			const counts = meshPeerCountsText(runtime.ctx.settings, getMeshRuntime());
+			return counts === undefined ? "Mesh: not running" : `Mesh: ${counts}`;
+		},
+		handleTui: (_command, runtime) => {
+			clearSubmittedText(runtime);
+			runtime.ctx.showMeshManager();
 		},
 	},
 	{

@@ -101,6 +101,11 @@ export const installHelp = {
 
 export const joinHelp = { description: "Join a shared collab session (same as /join)" } satisfies CommandMetadata;
 
+export const meshHelp = {
+	description:
+		"List mesh peers (other omp instances) found with the current mesh settings, or set the LAN key phrase (set-key)",
+} satisfies CommandMetadata;
+
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;

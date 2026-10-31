@@ -53,6 +53,7 @@ pub mod line_match;
 pub mod live;
 pub mod memory;
 pub mod mermaid;
+pub mod mesh;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;

@@ -9,6 +9,7 @@ members = [
    "crates/pi-diff",
    "crates/pi-edit",
    "crates/pi-iso",
+   "crates/pi-mesh",
    "crates/pi-natives",
    "crates/pi-predict",
    "crates/pi-shell",
@@ -262,6 +263,7 @@ pi-ast = { path = "crates/pi-ast", default-features = false }
 pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
+pi-mesh = { path = "crates/pi-mesh" }
 pi-shell = { path = "crates/pi-shell" }
 pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
@@ -308,6 +310,18 @@ thiserror = "2"
 bytes = "1"
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cryptography
+# ──────────────────────────────────────────────────────────────────────────────
+ring = "0.17"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Networking
+# ──────────────────────────────────────────────────────────────────────────────
+dns-lookup = "3.0.1"
+if-addrs = "0.15"
+mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CLI & Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 clap = { version = "4", features = ["derive", "env"] }
@@ -317,6 +331,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # ──────────────────────────────────────────────────────────────────────────────
 pdf-inspector = "1"
 regex = "1"
+unicode-normalization = "0.1"
 fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────

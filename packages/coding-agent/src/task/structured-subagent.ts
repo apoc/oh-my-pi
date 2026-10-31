@@ -140,6 +140,26 @@ export interface StructuredSubagentRequest {
 	/** Saved source session selected for the bundled seance agent. */
 	sourceSession?: string;
 	/**
+	 * Host-supplied definition used instead of resolving `agent` through discovery. Host surfaces
+	 * (mesh responders) spawn on the user's behalf, so the session's spawn allow-list and
+	 * `task.disabledAgents` do not apply; the depth limit still does.
+	 */
+	agentDefinition?: AgentDefinition;
+	/**
+	 * Fork this persisted session file into the child under seance isolation (restricted tools,
+	 * no extensions/MCP/IRC/LSP). `promptSuffix` is appended to the child's system prompt.
+	 * Incompatible with isolated execution and custom tools.
+	 */
+	fork?: { sourceFile: string; promptSuffix?: string };
+	/**
+	 * Persistent artifacts root for the child instead of the parent session's (transcript, output).
+	 * Mesh responders use a private subdirectory that seance-visible scans skip, so a fork reading
+	 * the parent's `history://` cannot see other responders. Ignored for an in-memory parent session.
+	 */
+	artifactsDir?: string;
+	/** Child setting overrides applied after every inherited value (e.g. `fetch.enabled: false`). */
+	settingsOverrides?: Readonly<Record<string, unknown>>;
+	/**
 	 * Model chosen by host code (SDK callers, `omp cleanse --model`) or, for the
 	 * bundled seance agent, the override of its source session's saved model.
 	 * Not gated by `task.perCallModel`.
@@ -215,7 +235,7 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string[];
-	/** Prepared read-only source fork for the bundled seance agent. */
+	/** Prepared read-only source fork: the bundled seance agent, or a host-requested {@link StructuredSubagentRequest.fork}. */
 	preparedSession?: PreparedSeanceSession;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -359,6 +379,7 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 			`Cannot spawn ${blockedAgent} agent from within itself (recursion prevention). Use a different agent type.`,
 		);
 	}
+	if (request.agentDefinition) return;
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	if (!spawnPolicy.enabled || (spawnPolicy.allowedAgents !== null && !spawnPolicy.allowedAgents.includes(agentName))) {
 		throw new StructuredSubagentError(
@@ -523,32 +544,46 @@ export async function resolveEffectiveSubagentPolicy(
 		includeParents: request.perCallModel !== undefined || request.seanceModel !== undefined,
 	});
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
-	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
+	const agentName = request.agentDefinition?.name ?? (request.agent?.trim() || spawnPolicy.defaultAgent);
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	if (agentName !== SEANCE_AGENT_NAME) assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
-
-	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
-	const sessionAgents = request.session.getSessionAgents?.() ?? [];
-	const agents = [...discovery.agents, ...sessionAgents];
-	const agent = getAgent(agents, agentName);
-	if (!agent) {
-		const available = agents.map(candidate => candidate.name).join(", ") || "none";
-		const searched = discovery.searchedDirs?.map(dir => shortenPath(dir)).join(", ") || "none";
+	if (request.fork && (request.isolation?.requested === true || (request.customTools?.length ?? 0) > 0)) {
 		throw new StructuredSubagentError(
 			"preflight",
-			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
+			"A forked subagent does not support isolated execution or custom tools.",
 		);
 	}
-	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
-	if (disabledAgents.includes(agentName)) {
-		const enabled = agents
-			.filter(candidate => !disabledAgents.includes(candidate.name))
-			.map(candidate => candidate.name);
-		throw new StructuredSubagentError(
-			"preflight",
-			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
-		);
+
+	const sessionAgents = request.session.getSessionAgents?.() ?? [];
+	let discovery: DiscoveryResult;
+	let agent: AgentDefinition;
+	if (request.agentDefinition) {
+		agent = request.agentDefinition;
+		discovery = { agents: [agent], projectAgentsDir: null };
+	} else {
+		discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
+		const agents = [...discovery.agents, ...sessionAgents];
+		const found = getAgent(agents, agentName);
+		if (!found) {
+			const available = agents.map(candidate => candidate.name).join(", ") || "none";
+			const searched = discovery.searchedDirs?.map(dir => shortenPath(dir)).join(", ") || "none";
+			throw new StructuredSubagentError(
+				"preflight",
+				`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
+			);
+		}
+		agent = found;
+		const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
+		if (disabledAgents.includes(agentName)) {
+			const enabled = agents
+				.filter(candidate => !disabledAgents.includes(candidate.name))
+				.map(candidate => candidate.name);
+			throw new StructuredSubagentError(
+				"preflight",
+				`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
+			);
+		}
 	}
 	if (agentName === SEANCE_AGENT_NAME && !isBundledSeance(agent)) assertPlanControlsAllowed(request, planMode);
 	let preparedSeance: { modelPatterns: string[]; session: PreparedSeanceSession } | undefined;
@@ -572,6 +607,10 @@ export async function resolveEffectiveSubagentPolicy(
 			);
 		}
 	}
+	const fork = request.fork;
+	const preparedSession =
+		preparedSeance?.session ??
+		(fork ? { fork: { sourceFile: fork.sourceFile }, promptSuffix: () => fork.promptSuffix ?? "" } : undefined);
 
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
 	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
@@ -654,7 +693,7 @@ export async function resolveEffectiveSubagentPolicy(
 		agent,
 		effectiveAgent,
 		modelOverride,
-		preparedSession: preparedSeance?.session,
+		preparedSession,
 		modelRole,
 		serviceTierOverride,
 		compactionThresholdOverride,
@@ -670,11 +709,11 @@ export async function resolveEffectiveSubagentPolicy(
 			request.isolation?.apply ??
 			(request.invocationKind === "task" ? cfgTaskIsolationApply.get(request.session.settings) : true),
 		enableLsp:
-			preparedSeance === undefined &&
+			preparedSession === undefined &&
 			!planMode &&
 			(request.enableLsp ?? ((request.session.enableLsp ?? true) && cfgTaskEnableLsp.get(request.session.settings))),
 		enableIrc:
-			preparedSeance === undefined &&
+			preparedSession === undefined &&
 			!planMode &&
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
@@ -741,10 +780,11 @@ interface ArtifactLease {
 async function leaseArtifacts(
 	session: ToolSession,
 	invocationKind: StructuredSubagentRequest["invocationKind"],
+	artifactsRoot: string | undefined,
 ): Promise<ArtifactLease> {
 	const sessionFile = session.getSessionFile();
 	if (sessionFile) {
-		const artifactsDir = sessionFile.slice(0, -6);
+		const artifactsDir = artifactsRoot ?? sessionFile.slice(0, -6);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
@@ -819,6 +859,7 @@ function buildExecutorOptions(
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
+		settingsOverrides: request.settingsOverrides,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		parentActiveProvider: session.getActiveModel?.()?.provider,
@@ -877,7 +918,11 @@ function buildExecutorOptions(
 		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
-		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
+		// A fork, or a child with its own artifacts root, keeps tool output out of the parent's shared tree.
+		parentArtifactManager:
+			preparedSession || request.artifactsDir !== undefined
+				? undefined
+				: (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		onRelease:
@@ -1042,7 +1087,7 @@ function describeSalvagedWork(result: SingleResult): string {
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
-	const lease = await leaseArtifacts(request.session, request.invocationKind);
+	const lease = await leaseArtifacts(request.session, request.invocationKind, request.artifactsDir);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;

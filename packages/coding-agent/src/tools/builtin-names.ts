@@ -31,6 +31,8 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"mesh_peers",
+	"mesh_send",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
@@ -86,6 +88,8 @@ export const BUILTIN_TOOL_HELP: Record<BuiltinToolName, BuiltinToolHelp> = {
 	learn: { summary: "Capture reusable lessons in long-term memory", defaultState: "off" },
 	manage_skill: { summary: "Create, update, or delete managed skills", defaultState: "off" },
 	security_scan: { summary: "Run security scans", defaultState: "off" },
+	mesh_peers: { summary: "List and rank other omp instances on the mesh", defaultState: "off" },
+	mesh_send: { summary: "Message or delegate work to a mesh peer", defaultState: "off" },
 };
 
 export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;

@@ -259,7 +259,7 @@ export interface AgentSessionConfig {
 	cacheWarmer?: CacheWarmer;
 	/** Returns the current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
-	/** Tool bridge context used by user-initiated Python cells to project enabled eval preludes. */
+	/** Tool context the SDK built for this session: eval cells project preludes through it; host services (mesh) spawn subagents with it. */
 	evalToolSession?: ToolSession;
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];

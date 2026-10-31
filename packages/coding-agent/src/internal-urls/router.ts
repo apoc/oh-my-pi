@@ -27,6 +27,7 @@ import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
+import { MeshProtocolHandler } from "./mesh-protocol";
 import { MrProtocolHandler } from "./mr-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
 import { OutProtocolHandler } from "./out-protocol";
@@ -117,6 +118,7 @@ export class InternalUrlRouter {
 		this.register(new ArtifactProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new ProcProtocolHandler());
+		this.register(new MeshProtocolHandler());
 		this.register(new CfgProtocolHandler());
 		this.register(new SshProtocolHandler());
 		// Reserved OMP-owned security-analysis namespace; vendor adapters normalize into its store.
