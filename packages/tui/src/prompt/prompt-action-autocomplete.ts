@@ -214,7 +214,9 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		const spaceIndex = commandText.indexOf(" ");
 		if (spaceIndex === -1) return false;
 		const commandName = commandText.slice(1, spaceIndex);
-		const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
+		const command = this.#commands.find(
+			cmd => !cmd.isHidden?.() && (cmd.name === commandName || cmd.aliases?.includes(commandName)),
+		);
 		return command !== undefined && (!("allowArgs" in command) || command.allowArgs !== false);
 	}
 

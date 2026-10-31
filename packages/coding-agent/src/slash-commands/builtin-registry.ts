@@ -8,6 +8,7 @@ import {
 	buildEffortArgumentCompletions,
 	buildEffortInlineHint,
 	buildLocalFileArgumentCompletions,
+	buildMeshPeerArgumentCompletions,
 	buildMcpArgumentCompletions,
 	buildModelSelectorCompletions,
 	buildStaticInlineHint,
@@ -38,6 +39,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
+	isHidden?: () => boolean;
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
@@ -75,6 +77,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		subcommandOptional: command.subcommandOptional,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+		isTuiHidden: command.isTuiHidden,
 	}),
 );
 
@@ -101,6 +104,9 @@ function materializeTuiBuiltinSlashCommand(
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else if (cmd.name === "ask") {
+		materialized.getArgumentCompletions = buildMeshPeerArgumentCompletions();
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.name === "local" && runtime) {
 		materialized.getArgumentCompletions = buildLocalFileArgumentCompletions(runtime);
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
@@ -112,6 +118,10 @@ function materializeTuiBuiltinSlashCommand(
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
 		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+	}
+	if (runtime && cmd.isTuiHidden) {
+		const isTuiHidden = cmd.isTuiHidden;
+		materialized.isHidden = () => isTuiHidden(runtime);
 	}
 	return materialized;
 }
@@ -149,7 +159,7 @@ export async function executeBuiltinSlashCommand(
 	const parsed = parseSlashCommand(text);
 	if (!parsed) return false;
 
-	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
+	const command = lookupTuiBuiltinSlashCommand(parsed.name, runtime);
 	if (!command) return false;
 	if (parsed.args.length > 0 && !command.allowArgs) {
 		return false;
@@ -202,6 +212,18 @@ export async function executeBuiltinSlashCommand(
 /** Look up a unified spec by name or alias. Used by the ACP dispatcher. */
 export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | undefined {
 	return BUILTIN_SLASH_COMMAND_LOOKUP.get(name);
+}
+
+/**
+ * TUI lookup: like {@link lookupBuiltinSlashCommand}, but a command hidden right now
+ * (`isTuiHidden`) does not exist, so every TUI check treats it as unknown `/...` input.
+ */
+export function lookupTuiBuiltinSlashCommand(
+	name: string,
+	runtime: TuiSlashCommandRuntime,
+): SlashCommandSpec | undefined {
+	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(name);
+	return command?.isTuiHidden?.(runtime) ? undefined : command;
 }
 
 export type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec, TuiSlashCommandRuntime };

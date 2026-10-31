@@ -829,6 +829,7 @@
 - Mesh traffic now shows in the TUI transcript as IRC-style `MESH ← peer` / `MESH → peer` cards: incoming questions, notes, steers and replies, plus the answers this instance sends back
 - Mesh `ask` responders can delegate read-only research to `scout` subagents, which keep URL fetching and web search off and see only this session's history, never other peers' threads
 - `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
+- Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks inline with the answer as a `MESH` card, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
 
 ## [18.14.1] - 2026-10-31
 

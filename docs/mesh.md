@@ -115,6 +115,7 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 | `r`       | Re-discover now                                                  |
 | `a` / `d` | Approve / deny the selected request                              |
 | `c`       | Compose to the selected peer: `status`, `ask`, `steer` or `note` |
+| `q`       | Ask the selected peer in the [`/ask`](#ask) dialog               |
 | `h` / `b` | Hide / block the selected peer                                   |
 | `v`       | Show hidden peers                                                |
 | `Esc`     | Back / close                                                     |
@@ -122,6 +123,20 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 Answers to messages sent from `/mesh` appear as `MESH` transcript cards. Hidden peers are left out of tool listings; blocked peers' requests are dropped by the engine. Both flags last for the process only.
 
 On Tern the manager is a native picker sheet: approvals and Local/Remote peer groups on the left, the selected peer or request on the right, and every key above as a button. Details open in the preview and Back (or Esc) leaves them; Approve acts only on the selected row, and activating an approval only selects it. The compose kind is a chip strip; the message and the key phrase are typed into a small input card (the key phrase masked). Terminals without native pickers keep the text overlay.
+
+## `/ask`
+
+A `/btw`-style side conversation answered by another instance: each question is a mesh `ask` (a read-only fork of the peer's session, see [Messages](#messages)) sent as the TUI user. `/ask` exists only while `mesh.enabled` is on: otherwise it is left out of autocomplete and, typed anyway, is not run (it falls through like any unknown `/…` input). Enable the mesh in `/mesh` (`e`).
+
+| Command                  | Effect                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `/ask`                   | Pick a peer, then open the conversation dialog                                           |
+| `/ask <agent>`           | Open the dialog with that peer                                                           |
+| `/ask <agent> <message>` | Ask inline: the question and the answer show as `MESH` cards; `/ask <agent>` follows up  |
+
+`<agent>` resolves like `mesh_send`'s `to` (instance id, unique id prefix, or unique display/session name). Autocomplete lists peers by session name, with display name, short id, busy/idle and branch, and inserts the instance id.
+
+The dialog reuses the BTW history panel, as text or as a Tern sheet: one entry per thread with that peer, newest first. With none it opens on a question composer; `n` starts a new thread, `f`/`Enter` follows up in the selected thread, `c` copies the answer. The answer waits up to 30 minutes. Esc (Tern: `x`) only stops waiting, since a peer cannot be cancelled; a later answer still arrives as a `MESH` card and completes the entry. A thread the peer has forgotten (session switch, TTL) refuses the follow-up; sending again starts a new thread. Conversations last for the process. `/mesh` → `q` opens the same dialog for the selected peer.
 
 ## `omp mesh list`
 
@@ -163,5 +178,6 @@ See [Settings → Mesh](./settings.md#mesh) for every `mesh.*` key.
 - [`src/mesh/outbound.ts`](../packages/coding-agent/src/mesh/outbound.ts), [`bridge.ts`](../packages/coding-agent/src/mesh/bridge.ts) — reply routing and delivery into sessions
 - [`src/mesh/snapshot.ts`](../packages/coding-agent/src/mesh/snapshot.ts), [`summary.ts`](../packages/coding-agent/src/mesh/summary.ts) — what peers see
 - [`src/tools/mesh-peers.ts`](../packages/coding-agent/src/tools/mesh-peers.ts), [`mesh-send.ts`](../packages/coding-agent/src/tools/mesh-send.ts), [`src/internal-urls/mesh-protocol.ts`](../packages/coding-agent/src/internal-urls/mesh-protocol.ts) — agent surface
+- [`src/modes/controllers/mesh-ask-controller.ts`](../packages/coding-agent/src/modes/controllers/mesh-ask-controller.ts) — `/ask` conversations and dialog
 - [`src/cli/mesh-cli.ts`](../packages/coding-agent/src/cli/mesh-cli.ts) — `omp mesh`
 - [`packages/tui/src/overlays/mesh-manager.ts`](../packages/tui/src/overlays/mesh-manager.ts) — `/mesh` overlay

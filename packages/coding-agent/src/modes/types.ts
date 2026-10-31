@@ -30,6 +30,8 @@ import type {
 } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
+import type { MeshTrafficEntry } from "../mesh/bridge";
+import type { MeshSender } from "../mesh/wire";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
 import type { BlockedKind } from "../utils/run-status";
@@ -648,6 +650,12 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen `/mesh` manager overlay. */
 	showMeshManager(): void;
+	/** `/ask [peer [message]]`: ask a mesh agent; no message opens the conversation dialog. False: nothing sent or opened. */
+	handleMeshAskCommand(args: string): Promise<boolean>;
+	/** Open the `/ask` conversation dialog with one mesh peer. */
+	openMeshAsk(instanceId: string): void;
+	/** A reply to a message the user sent over the mesh; folds `/ask` answers into their conversation. */
+	handleMeshAskReply(from: MeshSender, entry: MeshTrafficEntry): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void;

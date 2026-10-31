@@ -4,25 +4,30 @@
  * land in the transcript as `MESH` cards; queued approvals raise a toast pointing at `/mesh`.
  * The card builder strips control sequences and bidi controls from untrusted peer text.
  */
-import { createMeshMessageCard } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import { createMeshMessageCard, type MeshMessageCard } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import type { MeshUiHooks } from "../../../mesh/bridge";
 import type { InteractiveModeContext } from "../../types";
 
+/** Present one `MESH ←/→ peer` transcript card. */
+export function presentMeshCard(
+	ctx: Pick<InteractiveModeContext, "present" | "toolOutputExpanded">,
+	card: Omit<MeshMessageCard, "timestamp">,
+): void {
+	ctx.present(createMeshMessageCard({ ...card, timestamp: Date.now() }, () => ctx.toolOutputExpanded));
+}
+
 export function createTuiMeshUiHooks(
-	ctx: Pick<InteractiveModeContext, "present" | "showStatus" | "toolOutputExpanded">,
+	ctx: Pick<InteractiveModeContext, "present" | "showStatus" | "toolOutputExpanded" | "handleMeshAskReply">,
 ): MeshUiHooks {
-	const getExpanded = () => ctx.toolOutputExpanded;
 	return {
 		hasUI: true,
 		showIncoming(from, entry) {
-			ctx.present(
-				createMeshMessageCard({ direction: "incoming", peer: from, ...entry, timestamp: Date.now() }, getExpanded),
-			);
+			presentMeshCard(ctx, { direction: "incoming", peer: from, ...entry });
+			// Answers to the user's `/ask` questions also complete their conversation.
+			if (entry.kind === "reply") ctx.handleMeshAskReply(from, entry);
 		},
 		showOutgoing(to, entry) {
-			ctx.present(
-				createMeshMessageCard({ direction: "outgoing", peer: to, ...entry, timestamp: Date.now() }, getExpanded),
-			);
+			presentMeshCard(ctx, { direction: "outgoing", peer: to, ...entry });
 		},
 		notifyApproval() {
 			ctx.showStatus("mesh: approval needed (/mesh)", { toast: true, dim: false });

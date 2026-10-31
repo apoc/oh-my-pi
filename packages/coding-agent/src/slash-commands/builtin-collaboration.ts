@@ -1,4 +1,4 @@
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -459,6 +459,22 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handleTui: (_command, runtime) => {
 			clearSubmittedText(runtime);
 			runtime.ctx.showMeshManager();
+		},
+	},
+	{
+		name: "ask",
+		icon: "question",
+		description: "Ask a mesh agent: open a conversation, or send /ask <agent> <message> inline",
+		inlineHint: "[agent] [message]",
+		allowArgs: true,
+		// Exists only while the mesh is on: hidden from autocomplete and not run when typed.
+		isTuiHidden: runtime => !cfgMeshEnabled.get(runtime.ctx.settings),
+		handleTui: async (command, runtime) => {
+			// Mesh messages carry text only.
+			if (refuseImages(command, runtime)) return;
+			await runWithDetachedDraft(command, runtime, () => runtime.ctx.handleMeshAskCommand(command.args), {
+				restoreText: true,
+			});
 		},
 	},
 	{

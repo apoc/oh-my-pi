@@ -500,6 +500,63 @@ describe("CombinedAutocompleteProvider", () => {
 				fs.rmSync(baseDir, { recursive: true, force: true });
 			}
 		});
+
+		it("leaves a hidden command out of names, arguments and hints until it shows again", async () => {
+			let hidden = true;
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{
+						name: "ask",
+						description: "Ask a peer",
+						isHidden: () => hidden,
+						getArgumentCompletions: () => [{ value: "peer-1 ", label: "peer" }],
+						getInlineHint: () => "[agent]",
+					},
+					{ name: "assist", description: "Assist" },
+				],
+				"/tmp",
+			);
+			const names = async () => (await provider.getSuggestions(["/as"], 0, 3))?.items.map(item => item.value);
+			expect(await names()).toEqual(["assist"]);
+			expect(provider.trySyncSlashCompletion("/as")?.items.map(item => item.value)).toEqual(["assist"]);
+			expect((await provider.getSuggestions(["/ask "], 0, 5))?.items.map(item => item.value) ?? []).not.toContain(
+				"peer-1 ",
+			);
+			expect(provider.getInlineHint(["/ask "], 0, 5)).toBeNull();
+
+			hidden = false;
+			expect(await names()).toEqual(["ask", "assist"]);
+			expect((await provider.getSuggestions(["/ask "], 0, 5))?.items.map(item => item.value)).toEqual(["peer-1 "]);
+		});
+
+		it("lets a visible command of the same name answer while the hidden one is out", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "ask", isHidden: () => true, getArgumentCompletions: () => [{ value: "builtin ", label: "b" }] },
+					{
+						name: "ask",
+						getArgumentCompletions: () => [{ value: "mine ", label: "m" }],
+						getInlineHint: () => "<q>",
+					},
+				],
+				"/tmp",
+			);
+			expect((await provider.getSuggestions(["/ask "], 0, 5))?.items.map(item => item.value)).toEqual(["mine "]);
+			expect(provider.getInlineHint(["/ask "], 0, 5)).toBe("<q>");
+		});
+
+		it("does not let a hidden command keep a matching skill collapsed", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "ask", isHidden: () => true },
+					{ name: "skill:assess", description: "Assess" },
+				],
+				"/tmp",
+			);
+			expect((await provider.getSuggestions(["/as"], 0, 3))?.items.map(item => item.value)).toEqual([
+				"skill:assess",
+			]);
+		});
 	});
 
 	describe("natural file completion triggers", () => {

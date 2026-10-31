@@ -61,6 +61,51 @@ function isSameLocalDay(a: number | Date, b: number | Date): boolean {
 	return new Date(a).toDateString() === new Date(b).toDateString();
 }
 
+/** Every user-visible string the panel names; defaults read as the session's `/btw` history. */
+export interface BtwHistoryPanelTexts {
+	/** Text-mode frame title and native sheet `head`. Default "BTW history". */
+	heading: string;
+	/** Native sheet `role`. Default "omp.overlay.btwHistory". */
+	role: string;
+	/** Empty state title. Default "No side questions yet". */
+	emptyTitle: string;
+	/** Empty state hint (plain text). Default "Use /btw QUESTION to start one." */
+	emptyHint: string;
+	/** Follow-up composer placeholder. Default "Ask about this answer…". */
+	followUpPlaceholder: string;
+	/** New-topic composer placeholder. Default "Type a question…". */
+	startPlaceholder: string;
+	/** Notice when a question cannot start. Default "A BTW request is busy. Try again when it finishes." */
+	busy: string;
+	/** Native running-turn label after "●". Default "Answering". */
+	runningNative: string;
+	/** Text-mode running STATUS badge. Default "Running". */
+	runningBadge: string;
+	/** Native placeholder while a running turn has no answer text. Default "Thinking…". */
+	pendingNative: string;
+	/** Text-mode placeholder while a running turn has no answer text. Default "Waiting for response…". */
+	pendingText: string;
+	/** Stop button label. Default "Stop answer". */
+	stop: string;
+	/** List pane label. Default "History". */
+	listLabel: string;
+}
+
+const DEFAULT_TEXTS: BtwHistoryPanelTexts = {
+	heading: "BTW history",
+	role: "omp.overlay.btwHistory",
+	emptyTitle: "No side questions yet",
+	emptyHint: "Use /btw QUESTION to start one.",
+	followUpPlaceholder: "Ask about this answer…",
+	startPlaceholder: "Type a question…",
+	busy: "A BTW request is busy. Try again when it finishes.",
+	runningNative: "Answering",
+	runningBadge: "Running",
+	pendingNative: "Thinking…",
+	pendingText: "Waiting for response…",
+	stop: "Stop answer",
+	listLabel: "History",
+};
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
 	onClose: () => void;
@@ -88,6 +133,13 @@ interface BtwHistoryPanelOptions {
 	 * first. For a host with no inline panel to fall back to (Tern).
 	 */
 	escapeHides?: boolean;
+	/** Override any user-visible string; unset fields keep the BTW defaults. */
+	texts?: Partial<BtwHistoryPanelTexts>;
+	/**
+	 * Start a NEW topic from the composer opened by {@link BtwHistoryPanel.openStart}.
+	 * Resolve true when accepted (the composer closes), false to keep the draft.
+	 */
+	onStart?: (question: string, signal: AbortSignal) => Promise<boolean>;
 	/** `btw.inject` hooks, given only while it is on for this view. */
 	inject?: BtwHistoryInject;
 }
@@ -110,7 +162,8 @@ interface InjectBlock {
 }
 
 interface FollowUpComposer {
-	recordId: string;
+	/** The record followed up; undefined for a new topic ({@link BtwHistoryPanel.openStart}). */
+	recordId: string | undefined;
 	input: Input;
 	abortController: AbortController;
 	/** Images pasted into this follow-up, numbered by their `[Image #N]` markers. */
@@ -156,14 +209,11 @@ const STATUS: Record<BtwHistoryRecord["status"], { label: string; color: ThemeCo
 	interrupted: { label: "Interrupted", color: "warning" },
 };
 
-const SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "lg", head: "BTW history" } as const;
-const EMPTY_SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "md", head: "BTW history" } as const;
-
 /** A status worth naming next to an answer natively; an answered question needs none. */
-function describeStatus(status: BtwHistoryTurn["status"]): TspSpan[] | undefined {
+function describeStatus(status: BtwHistoryTurn["status"], running: string): TspSpan[] | undefined {
 	switch (status) {
 		case "running":
-			return [span("●", "accent", { fx: "pulse" }), span(" Answering", "accent")];
+			return [span("●", "accent", { fx: "pulse" }), span(` ${running}`, "accent")];
 		case "cancelled":
 			return [span("Cancelled", "warning")];
 		case "error":
@@ -178,6 +228,12 @@ function describeStatus(status: BtwHistoryTurn["status"]): TspSpan[] | undefined
 /** Session-local side questions. Selecting or copying never promotes them into chat. */
 export class BtwHistoryPanel implements Component, Focusable {
 	readonly #options: BtwHistoryPanelOptions;
+	readonly #texts: BtwHistoryPanelTexts;
+	/** The native frames: a large glass sheet, palette-sized while there is nothing to list. */
+	readonly #sheet: NonNullable<Component["nativeOverlay"]>;
+	readonly #emptySheet: NonNullable<Component["nativeOverlay"]>;
+	/** STATUS with this panel's running badge. */
+	readonly #status: typeof STATUS;
 	#records: readonly BtwHistoryRecord[] = [];
 	#selectedId: string | undefined;
 	#focus: "list" | "answer" = "list";
@@ -259,6 +315,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	constructor(options: BtwHistoryPanelOptions) {
 		this.#options = options;
+		this.#texts = { ...DEFAULT_TEXTS, ...options.texts };
+		const { role, heading: head } = this.#texts;
+		this.#sheet = { role, anchor: "center", size: "lg", head };
+		this.#emptySheet = { role, anchor: "center", size: "md", head };
+		this.#status = { ...STATUS, running: { ...STATUS.running, label: this.#texts.runningBadge } };
 		this.#records = options.records;
 		this.#selectedId = options.records[0]?.id;
 		if (options.records.length === 1) this.#focus = "answer";
@@ -287,7 +348,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#lastCopiedId = undefined;
 			this.#lastCopiedText = undefined;
 		}
-		if (this.#composer && !records.some(record => record.id === this.#composer?.recordId)) {
+		// A new-topic composer has no record to lose; a follow-up's must still exist.
+		const composerId = this.#composer?.recordId;
+		if (composerId !== undefined && !records.some(record => record.id === composerId)) {
 			this.#composer = undefined;
 		}
 		if (!records.some(record => record.id === this.#selectedId)) {
@@ -358,6 +421,13 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return true;
 	}
 
+	/** Open a composer that starts a new topic via `onStart`; false without `onStart`, while composing, or while a send is in flight. */
+	openStart(): boolean {
+		if (this.#composer || this.#followUpPending || !this.#options.onStart) return false;
+		this.#openComposer(undefined);
+		return true;
+	}
+
 	/** Select a record with its answer pane focused, read from the top (a just-asked /btw). */
 	showRecord(recordId: string): void {
 		const index = this.#records.findIndex(record => record.id === recordId);
@@ -378,15 +448,15 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#scroll = { by: "end", n: (this.#scroll?.n ?? 0) + 1 };
 	}
 
-	#openComposer(record: BtwHistoryRecord): void {
+	#openComposer(record: BtwHistoryRecord | undefined): void {
 		const input = new Input();
-		input.prompt = theme.fg("accent", "Follow up: ");
-		input.placeholder = "Ask about this answer…";
+		input.prompt = theme.fg("accent", record ? "Follow up: " : "Ask: ");
+		input.placeholder = record ? this.#texts.followUpPlaceholder : this.#texts.startPlaceholder;
 		input.setUseTerminalCursor(this.#useTerminalCursor);
 		if (this.#options.spaceHoldKeys !== undefined) input.spaceHold.keys = this.#options.spaceHoldKeys;
 		input.spaceHold.handler = this.#options.spaceHold?.(input);
 		const composer: FollowUpComposer = {
-			recordId: record.id,
+			recordId: record?.id,
 			input,
 			abortController: new AbortController(),
 			images: [],
@@ -403,7 +473,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#composer = composer;
 		this.#focus = "answer";
 		// Following up reads from the newest turn, right above the composer.
-		this.#jumpToEnd();
+		if (record) this.#jumpToEnd();
 		this.#options.requestRender();
 	}
 
@@ -413,46 +483,63 @@ export class BtwHistoryPanel implements Component, Focusable {
 			composer.submitQueued = true;
 			return;
 		}
-		let question = value.trim();
+		const question = value.trim();
+		if (composer.recordId === undefined) {
+			if (!question) {
+				composer.notice = "Enter a question.";
+				return;
+			}
+			const onStart = this.#options.onStart!;
+			await this.#sendFromComposer(composer, "question", () => onStart(question, composer.abortController.signal));
+			return;
+		}
 		if (!question) {
 			composer.notice = "Enter a follow-up question.";
 			return;
 		}
 		const record = this.#records.find(record => record.id === composer.recordId);
 		if (!record || !this.#canFollowUp(record)) {
-			composer.notice = "A BTW request is busy. Try again when it finishes.";
+			composer.notice = this.#texts.busy;
 			return;
 		}
-		this.#followUpPending = true;
-		composer.notice = "Starting follow-up…";
-		this.#options.requestRender();
+		let text = question;
 		let images: ImageContent[] | undefined;
 		if (composer.images.length > 0) {
 			// Path pastes attach as they finish loading; submit numbers images in text order.
-			const compacted = compactImageMarkers(question, composer.images.length, { byAppearance: true });
+			const compacted = compactImageMarkers(text, composer.images.length, { byAppearance: true });
 			images = compacted ? compacted.keep.map(index => composer.images[index]!) : composer.images;
-			if (compacted) question = compacted.text.trim();
+			if (compacted) text = compacted.text.trim();
 		}
+		const onFollowUp = this.#options.onFollowUp!;
+		await this.#sendFromComposer(composer, "follow-up", () =>
+			onFollowUp(record, text, composer.abortController.signal, images?.length ? images : undefined),
+		);
+	}
+
+	/** Send the composer's draft; accepted closes it, otherwise the draft stays with a retry notice. */
+	async #sendFromComposer(
+		composer: FollowUpComposer,
+		noun: "follow-up" | "question",
+		send: () => Promise<boolean>,
+	): Promise<void> {
+		this.#followUpPending = true;
+		composer.notice = `Starting ${noun}…`;
+		this.#options.requestRender();
+		const keep = `Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
 		try {
-			const accepted = await this.#options.onFollowUp!(
-				record,
-				question,
-				composer.abortController.signal,
-				images?.length ? images : undefined,
-			);
+			const accepted = await send();
 			if (this.#composer !== composer) return;
 			if (accepted) {
 				this.#composer = undefined;
-				this.#selectedId = composer.recordId;
+				// A new topic's record was already added and shown by the host: keep that selection.
+				if (composer.recordId !== undefined) this.#selectedId = composer.recordId;
 				this.#focus = "answer";
 				this.#jumpToEnd();
 			} else {
-				composer.notice = `Follow-up was not started. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
+				composer.notice = `${noun === "question" ? "Question" : "Follow-up"} was not started. ${keep}`;
 			}
 		} catch {
-			if (this.#composer === composer) {
-				composer.notice = `Could not start the follow-up. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
-			}
+			if (this.#composer === composer) composer.notice = `Could not start the ${noun}. ${keep}`;
 		} finally {
 			this.#followUpPending = false;
 			this.#options.requestRender();
@@ -464,15 +551,15 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return this.#composer?.input.capturesInput(data) ?? false;
 	}
 
-	/** False while a follow-up is sent: it already took its images, and the composer clears after. */
+	/** False while a question is sent (it already took its images) and for a new topic, which takes none. */
 	get acceptsImages(): boolean {
-		return this.#composer !== undefined && !this.#followUpPending;
+		return this.#composer?.recordId !== undefined && !this.#followUpPending;
 	}
 
 	/** Attach an image to the follow-up; returns its `[Image #N, WxH]` marker to paste. */
 	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
 		const composer = this.#composer;
-		if (!composer || this.#followUpPending) return undefined;
+		if (!composer || composer.recordId === undefined || this.#followUpPending) return undefined;
 		composer.images.push(image);
 		return formatVisionMarker("image", composer.images.length, dims);
 	}
@@ -514,10 +601,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options.requestRender();
 	}
 
-	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
+	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. A new topic takes text only. */
 	#paste(content: string): void {
-		const imagePaths = extractImagePastePathsFromText(content);
-		if (content.length === 0 && this.#options.onPasteImage) void this.#options.onPasteImage();
+		const takesImages = this.#composer?.recordId !== undefined;
+		const imagePaths = takesImages ? extractImagePastePathsFromText(content) : undefined;
+		if (content.length === 0 && takesImages && this.#options.onPasteImage) void this.#options.onPasteImage();
 		else if (imagePaths && this.#options.onPasteImagePath) {
 			for (const path of imagePaths) void this.#options.onPasteImagePath(path);
 		} else this.pasteText(content);
@@ -556,6 +644,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 		}
 		if (matchesKey(data, "f") || matchesKey(data, "enter")) {
 			if (record) this.openFollowUp(record.id);
+			return;
+		}
+		if (matchesKey(data, "n")) {
+			this.openStart();
 			return;
 		}
 		if (matchesKey(data, "c")) {
@@ -648,7 +740,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	/** A large glass sheet (the list beside the reader), palette-sized while there is nothing to list. */
 	get nativeOverlay(): NonNullable<Component["nativeOverlay"]> {
-		return this.#records.length > 0 ? SHEET : EMPTY_SHEET;
+		return this.#records.length > 0 ? this.#sheet : this.#emptySheet;
 	}
 
 	describe(): NativeNode {
@@ -680,12 +772,14 @@ export class BtwHistoryPanel implements Component, Focusable {
 		// `section`s (Tern draws those as foldable `##` headings). With one side
 		// question the list is noise: the reader alone.
 		const children: NativeChild[] = [];
+		// A new-topic composer replaces the reader: it belongs to no record yet.
+		const starting = composer !== undefined && composer.recordId === undefined;
 		if (record) {
 			const reader: NativeNode = {
 				...node(
 					"col",
 					{ role: "omp.btw.reader", grow: 1, basis: 0, min: { w: 0 } },
-					[this.#describeThread(record)],
+					[starting ? this.#describeComposer(composer) : this.#describeThread(record)],
 					"details",
 				),
 				// Arrow/page keys on the answer pane move its scroller.
@@ -695,6 +789,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			children.push(node("row", { role: "omp.btw.body" }, panes, "body"));
 		} else {
 			children.push(this.#describeEmpty());
+			if (starting) children.push(this.#describeComposer(composer));
 		}
 		children.push(this.#describeActions(record, canFollowUp, copied, canInject));
 		// The sheet is the frame (`nativeOverlay`); its last row is the pinned footer.
@@ -736,6 +831,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 				case "stop":
 					if (record && getBtwLatestTurn(record).status === "running") this.#options.onCancel(record);
 					break;
+				case "start":
+					this.openStart();
+					break;
 				case "send":
 					this.#composer?.input.submit();
 					break;
@@ -769,7 +867,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const followUps = record.followUps?.length ?? 0;
 			const detail: TspSpan[] = [span(this.#listStamp(record.createdAt, now), "mono")];
 			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
-			const status = describeStatus(getBtwLatestTurn(record).status);
+			const status = describeStatus(getBtwLatestTurn(record).status, this.#texts.runningNative);
 			// The question is markdown: its `code` reads as mono, without the backticks.
 			const label = sanitizeDisplayLine(getBtwTopicLabel(record))
 				.split(/`([^`]+)`/)
@@ -791,7 +889,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const children: NativeChild[] = turns.map((turn, index) =>
 			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index), record.createdAt),
 		);
-		if (this.#composer) children.push(this.#describeComposer(this.#composer));
+		if (this.#composer?.recordId !== undefined) children.push(this.#describeComposer(this.#composer));
 		return node("col", { role: "omp.btw.thread" }, children, "thread");
 	}
 
@@ -831,7 +929,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 							),
 						),
 					];
-		const status = describeStatus(turn.status);
+		const status = describeStatus(turn.status, this.#texts.runningNative);
 		if (status) meta.push(span("  ·  "), ...status);
 		// The question stays markdown so its inline code and links render.
 		const children: NativeChild[] = [
@@ -845,7 +943,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 				? describeBtwInjectAnswer(block.parts, block.state === "sent", stream)
 				: turn.answer.trim()
 					? md(sanitizeDisplayText(turn.answer), { stream })
-					: text([span(stream ? "Thinking…" : "No answer text.", "dim")], { role: "omp.btw.pending" });
+					: text([span(stream ? this.#texts.pendingNative : "No answer text.", "dim")], {
+							role: "omp.btw.pending",
+						});
 			children.push(node("col", { role: "omp.btw.answer" }, [answer], "answer"));
 		}
 		if (turn.error) {
@@ -873,19 +973,21 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	#describeEmpty(): NativeNode {
+		// The default hint names `/btw <question>` as code; an override is plain text.
+		const hint =
+			this.#options.texts?.emptyHint === undefined
+				? [
+						span("Ask one with "),
+						span("/btw <question>", "code"),
+						span(". The answer stays out of the main conversation."),
+					]
+				: [span(sanitizeDisplayLine(this.#texts.emptyHint))];
 		return node(
 			"col",
 			{ role: "omp.btw.empty", align: "center", gap: "sm" },
 			[
-				text("No side questions yet", { role: "omp.btw.empty.title" }),
-				text(
-					[
-						span("Ask one with "),
-						span("/btw <question>", "code"),
-						span(". The answer stays out of the main conversation."),
-					],
-					{ role: "omp.btw.empty.hint", wrap: "word" },
-				),
+				text(sanitizeDisplayLine(this.#texts.emptyTitle), { role: "omp.btw.empty.title" }),
+				text(hint, { role: "omp.btw.empty.hint", wrap: "word" }),
 			],
 			"empty",
 		);
@@ -912,16 +1014,20 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const running = record !== undefined && getBtwLatestTurn(record).status === "running";
 		const hides = this.#options.escapeHides === true;
 		const buttons: (NativeNode | null)[] = [];
-		if (running) buttons.push(actionButton("Stop answer", "stop", { keys: hides ? "x" : "escape" }));
+		if (running) buttons.push(actionButton(this.#texts.stop, "stop", { keys: hides ? "x" : "escape" }));
 		if (canInject) buttons.push(actionButton("Inject into main", "inject", { keys: appBtwInjectKey() }));
 		if (record && getBtwCopyText(record) !== undefined) {
 			buttons.push(actionButton(copied ? "Copy again" : "Copy answer", "copy-answer", { keys: "c" }));
 			if (copied) buttons.push(text([span("✓ Copied", "success")], { role: "omp.btw.copied" }));
 		}
+		// A new topic sits with the answer's actions, or in the corner while there is nothing else to do.
+		const startable = this.#options.onStart !== undefined;
+		if (startable && record) buttons.push(actionButton("New question", "start", { keys: "n" }));
 		buttons.push(null);
 		// Clicking Close always dismisses the sheet; its tooltip names Esc only where Esc does too.
 		buttons.push(actionButton("Close", "close", running && !hides ? undefined : { keys: "escape" }));
 		if (canFollowUp) buttons.push(actionButton("Follow up", "follow-up", { keys: "f", tone: "accent" }));
+		if (startable && !record) buttons.push(actionButton("New question", "start", { keys: "n", tone: "accent" }));
 		return actionBar(buttons);
 	}
 
@@ -929,9 +1035,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const rowSpan = width < 36 && height >= 2 ? 2 : 1;
 		this.#listHeight = Math.max(1, Math.floor(height / rowSpan));
 		if (this.#records.length === 0) {
-			return new Text(theme.fg("muted", "No side questions yet.\n\nUse /btw QUESTION to start one."), 0, 0)
-				.render(width)
-				.slice(0, height);
+			const title = sanitizeDisplayLine(this.#texts.emptyTitle);
+			const hint = sanitizeDisplayLine(this.#texts.emptyHint);
+			return new Text(theme.fg("muted", `${title}.\n\n${hint}`), 0, 0).render(width).slice(0, height);
 		}
 		const selectedIndex = this.#selectedIndex();
 		const selection = clampSelection(selectedIndex, this.#listScroll, this.#records.length, this.#listHeight);
@@ -946,7 +1052,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		) {
 			const record = this.#records[index]!;
 			const selected = index === selectedIndex;
-			const status = STATUS[getBtwLatestTurn(record).status];
+			const status = this.#status[getBtwLatestTurn(record).status];
 			const cursor = selected ? theme.fg(this.#focus === "list" ? "accent" : "muted", theme.nav.cursor) : " ";
 			const time = theme.fg("dim", this.#listStamp(record.createdAt, now));
 			const badge = theme.fg(status.color, status.label);
@@ -1002,7 +1108,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		if (turn.question !== previous?.question) question.setText(sanitizeDisplayText(turn.question));
 		// A block's state can change while the answer stays the same, so the plain text is reset on every miss.
 		if (!block) answer.setText(sanitizeDisplayText(turn.answer));
-		const status = STATUS[turn.status];
+		const status = this.#status[turn.status];
 		const lines = [
 			...wrapTextWithAnsi(
 				theme.fg(status.color, `${status.label} · ${this.#dateFormat.format(turn.createdAt)}`),
@@ -1019,7 +1125,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		else
 			lines.push(
 				...wrapTextWithAnsi(
-					theme.fg("dim", turn.status === "running" ? "Waiting for response…" : "No answer text."),
+					theme.fg("dim", turn.status === "running" ? this.#texts.pendingText : "No answer text."),
 					width,
 				),
 			);
@@ -1067,8 +1173,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 				}
 				this.#turns.length = turns.length;
 			} else {
+				const { emptyTitle, emptyHint } = this.#texts;
 				lines.push(
-					...wrapTextWithAnsi(theme.fg("muted", "No side questions yet. Use /btw QUESTION to start one."), inner),
+					...wrapTextWithAnsi(theme.fg("muted", sanitizeDisplayLine(`${emptyTitle}. ${emptyHint}`)), inner),
 				);
 			}
 			this.#detailRecord = record;
@@ -1081,7 +1188,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	#focusLabel(focus: "list" | "answer"): string {
-		const label = focus === "list" ? `History (${this.#records.length})` : "Details";
+		const label = focus === "list" ? `${this.#texts.listLabel} (${this.#records.length})` : "Details";
 		return this.#focus === focus
 			? theme.bold(theme.fg("accent", `${theme.nav.cursor} ${label}`))
 			: theme.fg("muted", `  ${label}`);
@@ -1123,6 +1230,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const injectKey = appBtwInjectKey();
 			if (injectKey && record && this.#options.inject?.canSend(record))
 				actions.push(rawKeyHint(injectKey, "inject"));
+			if (this.#options.onStart) actions.push(rawKeyHint("n", "new"));
 			if (record && getBtwCopyText(record) !== undefined) {
 				if (this.#isCopied(record))
 					actions.push(theme.fg("success", `✓ copied · ${formatKeyHint("c")} to copy again`));
@@ -1134,7 +1242,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const composerLines: string[] = [];
 		if (composer) {
 			const availableRows = Math.max(1, height - chrome - 1);
-			if (availableRows >= 2) {
+			// A new topic has no topic to name yet.
+			if (availableRows >= 2 && composer.recordId !== undefined) {
 				composerLines.push(
 					theme.fg(
 						"dim",
@@ -1174,7 +1283,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#bodyHeightLast = bodyHeight;
 		const lines: string[] = [];
 		if (framed) {
-			lines.push(topBorder(width, "BTW history"));
+			lines.push(topBorder(width, sanitizeDisplayLine(this.#texts.heading)));
 			lines.push(this.#labels.render(width)[0] ?? "");
 		} else if (height >= 3) {
 			lines.push(truncateToWidth(this.#focusLabel(this.#focus), width));

@@ -245,6 +245,8 @@ export interface MeshManagerOptions {
 	/** Terminal rows the fullscreen overlay fills. */
 	rows(): number;
 	onClose(): void;
+	/** Ask `instanceId` a side question; set to offer the `q` / "Ask" action. The manager closes first. */
+	onAsk?(instanceId: string): void;
 }
 
 type KeyPrompt = { kind: "key"; step: "enter" | "confirm"; first: string; input: Input; busy: boolean };
@@ -427,6 +429,7 @@ export class MeshManagerComponent implements Component {
 		else if (data === "h") this.#toggleFlag("hidden");
 		else if (data === "b") this.#toggleFlag("blocked");
 		else if (data === "c") this.#openCompose();
+		else if (data === "q" && this.#options.onAsk) this.#ask(this.#options.onAsk);
 		else return false;
 		return true;
 	}
@@ -530,8 +533,13 @@ export class MeshManagerComponent implements Component {
 		});
 	}
 
+	/** The peer an action applies to: the one in details, else the selected row's. */
+	#targetPeer(): MeshManagerPeer | undefined {
+		return this.#details ? this.#peer(this.#details.peerId) : this.#selectedPeer();
+	}
+
 	#toggleFlag(flag: "hidden" | "blocked"): void {
-		const peer = this.#details ? this.#peer(this.#details.peerId) : this.#selectedPeer();
+		const peer = this.#targetPeer();
 		if (!peer) return;
 		const value = !peer[flag];
 		this.#attempt(() => {
@@ -601,7 +609,7 @@ export class MeshManagerComponent implements Component {
 	}
 
 	#openCompose(): void {
-		const peer = this.#details ? this.#peer(this.#details.peerId) : this.#selectedPeer();
+		const peer = this.#targetPeer();
 		if (!peer) {
 			this.#notify("muted", "Select a peer to message");
 			return;
@@ -611,6 +619,22 @@ export class MeshManagerComponent implements Component {
 			peerId: peer.instanceId,
 			index: peer.blocked ? MESH_COMPOSE_KINDS.indexOf("note") : 0,
 		};
+	}
+
+	/** Hand the target peer to the host's side-question flow, closing first so the host takes focus back. */
+	#ask(onAsk: (instanceId: string) => void): void {
+		const peer = this.#targetPeer();
+		if (!peer) {
+			this.#notify("muted", "Select a peer to ask");
+			return;
+		}
+		const refusal = meshComposeRefusal(peer, "ask");
+		if (refusal) {
+			this.#notify("error", refusal);
+			return;
+		}
+		this.#close();
+		onAsk(peer.instanceId);
 	}
 
 	#openComposeText(peerId: string, composeKind: MeshComposeKind): void {
@@ -857,13 +881,15 @@ export class MeshManagerComponent implements Component {
 	#footerHints(): string[] {
 		if (this.#prompt) return ["esc cancel"];
 		if (!this.#state.enabled) return ["esc close", "e enable", "m mode", "k key phrase"];
-		if (this.#details) return ["esc back", "↑↓ scroll", "c compose", "h hide", "b block"];
+		const ask = this.#options.onAsk ? ["q ask"] : [];
+		if (this.#details) return ["esc back", "↑↓ scroll", "c compose", ...ask, "h hide", "b block"];
 		return [
 			"esc close",
 			"↑↓ select",
 			"enter details",
 			"a/d approve/deny",
 			"c compose",
+			...ask,
 			"h hide",
 			"b block",
 			"v show hidden",
@@ -1094,6 +1120,9 @@ export class MeshManagerComponent implements Component {
 		return [
 			...lead,
 			pickerAction("c", "Message", "c", { disabled: noPeer }),
+			...(this.#options.onAsk
+				? [pickerAction("q", "Ask", "q", { disabled: noPeer ?? (target && meshComposeRefusal(target, "ask")) })]
+				: []),
 			pickerAction("h", target?.hidden ? "Unhide" : "Hide", "h", { disabled: noPeer, on: target?.hidden }),
 			pickerAction("b", target?.blocked ? "Unblock" : "Block", "b", {
 				disabled: noPeer,
