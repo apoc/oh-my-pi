@@ -1,12 +1,14 @@
-//! Windows security descriptors granting only the current user: the registry
-//! directory (owner + protected, inherited DACL) and the local transport's
-//! named pipe.
+//! Windows security helpers, shared with `pi-natives`' IPC pipes.
+//!
+//! The user of a process token, and security descriptors granting only the
+//! current user: the registry directory (owner and protected inherited DACL)
+//! and the local transport's named pipe.
 
 use std::{
 	io, iter,
 	os::windows::{
 		ffi::OsStrExt,
-		io::{AsRawHandle, FromRawHandle, OwnedHandle},
+		io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
 	},
 	path::Path,
 	ptr, slice,
@@ -30,12 +32,46 @@ use windows_sys::{
 	core::PWSTR,
 };
 
-/// The current user's SID in string form (`S-1-5-21-…`).
-fn current_user_sid() -> io::Result<String> {
+/// The `TOKEN_USER` of a process token, in pointer-aligned storage.
+pub struct ProcessUser(Vec<u64>);
+
+impl ProcessUser {
+	/// The user's SID; points into `self`.
+	pub const fn sid(&self) -> PSID {
+		// SAFETY: the buffer was filled by `GetTokenInformation(TokenUser)`, is
+		// 8-byte aligned, and outlives the returned pointer's uses.
+		unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+	}
+
+	/// The user's SID in string form (`S-1-5-21-…`).
+	pub fn sid_string(&self) -> io::Result<String> {
+		let mut text: PWSTR = ptr::null_mut();
+		// SAFETY: `self.sid()` is valid while `self` lives; `text` is a valid out
+		// pointer.
+		if unsafe { ConvertSidToStringSidW(self.sid(), &raw mut text) } == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: `text` is a NUL-terminated wide string from LocalAlloc, freed
+		// once here.
+		let sid = unsafe {
+			let mut n = 0;
+			while *text.add(n) != 0 {
+				n += 1;
+			}
+			let sid = String::from_utf16_lossy(slice::from_raw_parts(text, n));
+			LocalFree(text.cast());
+			sid
+		};
+		Ok(sid)
+	}
+}
+
+/// The user of the token of `process` (a real or pseudo process handle).
+pub fn process_user(process: BorrowedHandle<'_>) -> io::Result<ProcessUser> {
 	let mut raw_token: HANDLE = ptr::null_mut();
-	// SAFETY: the pseudo process handle needs no close; `raw_token` is a valid
-	// out pointer.
-	if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw_token) } == 0 {
+	// SAFETY: `process` is a live process handle for this borrow and
+	// `raw_token` a valid out pointer.
+	if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &raw mut raw_token) } == 0 {
 		return Err(io::Error::last_os_error());
 	}
 	// SAFETY: `OpenProcessToken` returned a fresh handle we now own.
@@ -62,29 +98,18 @@ fn current_user_sid() -> io::Result<String> {
 	if ok == 0 {
 		return Err(io::Error::last_os_error());
 	}
-	// SAFETY: `buf` holds a TOKEN_USER whose SID points into `buf`.
-	let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-	let mut text: PWSTR = ptr::null_mut();
-	// SAFETY: `sid` is valid while `buf` lives; `text` is a valid out pointer.
-	if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
-		return Err(io::Error::last_os_error());
-	}
-	// SAFETY: `text` is a NUL-terminated wide string from LocalAlloc, freed once
-	// here.
-	let sid = unsafe {
-		let mut n = 0;
-		while *text.add(n) != 0 {
-			n += 1;
-		}
-		let sid = String::from_utf16_lossy(slice::from_raw_parts(text, n));
-		LocalFree(text.cast());
-		sid
-	};
-	Ok(sid)
+	Ok(ProcessUser(buf))
+}
+
+/// The user this process runs as.
+pub fn current_user() -> io::Result<ProcessUser> {
+	// SAFETY: `GetCurrentProcess` returns a pseudo handle that is always valid
+	// and needs no close.
+	process_user(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })
 }
 
 /// A self-relative security descriptor parsed from SDDL (`LocalAlloc`'d).
-pub(crate) struct Descriptor(PSECURITY_DESCRIPTOR);
+pub struct Descriptor(PSECURITY_DESCRIPTOR);
 
 // SAFETY: the descriptor is immutable LocalAlloc memory owned by this value;
 // Win32 only reads it.
@@ -93,7 +118,8 @@ unsafe impl Send for Descriptor {}
 unsafe impl Sync for Descriptor {}
 
 impl Descriptor {
-	fn from_sddl(sddl: &str) -> io::Result<Self> {
+	/// Parse `sddl` (e.g. `D:P(A;;GA;;;S-1-5-21-…)`).
+	pub fn from_sddl(sddl: &str) -> io::Result<Self> {
 		let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
 		let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
 		// SAFETY: `wide` is NUL-terminated; `descriptor` is a valid out pointer.
@@ -114,14 +140,14 @@ impl Descriptor {
 	/// Owner: the current user. DACL: protected, full control for the current
 	/// user only; `inherit` adds object/container inheritance.
 	fn current_user_only(inherit: bool) -> io::Result<Self> {
-		let sid = current_user_sid()?;
+		let sid = current_user()?.sid_string()?;
 		let flags = if inherit { "OICI" } else { "" };
 		Self::from_sddl(&format!("O:{sid}D:P(A;{flags};FA;;;{sid})"))
 	}
 
 	/// `SECURITY_ATTRIBUTES` pointing at this descriptor; valid while `self`
 	/// lives.
-	pub(crate) const fn attributes(&self) -> SECURITY_ATTRIBUTES {
+	pub const fn attributes(&self) -> SECURITY_ATTRIBUTES {
 		SECURITY_ATTRIBUTES {
 			nLength:              size_of::<SECURITY_ATTRIBUTES>() as u32,
 			lpSecurityDescriptor: self.0,

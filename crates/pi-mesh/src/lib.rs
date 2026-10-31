@@ -14,6 +14,8 @@
 //! - [`discovery`]: mDNS DNS-SD announce/browse of LAN peers.
 //! - [`node`]: the orchestrator the N-API binding wraps (configure, peer table,
 //!   inbound admission, request routing).
+//! - `winsec` (Windows): process-token users and current-user-only security
+//!   descriptors, shared with `pi-natives`' IPC pipes.
 
 pub mod discovery;
 pub mod error;
@@ -25,6 +27,6 @@ pub mod protocol;
 pub mod registry;
 pub mod transport;
 #[cfg(windows)]
-mod winsec;
+pub mod winsec;
 
 pub use error::{FrameError, KeyError, ProtocolError};

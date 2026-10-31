@@ -3,43 +3,30 @@
 use std::{
 	ffi::c_void,
 	io::{self, IoSlice},
-	iter,
-	os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-	ptr, slice,
+	os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
 	time::Duration,
 };
 
+use pi_mesh::winsec::{Descriptor, current_user, process_user};
 use tokio::{
 	net::windows::named_pipe::{
 		ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
 	},
 	time::Instant,
 };
-use windows_sys::{
-	Win32::{
-		Foundation::{
-			ERROR_ACCESS_DENIED, ERROR_BAD_PATHNAME, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
-			ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_NETNAME_DELETED, ERROR_NO_DATA,
-			ERROR_NOT_ENOUGH_MEMORY, ERROR_OPERATION_ABORTED, ERROR_OUTOFMEMORY, ERROR_PATH_NOT_FOUND,
-			ERROR_PIPE_BUSY, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, ERROR_TOO_MANY_OPEN_FILES,
-			HANDLE, LocalFree,
-		},
-		Security::{
-			Authorization::{
-				ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-				SDDL_REVISION_1,
-			},
-			EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-			TOKEN_QUERY, TOKEN_USER, TokenUser,
-		},
-		System::{
-			Pipes::GetNamedPipeServerProcessId,
-			Threading::{
-				GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-			},
-		},
+use windows_sys::Win32::{
+	Foundation::{
+		ERROR_ACCESS_DENIED, ERROR_BAD_PATHNAME, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
+		ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_NETNAME_DELETED, ERROR_NO_DATA,
+		ERROR_NOT_ENOUGH_MEMORY, ERROR_OPERATION_ABORTED, ERROR_OUTOFMEMORY, ERROR_PATH_NOT_FOUND,
+		ERROR_PIPE_BUSY, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, ERROR_TOO_MANY_OPEN_FILES,
+		HANDLE,
 	},
-	core::PWSTR,
+	Security::EqualSid,
+	System::{
+		Pipes::GetNamedPipeServerProcessId,
+		Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+	},
 };
 
 use super::IpcError;
@@ -74,130 +61,26 @@ pub fn is_orderly_eof(error: &io::Error) -> bool {
 	)
 }
 
-/// `TOKEN_USER` copied out of a token, in pointer-aligned storage.
-struct TokenUserBuf(Vec<u64>);
-
-impl TokenUserBuf {
-	const fn sid(&self) -> PSID {
-		// SAFETY: the buffer was filled by `GetTokenInformation(TokenUser)`,
-		// is 8-byte aligned, and outlives the returned pointer's uses.
-		unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
-	}
+/// Security descriptor granting the pipe to the current user only.
+fn pipe_security() -> io::Result<Descriptor> {
+	let sid = current_user()?.sid_string()?;
+	Descriptor::from_sddl(&format!("D:P(A;;GA;;;{sid})"))
 }
 
-/// User SID of the token of `process` (a real or pseudo process handle).
-fn process_user(process: HANDLE) -> io::Result<TokenUserBuf> {
-	let mut raw_token: HANDLE = ptr::null_mut();
-	// SAFETY: `process` is a live process handle and `raw_token` a valid out
-	// pointer.
-	if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw_token) } == 0 {
-		return Err(io::Error::last_os_error());
-	}
-	// SAFETY: `OpenProcessToken` returned a fresh handle we now own.
-	let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
-	let mut len = 0u32;
-	// SAFETY: a null buffer with zero length only queries the required size.
+fn create_instance(security: &Descriptor, name: &str, first: bool) -> io::Result<NamedPipeServer> {
+	let mut options = ServerOptions::new();
+	options
+		.first_pipe_instance(first)
+		.reject_remote_clients(true)
+		.pipe_mode(PipeMode::Byte);
+	let attributes = security.attributes();
+	// SAFETY: `attributes` points at `security`'s descriptor, alive for this
+	// call; Win32 copies it during creation.
 	unsafe {
-		GetTokenInformation(token.as_raw_handle(), TokenUser, ptr::null_mut(), 0, &mut len);
-	}
-	if len == 0 {
-		return Err(io::Error::last_os_error());
-	}
-	let mut buf = vec![0u64; (len as usize).div_ceil(size_of::<u64>())];
-	// SAFETY: `buf` provides at least `len` writable, aligned bytes.
-	let ok = unsafe {
-		GetTokenInformation(token.as_raw_handle(), TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
-	};
-	if ok == 0 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(TokenUserBuf(buf))
-}
-
-fn current_user() -> io::Result<TokenUserBuf> {
-	// SAFETY: `GetCurrentProcess` returns a pseudo handle that needs no close.
-	process_user(unsafe { GetCurrentProcess() })
-}
-
-/// Security attributes whose DACL grants access to the current user only.
-struct PipeSecurity {
-	descriptor: PSECURITY_DESCRIPTOR,
-	attributes: SECURITY_ATTRIBUTES,
-}
-
-// SAFETY: the descriptor is immutable LocalAlloc memory owned by this value;
-// Win32 only reads it while creating pipe instances.
-unsafe impl Send for PipeSecurity {}
-// SAFETY: see `Send`; shared access is read-only.
-unsafe impl Sync for PipeSecurity {}
-
-impl PipeSecurity {
-	fn current_user_only() -> io::Result<Box<Self>> {
-		let user = current_user()?;
-		let mut sid_text: PWSTR = ptr::null_mut();
-		// SAFETY: `user.sid()` is a valid SID and `sid_text` a valid out pointer.
-		if unsafe { ConvertSidToStringSidW(user.sid(), &mut sid_text) } == 0 {
-			return Err(io::Error::last_os_error());
-		}
-		// SAFETY: `sid_text` is a NUL-terminated wide string from LocalAlloc.
-		let sid = unsafe {
-			let mut len = 0;
-			while *sid_text.add(len) != 0 {
-				len += 1;
-			}
-			let text = String::from_utf16_lossy(slice::from_raw_parts(sid_text, len));
-			LocalFree(sid_text.cast());
-			text
-		};
-		let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
-			.encode_utf16()
-			.chain(iter::once(0))
-			.collect();
-		let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-		// SAFETY: `sddl` is NUL-terminated; `descriptor` is a valid out pointer.
-		let ok = unsafe {
-			ConvertStringSecurityDescriptorToSecurityDescriptorW(
-				sddl.as_ptr(),
-				SDDL_REVISION_1,
-				&mut descriptor,
-				ptr::null_mut(),
-			)
-		};
-		if ok == 0 {
-			return Err(io::Error::last_os_error());
-		}
-		Ok(Box::new(Self {
-			descriptor,
-			attributes: SECURITY_ATTRIBUTES {
-				nLength:              size_of::<SECURITY_ATTRIBUTES>() as u32,
-				lpSecurityDescriptor: descriptor,
-				bInheritHandle:       0,
-			},
-		}))
-	}
-
-	fn create_instance(&self, name: &str, first: bool) -> io::Result<NamedPipeServer> {
-		let mut options = ServerOptions::new();
-		options
-			.first_pipe_instance(first)
-			.reject_remote_clients(true)
-			.pipe_mode(PipeMode::Byte);
-		// SAFETY: `self.attributes` is a valid SECURITY_ATTRIBUTES whose
-		// descriptor lives as long as `self`; Win32 copies it during creation.
-		unsafe {
-			options.create_with_security_attributes_raw(
-				name,
-				(&raw const self.attributes).cast_mut().cast::<c_void>(),
-			)
-		}
-	}
-}
-
-impl Drop for PipeSecurity {
-	fn drop(&mut self) {
-		// SAFETY: `descriptor` came from LocalAlloc via the SDDL conversion and
-		// is freed exactly once.
-		unsafe { LocalFree(self.descriptor) };
+		options.create_with_security_attributes_raw(
+			name,
+			(&raw const attributes).cast_mut().cast::<c_void>(),
+		)
 	}
 }
 
@@ -210,7 +93,7 @@ pub const fn release(_bound: Bound) {}
 /// Pipe server keeping one pending instance for the next client.
 pub struct Listener {
 	name:     String,
-	security: Box<PipeSecurity>,
+	security: Descriptor,
 	pending:  Option<NamedPipeServer>,
 }
 
@@ -219,12 +102,12 @@ impl Listener {
 	pub async fn accept(&mut self) -> io::Result<Stream> {
 		let pending = match self.pending.take() {
 			Some(pending) => pending,
-			None => self.security.create_instance(&self.name, false)?,
+			None => create_instance(&self.security, &self.name, false)?,
 		};
 		let pending = self.pending.insert(pending);
 		let connected = pending.connect().await;
 		let instance = self.pending.take();
-		self.pending = self.security.create_instance(&self.name, false).ok();
+		self.pending = create_instance(&self.security, &self.name, false).ok();
 		connected?;
 		instance
 			.map(Stream::Server)
@@ -235,9 +118,9 @@ impl Listener {
 /// Create the first instance of `endpoint` (see `IpcServer.listen`).
 #[allow(clippy::unused_async, reason = "async on Unix; one shared call shape")]
 pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
-	let security = PipeSecurity::current_user_only()
-		.map_err(|error| IpcError::io(&error, "build pipe security descriptor"))?;
-	let first = security.create_instance(endpoint, true).map_err(|error| {
+	let security =
+		pipe_security().map_err(|error| IpcError::io(&error, "build pipe security descriptor"))?;
+	let first = create_instance(&security, endpoint, true).map_err(|error| {
 		match error.raw_os_error().map(|code| code as u32) {
 			Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY) => {
 				IpcError::new("EADDRINUSE", format!("{endpoint} already has a listener"))
@@ -285,7 +168,7 @@ fn verify_server_user(pipe: HANDLE, endpoint: &str) -> Result<(), IpcError> {
 	}
 	// SAFETY: `OpenProcess` returned a fresh handle we now own.
 	let process = unsafe { OwnedHandle::from_raw_handle(raw) };
-	let server = process_user(process.as_raw_handle())
+	let server = process_user(process.as_handle())
 		.map_err(|error| IpcError::io(&error, "read pipe server token"))?;
 	let ours = current_user().map_err(|error| IpcError::io(&error, "read own token"))?;
 	// SAFETY: both SIDs point into live token buffers.
