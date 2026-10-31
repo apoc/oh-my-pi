@@ -974,6 +974,7 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `mesh.inbound.note`      | enum    | `allow` | Same values. Notes shown to the human only; always refused without a UI.                                                       |
 | `mesh.maxConcurrentAsks` | number  | `2`     | `ask`/`task` responders running at once; more queue.                                                                          |
 | `mesh.threadTtlHours`    | number  | `24`    | Idle inbound threads are forgotten after this many hours.                                                                      |
+| `mesh.announcePeers` | boolean | `true` | Hidden notices tell the main agent which other agents are on the mesh and which appeared or left, with a user prompt or mid-run after a tool batch; never wakes an idle agent. |
 | `mesh.autoBackground.enabled` | boolean | `true` | `mesh_send` `status`/`ask`/`task` waits move to a background `mesh` job once unanswered past the threshold (or when a user message arrives); the answer is delivered as a follow-up message. |
 | `mesh.autoBackground.thresholdMs` | number | `10000` | How long the call waits inline before backgrounding; `0` backgrounds at once. A `timeoutSec` no longer than this waits inline. |
 

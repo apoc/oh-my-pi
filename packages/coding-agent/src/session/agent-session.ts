@@ -191,6 +191,7 @@ import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { deliverMeshMessage } from "../mesh/bridge";
+import { takeMeshPeersNotice } from "../mesh/peer-notice";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -2639,6 +2640,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
+			// Mesh agents that appeared or left since the agent was last told. Never at a stop
+			// boundary: there it would cost another model call just to say so.
+			if (boundary === "work") thunks.push(() => takeMeshPeersNotice(this, "work") ?? null);
 			const contextNotesReminder = this.#experimentalContextNotesReminder;
 			if (contextNotesReminder) {
 				this.#experimentalContextNotesReminder = undefined;
@@ -9735,7 +9739,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
 			const skillNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillNotice) {
+			const meshPeersNotice = isUserQueuedMessage(message) ? takeMeshPeersNotice(this, "prompt") : undefined;
+			if (
+				xdevMountNotice ||
+				toolRosterNotice ||
+				evalPreludeNotice ||
+				sessionAgentNotice ||
+				skillNotice ||
+				meshPeersNotice
+			) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -9744,6 +9756,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
 					...(skillNotice ? [skillNotice] : []),
+					...(meshPeersNotice ? [meshPeersNotice] : []),
 				);
 			}
 

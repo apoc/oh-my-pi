@@ -13,11 +13,9 @@ import { Settings } from "../config/settings";
 import type { MeshPeerView } from "../mesh/engine";
 import { meshConfigFromSettings, resolveMeshDisplayName } from "../mesh/host";
 import { NativeMeshEngine } from "../mesh/native-engine";
-import { formatMeshEndpoint } from "../mesh/peers";
+import { formatMeshEndpoint, MESH_DISCOVERY_WINDOW_MS } from "../mesh/peers";
 import { cfgMeshEnabled, cfgMeshKey } from "../mesh/settings";
 
-/** How long `mesh list` lets discovery and snapshot fetches run. */
-const DISCOVERY_WINDOW_MS = 2500;
 /** Summary line cap when stdout is not a terminal. */
 const SUMMARY_LINE_CHARS = 200;
 
@@ -51,7 +49,7 @@ export async function runMeshSetKeyCommand(): Promise<void> {
 	console.log(chalk.green("Mesh key stored. Use the same phrase on every machine that should join this mesh."));
 }
 
-/** Run a transient engine for {@link DISCOVERY_WINDOW_MS} with the current settings and print what it found. */
+/** Run a transient engine for {@link MESH_DISCOVERY_WINDOW_MS} with the current settings and print what it found. */
 export async function runMeshListCommand(args: MeshListCommandArgs): Promise<void> {
 	const settings = await Settings.init();
 	const config = meshConfigFromSettings(settings);
@@ -61,7 +59,7 @@ export async function runMeshListCommand(args: MeshListCommandArgs): Promise<voi
 		// Discovery needs no stable inbound port; a fixed `mesh.port` is held by a running instance.
 		const status = await engine.configure({ ...config, lanPort: 0 });
 		engine.refresh();
-		await Bun.sleep(DISCOVERY_WINDOW_MS);
+		await Bun.sleep(MESH_DISCOVERY_WINDOW_MS);
 		peers = engine.peers().filter(peer => !peer.blocked);
 		if (args.json) {
 			console.log(JSON.stringify({ status, peers }, null, 2));
