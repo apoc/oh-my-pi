@@ -3,10 +3,9 @@
  * Each conversation is one mesh `ask` thread with one peer (a read-only fork of its session);
  * follow-ups continue the thread. The dialog reuses the BTW history panel (text and native).
  *
- * Inline `/ask <peer> <message>` sends without opening the dialog: the question and the answer
- * show as `MESH` transcript cards, and the answer is folded into the conversation so `/ask <peer>`
- * reopens it. An answer nobody waits for any more (stopped, timed out) lands as a card and is
- * folded in the same way.
+ * `/ask <peer> <message>` sends the question and opens the dialog on its thread, like `/btw <question>`.
+ * An answer nobody waits for any more (stopped, timed out) lands as a `MESH` transcript card and is
+ * folded into its conversation, so `/ask <peer>` shows it.
  */
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
 import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
@@ -26,7 +25,6 @@ import { beginBtwTurn, patchLatestBtwTurn } from "../../session/btw-turn";
 import { parseSubcommand } from "../../slash-commands/helpers/parse";
 import { MESH_SEND_MAX_TIMEOUT_SEC } from "../../tools/mesh-send";
 import { copyToClipboard } from "../../utils/clipboard";
-import { presentMeshCard } from "../components/mesh/mesh-ui-hooks";
 import type { InteractiveModeContext } from "../types";
 
 /** Display fields of a peer for cards and headings; peer-declared, sanitized where rendered. */
@@ -93,11 +91,8 @@ export class MeshAskController {
 		// `resolveMeshPeer` only returns peers that served a snapshot.
 		const peer = peerOf(resolution.peer, resolution.peer.snapshot!);
 		if (!message) return this.#open(peer);
-		const accepted = await this.#send(peer, message, { inline: true });
-		if (accepted) {
-			this.ctx.showStatus(`Asked ${peerTitle(peer)} · /ask ${peer.instanceId} to follow up`, { dim: true });
-		}
-		return accepted;
+		// Open only once the peer accepted the question; a refusal keeps the draft instead.
+		return (await this.#send(peer, message)) && this.#open(peer);
 	}
 
 	/** Open the conversation dialog with one peer (the picker, the `/mesh` Ask action). */
@@ -167,7 +162,7 @@ export class MeshAskController {
 			},
 			onFollowUp: (record, question) => {
 				const conversation = this.#conversationOf(record.id);
-				return conversation ? this.#send(conversation.peer, question, { conversation }) : Promise.resolve(false);
+				return conversation ? this.#send(conversation.peer, question, conversation) : Promise.resolve(false);
 			},
 			onStart: question => this.#send(peer, question),
 			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
@@ -241,11 +236,7 @@ export class MeshAskController {
 	 * Send one question: a new conversation, or a follow-up in `conversation`'s thread. Resolves
 	 * true once the peer acknowledged it (the panel then closes its composer); a refusal keeps the draft.
 	 */
-	async #send(
-		peer: MeshAskPeer,
-		question: string,
-		{ conversation, inline = false }: { conversation?: MeshAskConversation; inline?: boolean } = {},
-	): Promise<boolean> {
+	async #send(peer: MeshAskPeer, question: string, conversation?: MeshAskConversation): Promise<boolean> {
 		const text = question.trim();
 		if (!text || conversation?.sending) return false;
 		const runtime = this.#runtime();
@@ -305,20 +296,14 @@ export class MeshAskController {
 			this.#conversations.push(target);
 		}
 		if (result.thread) target.thread = result.thread;
-		if (inline) presentMeshCard(this.ctx, { direction: "outgoing", peer, kind: "ask", text, thread: result.thread });
 		// Claim the answer in this tick: an `awaitReply: true` entry nobody waits on is never shown.
-		void this.#awaitAnswer(target, result.msgId, runtime, inline);
+		void this.#awaitAnswer(target, result.msgId, runtime);
 		this.#refresh(target);
-		if (!conversation && !inline) this.#dialog?.panel.showRecord(target.record.id);
+		if (!conversation) this.#dialog?.panel.showRecord(target.record.id);
 		return true;
 	}
 
-	async #awaitAnswer(
-		conversation: MeshAskConversation,
-		msgId: string,
-		runtime: MeshRuntime,
-		inline: boolean,
-	): Promise<void> {
+	async #awaitAnswer(conversation: MeshAskConversation, msgId: string, runtime: MeshRuntime): Promise<void> {
 		const wait = new AbortController();
 		conversation.wait = wait;
 		const reply = await runtime.frontend.outbound.awaitReply(msgId, MESH_SEND_MAX_TIMEOUT_SEC * 1000, wait.signal);
@@ -338,18 +323,8 @@ export class MeshAskController {
 		}
 		if (reply.op !== "reply") return;
 		this.#applyReply(conversation, reply.thread, reply.text, reply.error);
-		if (inline) {
-			// Inline answers belong in the transcript, after their question card.
-			presentMeshCard(this.ctx, {
-				direction: "incoming",
-				peer: reply.from,
-				kind: "reply",
-				text: reply.error ?? reply.text,
-				thread: reply.thread,
-				error: reply.error !== undefined,
-			});
-		} else if (this.#dialog?.peerId !== conversation.peer.instanceId) {
-			// A dialog answer has no card: when its dialog is closed, say where it is.
+		// A dialog answer has no card: when its dialog is closed, say where it is.
+		if (this.#dialog?.peerId !== conversation.peer.instanceId) {
 			const title = peerTitle(conversation.peer);
 			this.ctx.showStatus(`Answer from ${title} ready · /ask ${conversation.peer.instanceId} to read it`);
 		}
