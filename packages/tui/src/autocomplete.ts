@@ -258,6 +258,8 @@ export interface SlashCommand {
 	allowArgs?: boolean;
 	/** Dynamic display-only description for slash-command autocomplete. Must be synchronous and side-effect free. */
 	getAutocompleteDescription?: () => string | undefined;
+	/** Leave the command out of autocomplete (name, arguments, inline hint) while true; read per keystroke, so keep it cheap and side-effect free. */
+	isHidden?(): boolean;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
@@ -346,6 +348,15 @@ function getCommandName(cmd: CommandEntry): string | undefined {
 	return "name" in cmd ? cmd.name : cmd.value;
 }
 
+function isCommandHidden(cmd: CommandEntry): boolean {
+	return "isHidden" in cmd && typeof cmd.isHidden === "function" && cmd.isHidden();
+}
+
+/** The visible command `commandName` names (by name or alias); a hidden one never shadows a same-named visible one. */
+function findVisibleCommand(commands: readonly CommandEntry[], commandName: string): CommandEntry | undefined {
+	return commands.find(cmd => !isCommandHidden(cmd) && commandMatchesNameOrAlias(cmd, commandName));
+}
+
 function getCommandAliases(cmd: CommandEntry): string[] {
 	if (!("aliases" in cmd) || !Array.isArray(cmd.aliases)) return [];
 	return cmd.aliases.filter(alias => typeof alias === "string" && alias.length > 0);
@@ -405,7 +416,7 @@ function buildSlashCommandCompletions(
 		commands
 			.flatMap(cmd => {
 				const name = getCommandName(cmd);
-				if (!name) return [];
+				if (!name || isCommandHidden(cmd)) return [];
 				const usage = commandUsage?.(name) ?? 0;
 				const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 				const staticDesc = getStaticCommandDescription(cmd);
@@ -563,7 +574,7 @@ function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): 
 	if (!approachesNamespace) {
 		for (const cmd of commands) {
 			const name = getCommandName(cmd);
-			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
+			if (!name || name.startsWith(SKILL_NAMESPACE) || isCommandHidden(cmd)) continue;
 			commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, name.toLowerCase()));
 			for (const alias of getCommandAliases(cmd)) {
 				commandTier = Math.max(commandTier, commandBreakoutTier(lowerPrefix, alias.toLowerCase()));
@@ -741,7 +752,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
 				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
 
-				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+				const command = findVisibleCommand(this.#commands, commandName);
 				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
 					return null;
 				}
@@ -1344,7 +1355,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const commandName = commandText.slice(1, spaceIndex);
 		const argumentText = commandText.slice(spaceIndex + 1);
 
-		const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+		const command = findVisibleCommand(this.#commands, commandName);
 
 		if (!command || !("getInlineHint" in command) || !command.getInlineHint) {
 			return null;

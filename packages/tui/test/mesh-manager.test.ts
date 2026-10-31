@@ -417,6 +417,40 @@ describe("mesh manager on Tern", () => {
 		expect(closed()).toBe(true);
 	});
 
+	test("Ask closes the manager, then hands the target peer to onAsk; blocked peers are refused", () => {
+		const runtime = new FakeRuntime({
+			...baseState(),
+			approvals: [],
+			peers: [
+				peer({ instanceId: "a", displayName: "alpha" }),
+				peer({ instanceId: "x", displayName: "x", blocked: true }),
+			],
+		});
+		const events: string[] = [];
+		const manager = new MeshManagerComponent(runtime, {
+			requestRender: () => {},
+			rows: () => 40,
+			onClose: () => events.push("close"),
+			onAsk: id => events.push(`ask ${id}`),
+		});
+		expect(pickerProps(manager).actions?.find(action => action.id === "q")).toMatchObject({ label: "Ask" });
+		expect(manager.render(160).join("\n")).toContain("q ask");
+		manager.handleNativeEvent({ type: "select", key: "", item: "peer:x" });
+		expect(pickerProps(manager).actions?.find(action => action.id === "q")?.disabled).toBeString();
+		manager.handleInput("q");
+		expect(events).toEqual([]);
+		manager.handleNativeEvent({ type: "select", key: "", item: "peer:a" });
+		act(manager, "q");
+		expect(events).toEqual(["close", "ask a"]);
+	});
+
+	test("offers no Ask without onAsk", () => {
+		const { manager } = mount(baseState());
+		expect(pickerProps(manager).actions?.some(action => action.id === "q")).toBe(false);
+		expect(manager.render(160).join("\n")).not.toContain("q ask");
+		manager.dispose();
+	});
+
 	test("Approve never resolves an approval the user has not seen selected", async () => {
 		vi.useFakeTimers();
 		try {

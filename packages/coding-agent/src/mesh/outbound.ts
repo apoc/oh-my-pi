@@ -358,6 +358,7 @@ export class MeshOutbound {
 									kind: "reply",
 									text: reply.error ?? reply.text,
 									thread: reply.thread,
+									replyTo: reply.replyTo,
 									error: reply.error !== undefined,
 								}
 							: { kind: "watch", text: reply.event },

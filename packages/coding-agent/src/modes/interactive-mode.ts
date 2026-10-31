@@ -319,6 +319,7 @@ import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { BtwController } from "./controllers/btw-controller";
+import { MeshAskController } from "./controllers/mesh-ask-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -330,6 +331,8 @@ import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { attachMeshStatusLine, setMeshKeyDeriver } from "./components/mesh/mesh-manager-runtime";
 import { createTuiMeshUiHooks } from "./components/mesh/mesh-ui-hooks";
+import type { MeshTrafficEntry } from "../mesh/bridge";
+import type { MeshSender } from "../mesh/wire";
 import { type MeshHostHandle, startMeshHost } from "../mesh/host";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
@@ -1860,6 +1863,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	readonly #codexResetFireworksController: CodexResetFireworksController;
 	readonly #btwController: BtwController;
+	readonly #meshAskController: MeshAskController;
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
 	readonly #cleanseController: CleanseCommandController;
@@ -2335,6 +2339,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
+		this.#meshAskController = new MeshAskController(this);
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#cleanseController = new CleanseCommandController(this);
@@ -2481,6 +2486,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			disposeSession: async reason => {
 				await this.#meshHost?.dispose();
 				await this.#btwController.dispose();
+				this.#meshAskController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 					reason,
@@ -8421,6 +8427,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.collabController.shutdown("host exited");
 			await this.#liveCommandController.stop();
 			await this.#btwController.dispose();
+			this.#meshAskController.dispose();
 			this.#omfgController.dispose();
 			this.#cleanseController.dispose();
 			this.#focusController.dispose();
@@ -9551,6 +9558,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	showMeshManager(): void {
 		this.#selectorController.showMeshManager();
 	}
+
+	handleMeshAskCommand(args: string): Promise<boolean> {
+		return this.#meshAskController.handleCommand(args);
+	}
+
+	openMeshAsk(instanceId: string): void {
+		this.#meshAskController.openForPeer(instanceId);
+	}
+
+	handleMeshAskReply(from: MeshSender, entry: MeshTrafficEntry): void {
+		this.#meshAskController.handleReply(from, entry);
+	}
+
 	showGitUi(revision?: string): void {
 		void this.#selectorController.showGitTui(revision);
 	}

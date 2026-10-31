@@ -162,6 +162,9 @@
 ### Added
 
 - Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block and compose actions
+- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
+- Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
+- Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
 ## [18.14.1] - 2026-10-31
 

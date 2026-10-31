@@ -17,6 +17,9 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
+import type { MeshPeerView } from "../mesh/engine";
+import { visibleMeshPeers } from "../mesh/peers";
+import { getMeshRuntime } from "../mesh/runtime";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
 /** Options shared by the declarative subcommand completers. */
@@ -407,6 +410,50 @@ export function buildLocalFileArgumentCompletions(
 		} catch {
 			return null;
 		}
+	};
+}
+
+/** Listed peers of the running mesh, or none while it is off. */
+function currentMeshPeers(): readonly MeshPeerView[] {
+	const runtime = getMeshRuntime();
+	return runtime ? visibleMeshPeers(runtime.engine) : [];
+}
+
+/**
+ * `/ask <agent>`: mesh peers matched by session name, display name or instance id. The
+ * session name is shown so the agent is easy to pick; the inserted value is the instance id,
+ * which always resolves to exactly that peer (names repeat and may hold spaces or glyphs).
+ * Only the first argument completes; the message after it is free text.
+ */
+export function buildMeshPeerArgumentCompletions(
+	getPeers: () => readonly MeshPeerView[] = currentMeshPeers,
+): (argumentPrefix: string) => AutocompleteItem[] | null {
+	return (argumentPrefix: string) => {
+		if (/\s/.test(argumentPrefix)) return null;
+		const query = argumentPrefix.toLowerCase();
+		const matches: AutocompleteItem[] = [];
+		for (const peer of getPeers()) {
+			const snapshot = peer.snapshot;
+			if (!snapshot) continue;
+			const sessionName = snapshot.sessionName ?? "";
+			if (
+				query &&
+				!peer.instanceId.toLowerCase().includes(query) &&
+				!snapshot.displayName.toLowerCase().includes(query) &&
+				!sessionName.toLowerCase().includes(query)
+			) {
+				continue;
+			}
+			const name = replaceTabs(sanitizeText(snapshot.displayName));
+			const details = [name, peer.instanceId.slice(0, 8), snapshot.busy ? "busy" : "idle"];
+			if (snapshot.repo?.branch) details.push(replaceTabs(sanitizeText(snapshot.repo.branch)));
+			matches.push({
+				value: `${peer.instanceId} `,
+				label: sessionName ? replaceTabs(sanitizeText(sessionName)) : name,
+				description: details.join(" · "),
+			});
+		}
+		return matches.length > 0 ? matches : null;
 	};
 }
 

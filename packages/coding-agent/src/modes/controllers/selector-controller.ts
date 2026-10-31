@@ -715,6 +715,7 @@ export class SelectorController {
 				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			},
+			onAsk: instanceId => this.ctx.openMeshAsk(instanceId),
 		});
 		this.#mountMenu(menu, manager, () => this.#showFullscreenMenu(manager));
 	}

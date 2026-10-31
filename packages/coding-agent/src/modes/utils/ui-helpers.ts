@@ -87,7 +87,7 @@ import {
 import { MESH_INCOMING_MESSAGE_TYPE } from "../../mesh/bridge";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { listSessionRecaps } from "../../session/session-index";
-import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { executeBuiltinSlashCommand, lookupTuiBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
@@ -1428,7 +1428,7 @@ export class UiHelpers {
 	isKnownSlashCommand(text: string): boolean {
 		if (!text.startsWith("/")) return false;
 		const parsed = parseSlashCommand(text);
-		const builtin = parsed && lookupBuiltinSlashCommand(parsed.name);
+		const builtin = parsed && lookupTuiBuiltinSlashCommand(parsed.name, { ctx: this.ctx });
 		if (builtin && (builtin.allowArgs || !parsed.args)) return true;
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);

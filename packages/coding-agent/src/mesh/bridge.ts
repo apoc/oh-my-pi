@@ -39,6 +39,8 @@ export interface MeshTrafficEntry {
 	thread?: string;
 	/** The reply carries an error instead of an answer. */
 	error?: boolean;
+	/** For `reply`: msgId of the message it answers, so the UI can match it to the question. */
+	replyTo?: string;
 }
 
 /** Human-facing mesh surface, implemented by the interactive TUI; absent or `hasUI: false` when headless. */
