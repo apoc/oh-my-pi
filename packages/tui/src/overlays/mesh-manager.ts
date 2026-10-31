@@ -8,13 +8,21 @@
  * newlines (except in summaries) and tabs from every string once per state pull, before anything is
  * styled, measured or sorted. Thread lists and notices are sanitized when they arrive.
  */
-import { formatAge, stripBidiControls } from "@oh-my-pi/pi-utils";
+import { formatAge, pluralize, stripBidiControls } from "@oh-my-pi/pi-utils";
+import type { TspPickerAction, TspPickerColumn, TspPickerGroup, TspPickerItem, TspSpan } from "@oh-my-pi/pi-wire";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { Input } from "../components/input";
+import { getKeybindings } from "../keybindings";
 import { matchesKey } from "../keys";
 import { parseSgrMouse } from "../mouse";
+import { col, compact, keyed, kv, node, span, text } from "../native/describe";
+import { Memo } from "../native/memo";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton } from "../native/overlay";
+import { CLOSE_ACTION, picker, pickerAction, pickerEvent } from "../native/picker";
 import { shortenPath } from "../render/render-utils";
 import { theme } from "../theme";
+import type { ThemeColor } from "../theme/schema";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
@@ -22,6 +30,7 @@ import {
 	MESH_COMPOSE_KINDS,
 	type MeshComposeKind,
 	type MeshManagerApproval,
+	type MeshManagerEngineStatus,
 	type MeshManagerMode,
 	type MeshManagerPeer,
 	type MeshManagerRuntime,
@@ -271,11 +280,18 @@ export class MeshManagerComponent implements Component {
 	#notice: Notice | undefined;
 	#listScroll = 0;
 	#disposed = false;
+	/** Whether the terminal draws `picker` sheets; set by {@link nativeSheet}, read by {@link nativeOverlay}. */
+	#nativePicker = false;
+	readonly #viewMemo = new Memo<{ sections: MeshManagerSection[]; items: MeshManagerItem[] }>();
+	readonly #rowsMemo = new Memo<PickerRows>();
+	readonly #pickerMemo = new Memo();
+	readonly #promptMemo = new Memo();
 
 	constructor(runtime: MeshManagerRuntime, options: MeshManagerOptions) {
 		this.#runtime = runtime;
 		this.#options = options;
 		this.#state = sanitizeMeshManagerState(runtime.getState());
+		this.#selectedKey = this.#selected()?.key;
 		this.#unsubscribe = runtime.subscribe(() => this.#scheduleChange());
 		this.#tick = setInterval(() => this.#options.requestRender(), AGE_TICK_MS);
 		this.#tick.unref?.();
@@ -339,8 +355,16 @@ export class MeshManagerComponent implements Component {
 		this.#notice = { tone, text: meshDisplayText(text) };
 	}
 
+	/** Sections and their selectable items, rebuilt only when the state or the hidden toggle changes. */
+	#view(): { sections: MeshManagerSection[]; items: MeshManagerItem[] } {
+		return this.#viewMemo.get([this.#state, this.#showHidden], () => {
+			const sections = buildMeshManagerSections(this.#state, this.#showHidden);
+			return { sections, items: meshManagerItems(sections) };
+		});
+	}
+
 	#items(): MeshManagerItem[] {
-		return meshManagerItems(buildMeshManagerSections(this.#state, this.#showHidden));
+		return this.#view().items;
 	}
 
 	#selected(items = this.#items()): MeshManagerItem | undefined {
@@ -354,6 +378,11 @@ export class MeshManagerComponent implements Component {
 
 	#peer(instanceId: string): MeshManagerPeer | undefined {
 		return this.#state.peers.find(peer => peer.instanceId === instanceId);
+	}
+
+	/** A peer's sanitized display name, or its sanitized id once it is gone. */
+	#peerName(instanceId: string): string {
+		return this.#peer(instanceId)?.displayName ?? meshDisplayText(instanceId);
 	}
 
 	// -- input -----------------------------------------------------------------
@@ -484,7 +513,9 @@ export class MeshManagerComponent implements Component {
 	}
 
 	#decide(allow: boolean): void {
-		const item = this.#selected();
+		// Exactly the row the user sees selected, never the first-row fallback: a new approval sorted
+		// ahead of it must not be the one a click or key resolves.
+		const item = this.#items().find(candidate => candidate.key === this.#selectedKey);
 		if (item?.kind !== "approval") {
 			this.#notify("muted", "Select a pending approval first");
 			return;
@@ -601,7 +632,7 @@ export class MeshManagerComponent implements Component {
 
 	async #submitCompose(prompt: ComposeTextPrompt, text: string): Promise<void> {
 		if (text.trim().length === 0) return;
-		const name = this.#peer(prompt.peerId)?.displayName ?? meshDisplayText(prompt.peerId);
+		const name = this.#peerName(prompt.peerId);
 		prompt.busy = true;
 		this.#notify("muted", `Sending ${prompt.composeKind} to ${name}…`);
 		this.#options.requestRender();
@@ -663,8 +694,8 @@ export class MeshManagerComponent implements Component {
 		const parts = [`${theme.fg("muted", "mode")} ${theme.fg("accent", state.mode)}`];
 		const self = state.self;
 		if (self) {
-			parts.push(`${theme.fg("muted", "local")} ${sideStatus(self.status.local)}`);
-			parts.push(`${theme.fg("muted", "remote")} ${sideStatus(self.status.remote)}`);
+			parts.push(`${theme.fg("muted", "local")} ${theme.fg(SIDE_TONE[self.status.local], self.status.local)}`);
+			parts.push(`${theme.fg("muted", "remote")} ${theme.fg(SIDE_TONE[self.status.remote], self.status.remote)}`);
 			if (self.status.lanPort !== undefined) parts.push(`${theme.fg("muted", "LAN")} :${self.status.lanPort}`);
 		} else {
 			parts.push(theme.fg("warning", "engine not running"));
@@ -691,8 +722,7 @@ export class MeshManagerComponent implements Component {
 				theme.fg("muted", "or your LAN (remote, with a shared key phrase) and message their agents."),
 			].map(line => truncateToWidth(line, inner));
 		}
-		const sections = buildMeshManagerSections(this.#state, this.#showHidden);
-		const items = meshManagerItems(sections);
+		const { sections, items } = this.#view();
 		const selected = this.#selected(items);
 		this.#selectedKey = selected?.key;
 		const lines: string[] = [];
@@ -791,16 +821,10 @@ export class MeshManagerComponent implements Component {
 					: "Repeat the key phrase (Enter to set, Esc to cancel)";
 			lines.push(truncateToWidth(theme.fg("accent", title), inner));
 			lines.push(prompt.input.render(inner)[0] ?? "");
-			const length = (prompt.step === "enter" ? prompt.input.getValue() : prompt.first).length;
-			let warning = "";
-			if (length > 0 && length < MESH_REQUIRED_KEY_PHRASE_CHARS) {
-				warning = `Too short: the mesh requires at least ${MESH_REQUIRED_KEY_PHRASE_CHARS} characters.`;
-			} else if (length > 0 && length < MESH_MIN_KEY_PHRASE_CHARS) {
-				warning = `Short phrases are guessable by anyone on your LAN; use ${MESH_MIN_KEY_PHRASE_CHARS}+ characters.`;
-			}
+			const warning = keyPhraseWarning(prompt);
 			lines.push(warning ? truncateToWidth(theme.fg("warning", warning), inner) : "");
 		} else if (prompt?.kind === "compose-kind") {
-			const name = this.#peer(prompt.peerId)?.displayName ?? meshDisplayText(prompt.peerId);
+			const name = this.#peerName(prompt.peerId);
 			lines.push(
 				truncateToWidth(theme.fg("accent", `Message ${name}: choose a kind (←/→ or 1-4, Enter, Esc)`), inner),
 			);
@@ -814,7 +838,7 @@ export class MeshManagerComponent implements Component {
 			);
 			lines.push(truncateToWidth(theme.fg("dim", COMPOSE_KIND_HINT[MESH_COMPOSE_KINDS[prompt.index]!]), inner));
 		} else if (prompt?.kind === "compose-text") {
-			const name = this.#peer(prompt.peerId)?.displayName ?? meshDisplayText(prompt.peerId);
+			const name = this.#peerName(prompt.peerId);
 			lines.push(
 				truncateToWidth(
 					theme.fg("accent", `${prompt.composeKind} → ${name} (Enter to send, Esc to cancel)`),
@@ -849,6 +873,480 @@ export class MeshManagerComponent implements Component {
 			"e disable",
 		];
 	}
+
+	// -- native (Tern) ---------------------------------------------------------
+
+	/** The open key phrase or compose text prompt, which a native terminal draws as an input card. */
+	#textPrompt(): KeyPrompt | ComposeTextPrompt | undefined {
+		const prompt = this.#prompt;
+		return prompt && prompt.kind !== "compose-kind" ? prompt : undefined;
+	}
+
+	/**
+	 * A `picker` sheet where the terminal draws one; a text prompt becomes an input card in a small
+	 * overlay instead. Elsewhere the manager, prompts included, stays the page `render()` draws.
+	 */
+	nativeSheet(cx: DescribeContext): boolean {
+		this.#nativePicker = cx.supports("picker");
+		return this.#nativePicker && !this.#textPrompt();
+	}
+
+	get nativeOverlay(): Component["nativeOverlay"] {
+		const prompt = this.#nativePicker ? this.#textPrompt() : undefined;
+		if (!prompt) return undefined;
+		return prompt.kind === "key" ? KEY_PROMPT_SHEET : COMPOSE_PROMPT_SHEET;
+	}
+
+	describe(cx: DescribeContext): NativeNode | null {
+		if (!cx.supports("picker")) return null;
+		const prompt = this.#textPrompt();
+		if (!prompt) return this.#describePicker();
+		// The card replaces the picker, which comes back as a new node: rebuild its rows then, so the
+		// terminal-clocked "Seen" ages restart from now instead of from before the card opened.
+		this.#pickerMemo.clear();
+		this.#rowsMemo.clear();
+		return this.#describePrompt(prompt);
+	}
+
+	/** Pointer events run the path of the key each one stands for. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#disposed) return;
+		const prompt = this.#textPrompt();
+		if (prompt) {
+			if (event.type !== "action" || prompt.busy) return;
+			if (event.act === "submit") prompt.input.submit();
+			else if (event.act === "cancel") prompt.input.onEscape?.();
+			this.#options.requestRender();
+			return;
+		}
+		const pick = pickerEvent(event);
+		if (!pick) return;
+		if (pick.kind === "action") this.#nativeAction(pick.act, pick.value);
+		else this.#nativeItem(pick.item, pick.kind === "activate");
+		this.#options.requestRender();
+	}
+
+	/** A row click selects it; activation (or any click while details are open) opens a peer's details, never approves. */
+	#nativeItem(id: string, activate: boolean): void {
+		if (this.#prompt) return;
+		const item = this.#items().find(candidate => candidate.key === id);
+		if (!item) return;
+		this.#selectedKey = item.key;
+		if (item.kind === "approval") this.#details = undefined;
+		else if (activate || this.#details) this.#openDetails();
+	}
+
+	#nativeAction(act: string, value: string | undefined): void {
+		const prompt = this.#prompt;
+		if (prompt?.kind === "compose-kind") {
+			if (act === "close") this.#prompt = undefined;
+			else if (act === "apply") this.#openComposeText(prompt.peerId, MESH_COMPOSE_KINDS[prompt.index]!);
+			else if (act === "strip") {
+				const index = Number(value);
+				const kind = MESH_COMPOSE_KINDS[index];
+				if (!Number.isInteger(index) || !kind) return;
+				prompt.index = index;
+				this.#openComposeText(prompt.peerId, kind);
+			}
+			return;
+		}
+		// `close` is also Tern's backdrop and head `esc`: it leaves the details view first, like Esc.
+		if (act === "close") {
+			if (this.#details) this.#details = undefined;
+			else this.#close();
+		} else if (act === "details") {
+			this.#openDetails();
+		} else {
+			// Every other button's id is the key it stands for; unknown ids match no key.
+			this.#handleAction(act);
+		}
+	}
+
+	#describePicker(): NativeNode {
+		const items = this.#items();
+		const selected = this.#selected(items);
+		this.#selectedKey = selected?.key;
+		const prompt = this.#prompt?.kind === "compose-kind" ? this.#prompt : undefined;
+		// Approval expiry is the one fact Tern cannot clock; refresh it on the age tick.
+		const tick = this.#state.approvals.length > 0 ? Math.floor(Date.now() / AGE_TICK_MS) : 0;
+		return this.#pickerMemo.get(
+			[
+				this.#state,
+				this.#showHidden,
+				selected?.key,
+				this.#details?.peerId,
+				this.#threads,
+				prompt,
+				prompt?.index,
+				this.#notice,
+				tick,
+			],
+			() => this.#buildPicker(selected, prompt, tick),
+		);
+	}
+
+	#buildPicker(
+		selected: MeshManagerItem | undefined,
+		prompt: Extract<Prompt, { kind: "compose-kind" }> | undefined,
+		tick: number,
+	): NativeNode {
+		const state = this.#state;
+		const base = {
+			title: "Mesh",
+			icon: "network",
+			noun: "peers",
+			size: "lg",
+			layout: "rows",
+			preview: "side",
+			query: null,
+			subtitle: prompt ? COMPOSE_KIND_HINT[MESH_COMPOSE_KINDS[prompt.index]!] : this.#statusSpans(),
+			...(this.#notice ? { message: [span(this.#notice.text, this.#notice.tone)] } : {}),
+		} as const;
+		if (!state.enabled) {
+			return picker({
+				...base,
+				items: [],
+				empty: "The mesh is disabled. Enable it to discover omp instances on this PC (local) or your LAN (remote, with a shared key phrase) and message their agents.",
+				actions: [
+					pickerAction("e", "Enable", "e", { primary: true }),
+					pickerAction("m", `Mode: ${state.mode}`, "m"),
+					pickerAction("k", "Key phrase", "k"),
+					CLOSE_ACTION,
+				],
+			});
+		}
+		const rows = this.#pickerRows(tick);
+		const details = this.#details;
+		return picker(
+			{
+				...base,
+				columns: PICKER_COLUMNS,
+				items: rows.items,
+				order: rows.order,
+				selected: selected?.key ?? null,
+				strip: prompt
+					? {
+							label: `Message ${this.#peerName(prompt.peerId)}`,
+							items: COMPOSE_KIND_CHIPS,
+							selected: String(prompt.index),
+						}
+					: null,
+				actions: prompt
+					? [pickerAction("apply", "Next", "enter", { primary: true }), { ...CLOSE_ACTION, label: "Cancel" }]
+					: this.#pickerActions(selected),
+				focus: prompt ? "strip" : details ? "preview" : "list",
+			},
+			this.#describePreview(selected),
+		);
+	}
+
+	/** Rows and group order, rebuilt only when the sections or the expiry tick move (not on selection). */
+	#pickerRows(tick: number): PickerRows {
+		const { sections } = this.#view();
+		return this.#rowsMemo.get([sections, tick], () => {
+			const now = Date.now();
+			const items: TspPickerItem[] = [];
+			const order: (string | TspPickerGroup)[] = [];
+			for (const section of sections) {
+				const hidden = section.hiddenCount > 0 ? ` · ${section.hiddenCount} hidden` : "";
+				order.push({
+					group: section.id,
+					label: `${section.title}${hidden}`,
+					...(section.enabled ? { count: section.items.length } : {}),
+				});
+				if (!section.enabled || section.items.length === 0) {
+					// A placeholder row keeps the group visible; its id is no item, so events ignore it.
+					const placeholder: TspPickerItem = section.enabled
+						? {
+								id: `none:${section.id}`,
+								label: "No peers yet",
+								tone: "muted",
+								disabled: "Nothing discovered yet",
+							}
+						: {
+								id: `off:${section.id}`,
+								label: `Off in mode ${this.#state.mode}`,
+								tone: "muted",
+								disabled: "Press m to change the mode",
+							};
+					items.push(placeholder);
+					order.push(placeholder.id);
+					continue;
+				}
+				for (const item of section.items) {
+					items.push(item.kind === "approval" ? approvalPickerItem(item, now) : peerPickerItem(item, now));
+					order.push(item.key);
+				}
+			}
+			return { items, order };
+		});
+	}
+
+	#pickerActions(selected: MeshManagerItem | undefined): TspPickerAction[] {
+		const details = this.#details;
+		const target = details ? this.#peer(details.peerId) : selected?.kind === "peer" ? selected.peer : undefined;
+		const noPeer = target ? undefined : "Select a peer";
+		const lead: TspPickerAction[] = details
+			? []
+			: selected?.kind === "approval"
+				? [pickerAction("a", "Approve", "a", { primary: true }), pickerAction("d", "Deny", "d", { danger: true })]
+				: [pickerAction("details", "Details", "enter", { primary: true, disabled: noPeer })];
+		return [
+			...lead,
+			pickerAction("c", "Message", "c", { disabled: noPeer }),
+			pickerAction("h", target?.hidden ? "Unhide" : "Hide", "h", { disabled: noPeer, on: target?.hidden }),
+			pickerAction("b", target?.blocked ? "Unblock" : "Block", "b", {
+				disabled: noPeer,
+				on: target?.blocked,
+				danger: true,
+			}),
+			pickerAction("v", "Show hidden", "v", { on: this.#showHidden }),
+			pickerAction("m", `Mode: ${this.#state.mode}`, "m"),
+			pickerAction("k", "Key phrase", "k"),
+			pickerAction("r", "Refresh", "r"),
+			pickerAction("e", "Disable", "e"),
+			details ? { ...CLOSE_ACTION, label: "Back" } : CLOSE_ACTION,
+		];
+	}
+
+	/** Mode, side status, LAN port, this instance and engine errors. */
+	#statusSpans(): TspSpan[] {
+		const state = this.#state;
+		if (!state.enabled) return [span("disabled", "warning")];
+		const parts: TspSpan[][] = [[span("mode ", "muted"), span(state.mode, "accent")]];
+		const self = state.self;
+		if (self) {
+			parts.push([span("local ", "muted"), span(self.status.local, SIDE_TONE[self.status.local])]);
+			parts.push([span("remote ", "muted"), span(self.status.remote, SIDE_TONE[self.status.remote])]);
+			if (self.status.lanPort !== undefined) parts.push([span("LAN ", "muted"), span(`:${self.status.lanPort}`)]);
+			parts.push([span("you ", "muted"), span(self.displayName, "strong")]);
+			if (self.status.error) parts.push([span(self.status.error, "error")]);
+		} else {
+			parts.push([span("engine not running", "warning")]);
+		}
+		if (meshModeHasSide(state.mode, "remote") && !state.hasKey) parts.push([span("no key phrase", "warning")]);
+		return parts.flatMap((part, index) => (index === 0 ? part : [span(" · ", "dim"), ...part]));
+	}
+
+	/** The details peer, else the selected row's peer or approval; keys are fixed names, never peer text. */
+	#describePreview(selected: MeshManagerItem | undefined): NativeChild[] {
+		const details = this.#details;
+		if (details) {
+			const peer = this.#peer(details.peerId);
+			return peer ? this.#describePeer(peer) : [text([span("This peer is gone.", "warning")])];
+		}
+		if (selected?.kind === "peer") return this.#describePeer(selected.peer);
+		if (selected?.kind === "approval") return describeApproval(selected.approval);
+		return [];
+	}
+
+	#describePeer(peer: MeshManagerPeer): NativeChild[] {
+		const facts = kv([
+			["Instance", peer.instanceId],
+			["Endpoint", `${peer.endpoint} (${peer.source})`],
+			["State", `${peer.busy ? "busy" : "idle"} · ${peer.state}`],
+			["Tags", peerTagNames(peer).join(", ")],
+			["Session", peer.sessionName],
+			["Cwd", peer.cwd ? shortenPath(peer.cwd) : undefined],
+			["Branch", peer.branch],
+			["Model", peer.model],
+		]);
+		const agents = peer.agents.map((agent, index) => {
+			const name = agent.displayName || agent.id;
+			const kind = agent.kind && agent.kind.toLowerCase() !== name.toLowerCase() ? ` [${agent.kind}]` : "";
+			const spans = compact([
+				span(name),
+				kind ? span(kind, "dim") : undefined,
+				agent.status ? span(` · lifecycle ${agent.status}`, "dim") : undefined,
+				agent.task ? span(` — ${agent.task}`) : undefined,
+			]);
+			return node("text", { spans }, undefined, String(index));
+		});
+		// Peer text is plain `text`, never `md`: a peer must not get clickable links into this terminal.
+		return compact<NativeChild>([
+			node(
+				"text",
+				{ text: meshSenderLabel(peer.displayName, peer.host), role: "omp.picker.title" },
+				undefined,
+				"title",
+			),
+			facts ? keyed(facts, "facts") : undefined,
+			node(
+				"section",
+				{ head: "Summary" },
+				[peer.summary ? text(peer.summary) : text([span("none yet", "dim")])],
+				"summary",
+			),
+			node(
+				"section",
+				{ head: `Agents (${peer.agents.length})` },
+				agents.length > 0 ? agents : [text([span("none reported", "dim")])],
+				"agents",
+			),
+			this.#describeThreads(peer),
+		]);
+	}
+
+	/** Threads load when the details view opens; the plain preview only points there. */
+	#describeThreads(peer: MeshManagerPeer): NativeNode {
+		const threads = this.#details && this.#threads?.peerId === peer.instanceId ? this.#threads : undefined;
+		let body: NativeChild[];
+		if (!this.#details) body = [text([span("Open Details to list the threads this peer opened here.", "dim")])];
+		else if (!threads?.list) body = [text([span("loading…", "dim")])];
+		else if (threads.error) body = [text([span(threads.error, "error")])];
+		else if (threads.list.length === 0) body = [text([span("none", "dim")])];
+		else {
+			body = threads.list.map((thread, index) => {
+				const turns = `${thread.turns} ${pluralize("turn", thread.turns)}`;
+				const spans = compact([
+					span(thread.threadId, "mono"),
+					span(` ${thread.kind} · ${turns} · ${thread.status}`, "dim"),
+					thread.lastQuestion ? span(` — ${thread.lastQuestion}`) : undefined,
+				]);
+				return node("text", { spans }, undefined, String(index));
+			});
+		}
+		const head = threads?.list ? `Threads from this peer (${threads.list.length})` : "Threads from this peer";
+		return node("section", { head }, body, "threads");
+	}
+
+	#describePrompt(prompt: KeyPrompt | ComposeTextPrompt): NativeNode {
+		// Only the phrase's length leaves the input: the masked `Input` describes the field itself.
+		const warning = prompt.kind === "key" ? keyPhraseWarning(prompt) : undefined;
+		const name = prompt.kind === "compose-text" ? this.#peerName(prompt.peerId) : undefined;
+		return this.#promptMemo.get([prompt, prompt.busy, warning, name, this.#notice], () => {
+			const bindings = getKeybindings();
+			const submitKey = bindings.getKeys("tui.input.submit")[0];
+			const cancelKey = bindings.getKeys("tui.select.cancel")[0];
+			let title: string;
+			let submit: string;
+			if (prompt.kind === "key") {
+				title =
+					prompt.step === "enter"
+						? "Enter the mesh key phrase. It is never stored; use the same phrase on your other machines."
+						: "Repeat the key phrase.";
+				submit = prompt.step === "enter" ? "Continue" : "Set key";
+			} else {
+				title = `${prompt.composeKind} → ${name}`;
+				submit = "Send";
+			}
+			const notice = this.#notice;
+			return col(
+				compact<NativeChild>([
+					node("text", { text: title, role: "omp.mesh.prompt.title" }, undefined, "title"),
+					prompt.kind === "compose-text"
+						? node("text", { spans: [span(COMPOSE_KIND_HINT[prompt.composeKind], "dim")] }, undefined, "hint")
+						: undefined,
+					prompt.input,
+					warning ? node("text", { spans: [span(warning, "warning")] }, undefined, "warning") : undefined,
+					notice ? node("text", { spans: [span(notice.text, notice.tone)] }, undefined, "notice") : undefined,
+					actionBar([
+						null,
+						actionButton("Cancel", "cancel", cancelKey ? { keys: cancelKey } : {}),
+						actionButton(submit, "submit", { tone: "accent", ...(submitKey ? { keys: submitKey } : {}) }),
+					]),
+				]),
+				{ gap: "md" },
+			);
+		});
+	}
+}
+
+interface PickerRows {
+	items: TspPickerItem[];
+	order: (string | TspPickerGroup)[];
+}
+
+const COMPOSE_KIND_CHIPS = MESH_COMPOSE_KINDS.map((kind, index) => ({ id: String(index), label: kind }));
+
+const SIDE_TONE: Record<MeshManagerEngineStatus["remote"], ThemeColor> = {
+	on: "success",
+	off: "dim",
+	"no-key": "warning",
+	error: "error",
+};
+
+/** The instance id and expiry, which a renamed peer cannot spoof, outrank everything when the sheet is narrow. */
+const PICKER_COLUMNS: readonly TspPickerColumn[] = [
+	{ id: "state", head: "State", priority: 2 },
+	{ id: "seen", head: "Seen", format: "elapsed", priority: 1 },
+	{ id: "instance", head: "Instance", format: "dim", priority: 4 },
+	{ id: "expires", head: "Expires", priority: 3 },
+];
+
+const KEY_PROMPT_SHEET = { role: "omp.overlay.mesh", size: "md", anchor: "center", head: "Mesh key phrase" } as const;
+const COMPOSE_PROMPT_SHEET = { role: "omp.overlay.mesh", size: "md", anchor: "center", head: "Mesh message" } as const;
+
+function keyPhraseWarning(prompt: KeyPrompt): string | undefined {
+	const length = (prompt.step === "enter" ? prompt.input.getValue() : prompt.first).length;
+	if (length > 0 && length < MESH_REQUIRED_KEY_PHRASE_CHARS) {
+		return `Too short: the mesh requires at least ${MESH_REQUIRED_KEY_PHRASE_CHARS} characters.`;
+	}
+	if (length > 0 && length < MESH_MIN_KEY_PHRASE_CHARS) {
+		return `Short phrases are guessable by anyone on your LAN; use ${MESH_MIN_KEY_PHRASE_CHARS}+ characters.`;
+	}
+	return undefined;
+}
+
+/** The claimed sender, capped so it can never crowd the unspoofable instance id and expiry off a row. */
+function approvalSender(approval: MeshManagerApproval): string {
+	return truncateToWidth(meshSenderLabel(approval.fromName, approval.fromHost), APPROVAL_FROM_CELLS);
+}
+
+/** The one-line head of a peer's summary; only that much of a (possibly 64 KiB) summary is ever measured. */
+function rowSummary(peer: MeshManagerPeer): string | undefined {
+	return peer.summary
+		? truncateToWidth(peer.summary.slice(0, ROW_SUMMARY_CELLS * 2).replaceAll("\n", " "), ROW_SUMMARY_CELLS)
+		: undefined;
+}
+
+function peerTagNames(peer: MeshManagerPeer): string[] {
+	return compact([peer.state === "stale" && "stale", peer.hidden && "hidden", peer.blocked && "blocked"]);
+}
+
+function approvalPickerItem(item: Extract<MeshManagerItem, { kind: "approval" }>, now: number): TspPickerItem {
+	const { approval } = item;
+	return {
+		id: item.key,
+		label: [span(approval.kind, "warning strong"), span(" from "), span(approvalSender(approval))],
+		detail: truncateToWidth(approval.preview, ROW_SUMMARY_CELLS),
+		dot: "warning",
+		facts: { instance: approval.fromInstanceId, expires: `in ${remainingLabel(approval.expiresAt, now)}` },
+	};
+}
+
+function peerPickerItem(item: Extract<MeshManagerItem, { kind: "peer" }>, now: number): TspPickerItem {
+	const { peer } = item;
+	const detail = compact([peer.sessionName, rowSummary(peer)]).join(" — ");
+	return {
+		id: item.key,
+		label: meshSenderLabel(peer.displayName, peer.host),
+		...(detail ? { detail } : {}),
+		dot: peer.state === "online" ? "success" : "muted",
+		badges: peerTagNames(peer).map(tag => ({
+			text: tag,
+			tone: tag === "blocked" ? ("error" as const) : ("muted" as const),
+		})),
+		...(peer.hidden || peer.blocked ? { tone: "muted" as const } : {}),
+		facts: {
+			state: peer.busy ? [span("busy", "warning")] : [span("idle", "success")],
+			seen: Math.max(0, now - peer.lastSeen),
+		},
+	};
+}
+
+function describeApproval(approval: MeshManagerApproval): NativeChild[] {
+	const facts = kv([
+		["Instance", approval.fromInstanceId],
+		["From", approvalSender(approval)],
+		["Agent", truncateToWidth(approval.fromAgent, APPROVAL_AGENT_CELLS)],
+		["Expires", `in ${remainingLabel(approval.expiresAt, Date.now())}`],
+	]);
+	return compact<NativeChild>([
+		node("text", { text: `${approval.kind} request`, role: "omp.picker.title" }, undefined, "title"),
+		facts ? keyed(facts, "facts") : undefined,
+		node("section", { head: "Request" }, [text(approval.preview)], "request"),
+	]);
 }
 
 const COMPOSE_KIND_HINT: Record<MeshComposeKind, string> = {
@@ -858,28 +1356,12 @@ const COMPOSE_KIND_HINT: Record<MeshComposeKind, string> = {
 	note: "note: shown to the peer's human only; nothing answers it",
 };
 
-function sideStatus(status: string): string {
-	switch (status) {
-		case "on":
-			return theme.fg("success", "on");
-		case "off":
-			return theme.fg("dim", "off");
-		case "no-key":
-			return theme.fg("warning", "no-key");
-		default:
-			return theme.fg("error", status);
-	}
-}
-
 function busyLabel(busy: boolean): string {
 	return busy ? theme.fg("warning", "busy") : theme.fg("success", "idle");
 }
 
 function peerTags(peer: MeshManagerPeer): string {
-	const tags: string[] = [];
-	if (peer.state === "stale") tags.push("stale");
-	if (peer.hidden) tags.push("hidden");
-	if (peer.blocked) tags.push("blocked");
+	const tags = peerTagNames(peer);
 	return tags.length > 0 ? theme.fg(peer.blocked ? "error" : "dim", ` [${tags.join(", ")}]`) : "";
 }
 
@@ -903,11 +1385,7 @@ function peerRows(peer: MeshManagerPeer, selected: boolean, inner: number, now: 
 	]
 		.filter(part => part !== undefined)
 		.join(" · ");
-	// Only the head of a (possibly 64 KiB) summary can show on one row.
-	const summary = peer.summary
-		? truncateToWidth(peer.summary.slice(0, ROW_SUMMARY_CELLS * 2).replaceAll("\n", " "), ROW_SUMMARY_CELLS)
-		: "";
-	const tail = [facts, summary].filter(Boolean).join(" — ");
+	const tail = [facts, rowSummary(peer)].filter(Boolean).join(" — ");
 	const dim = peer.hidden || peer.blocked;
 	const prefix = selected ? theme.fg("accent", "› ") : "  ";
 	const rows = [`${prefix}${head}`, `    ${theme.fg("dim", tail)}`];
@@ -920,7 +1398,7 @@ function peerRows(peer: MeshManagerPeer, selected: boolean, inner: number, now: 
  * row wraps the request preview (already bounded by the approval queue) over a few rows.
  */
 function approvalRows(approval: MeshManagerApproval, selected: boolean, inner: number, now: number): string[] {
-	const from = truncateToWidth(meshSenderLabel(approval.fromName, approval.fromHost), APPROVAL_FROM_CELLS);
+	const from = approvalSender(approval);
 	const agent = truncateToWidth(approval.fromAgent, APPROVAL_AGENT_CELLS);
 	const meta = `${approval.fromInstanceId} · expires in ${remainingLabel(approval.expiresAt, now)}`;
 	const head = `${theme.fg("warning", approval.kind)} ${theme.fg("dim", meta)} · from ${selected ? theme.bold(from) : from} ${theme.fg("dim", `(${agent})`)}`;
