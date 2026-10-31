@@ -12,7 +12,7 @@ import type { CustomMessagePayload } from "../session/messages";
 import type { ToolSession } from "../tools";
 import type { MeshToolName } from "./tool-refs";
 import { meshPeerText } from "./text";
-import type { MeshSender, MeshWatchEvent } from "./wire";
+import type { MeshMessageKind, MeshSender, MeshWatchEvent } from "./wire";
 
 /** How the recipient's prompts name the mesh tools (`meshToolRefs`). */
 export type MeshToolRefs = Record<MeshToolName, string>;
@@ -31,13 +31,26 @@ export interface MeshDeliveryTarget {
 	deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken">;
 }
 
+/** One unit of mesh traffic shown to the human. */
+export interface MeshTrafficEntry {
+	/** Message kind, `reply` (an answer) or `watch` (a watched peer's lifecycle event). */
+	kind: MeshMessageKind | "reply" | "watch";
+	text: string;
+	thread?: string;
+	/** The reply carries an error instead of an answer. */
+	error?: boolean;
+}
+
 /** Human-facing mesh surface, implemented by the interactive TUI; absent or `hasUI: false` when headless. */
 export interface MeshUiHooks {
 	readonly hasUI: boolean;
-	/** A peer's `note`: shown to the human, never to the agent. */
-	showNote(from: MeshSender, text: string): void;
-	/** A reply to a message the user sent from the TUI. */
-	showReply(from: MeshSender, text: string, thread?: string): void;
+	/**
+	 * Peer traffic the main agent does not see in its own context: notes, `status`/`ask`/`task`
+	 * questions (answered by a responder fork), and replies to messages the user sent.
+	 */
+	showIncoming(from: MeshSender, entry: MeshTrafficEntry): void;
+	/** This instance's reply to a peer's message. */
+	showOutgoing(to: MeshSender, entry: MeshTrafficEntry): void;
 	/** The approval queue (`MeshFrontend.approvals`) gained an entry. */
 	notifyApproval(): void;
 }

@@ -280,6 +280,8 @@ export class MeshFrontend {
 			record = await this.threads.create(kind, from, msgId, text);
 			turnIndex = 0;
 		}
+		// The answer comes from a responder fork, so the main transcript would otherwise never show it.
+		if (this.#ui?.hasUI) this.#ui.showIncoming(from, { kind, text, thread: record.threadId });
 		this.#runTurn(record, turnIndex, approve()).catch(error =>
 			logger.warn("mesh: thread turn failed", { thread: record.threadId, error: toError(error).message }),
 		);
@@ -307,7 +309,7 @@ export class MeshFrontend {
 			return;
 		}
 		if (kind === "note") {
-			this.#ui?.showNote(from, text);
+			this.#ui?.showIncoming(from, { kind: "note", text });
 			return;
 		}
 		if (this.#session.isDisposed) {
@@ -375,9 +377,9 @@ export class MeshFrontend {
 		await this.#sendReply(record.peer, msgId, threadId, { text: result.text });
 	}
 
-	/** Send the answer to `replyTo`; failures are logged, the thread keeps the answer for `thread`. */
+	/** Send the answer to `replyTo` and show it to the human; failures are logged, the thread keeps the answer for `thread`. */
 	async #sendReply(
-		to: Pick<MeshSender, "instanceId">,
+		to: MeshSender,
 		replyTo: string,
 		thread: string | undefined,
 		answer: { text: string } | { error: string },
@@ -399,6 +401,10 @@ export class MeshFrontend {
 					code: response.code,
 					message: response.message,
 				});
+				return;
+			}
+			if (this.#ui?.hasUI) {
+				this.#ui.showOutgoing(to, { kind: "reply", text: error ?? text, thread, error: error !== undefined });
 			}
 		} catch (error) {
 			logger.warn("mesh: reply send failed", { to: to.instanceId, error: toError(error).message });

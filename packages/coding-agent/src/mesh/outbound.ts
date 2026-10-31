@@ -351,8 +351,17 @@ export class MeshOutbound {
 		try {
 			if (agentId === MESH_USER_AGENT_ID) {
 				if (this.#ui?.hasUI) {
-					const text = reply.op === "reply" ? (reply.error ?? reply.text) : reply.event;
-					this.#ui.showReply(reply.from, text, reply.op === "reply" ? reply.thread : undefined);
+					this.#ui.showIncoming(
+						reply.from,
+						reply.op === "reply"
+							? {
+									kind: "reply",
+									text: reply.error ?? reply.text,
+									thread: reply.thread,
+									error: reply.error !== undefined,
+								}
+							: { kind: "watch", text: reply.event },
+					);
 				} else {
 					logger.debug("mesh: dropped a reply for the user without a UI", { from: reply.from.instanceId });
 				}

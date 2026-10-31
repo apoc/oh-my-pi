@@ -65,7 +65,7 @@ Every request carries the sender's instance id, agent id (`Main`, a subagent id,
 | `ask`    | A read-only fork of the main session (`read`/`grep`/`glob`/`find`)                | Thread reply                                       | `allow`        |
 | `task`   | The bundled `task` agent, fresh context, in the recipient's cwd, with write tools | Thread reply                                       | `deny`         |
 | `steer`  | The main agent's own conversation (wakes it if idle)                              | Optional `reply` sent by that agent with `replyTo` | `ask`          |
-| `note`   | The human only, as a transcript notice; never the agent                           | None                                               | `allow`        |
+| `note`   | The human only, as a `MESH` transcript card; never the agent                      | None                                               | `allow`        |
 | `watch`  | One-shot notification on `idle` or `turn_end`                                     | `watch_event` when it fires                        | always on      |
 | `reply`  | Answers a `steer` (or delivers a thread answer)                                   | —                                                  | always on      |
 
@@ -74,6 +74,8 @@ Every request carries the sender's instance id, agent id (`Main`, a subagent id,
 Threads belong to the recipient's current session: they are persisted under the session's artifacts directory (so a resumed session keeps answering), expire on a session switch (`thread_expired`), and are forgotten after `mesh.threadTtlHours` idle. Only the instance that opened a thread can read or continue it; anyone else gets `unknown_thread`.
 
 **Watches** fire once and live at most one hour; one peer may hold 16. An `idle` watch on an already-idle instance fires immediately.
+
+**Transcript.** In the TUI, inbound traffic shows as `MESH ← <peer>` cards tagged with the kind and thread: `status`/`ask`/`task` questions (answered by a side turn or fork, so the main agent never sees them), notes, steers, and answers to messages sent from `/mesh`. Each reply this instance sends back shows as a `MESH → <peer>` card. Peer text is stripped of control and bidi characters before rendering.
 
 ## Inbound policy
 
@@ -117,7 +119,7 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 | `v`       | Show hidden peers                                                |
 | `Esc`     | Back / close                                                     |
 
-Answers to messages sent from `/mesh` appear as transcript notices. Hidden peers are left out of tool listings; blocked peers' requests are dropped by the engine. Both flags last for the process only.
+Answers to messages sent from `/mesh` appear as `MESH` transcript cards. Hidden peers are left out of tool listings; blocked peers' requests are dropped by the engine. Both flags last for the process only.
 
 ## `omp mesh list`
 

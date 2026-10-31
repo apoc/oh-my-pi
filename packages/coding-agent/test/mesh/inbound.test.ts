@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { MeshDeliveryTarget } from "../../src/mesh/bridge";
+import type { MeshDeliveryTarget, MeshTrafficEntry } from "../../src/mesh/bridge";
 import type { MeshEngine, MeshInboundRequest, MeshRequestOptions, MeshStatus } from "../../src/mesh/engine";
 import {
 	type MeshAnswerer,
@@ -143,6 +143,7 @@ function setup(options: {
 	const session = new FakeSession();
 	const answerer = new FakeAnswerer();
 	const notes: string[] = [];
+	const shown: { direction: "in" | "out"; peer: string; entry: MeshTrafficEntry }[] = [];
 	let approvalsNotified = 0;
 	const policy: Record<MeshMessageKind, MeshInboundPolicy> = {
 		status: "allow",
@@ -169,15 +170,18 @@ function setup(options: {
 				? undefined
 				: {
 						hasUI: options.hasUI,
-						showNote: (_from, text) => notes.push(text),
-						showReply: () => {},
+						showIncoming: (from, entry) => {
+							if (entry.kind === "note") notes.push(entry.text);
+							shown.push({ direction: "in", peer: from.instanceId, entry });
+						},
+						showOutgoing: (to, entry) => shown.push({ direction: "out", peer: to.instanceId, entry }),
 						notifyApproval: () => {
 							approvalsNotified++;
 						},
 					},
 	});
 	frontends.push(frontend);
-	return { engine, session, answerer, frontend, notes, approvalsNotified: () => approvalsNotified };
+	return { engine, session, answerer, frontend, notes, shown, approvalsNotified: () => approvalsNotified };
 }
 
 function dataField(response: MeshResponse, field: string): string {
@@ -233,6 +237,24 @@ describe("MeshFrontend policy", () => {
 		frontend.approvals.resolve(frontend.approvals.list()[0]!.id, true);
 		await settle();
 		expect(answerer.started).toEqual(["public plans?"]);
+	});
+
+	it("shows the human a fork-answered question and the reply sent back", async () => {
+		const { answerer, frontend, shown, session } = setup({ hasUI: true });
+		const thread = dataField(await frontend.handle(inbound(alice, message("ask", "4*4?"), "msg-q")), "thread");
+		expect(shown).toEqual([
+			{ direction: "in", peer: alice.instanceId, entry: { kind: "ask", text: "4*4?", thread } },
+		]);
+		await settle();
+		answerer.finish("4*4?", "16");
+		await settle();
+		expect(shown[1]).toEqual({
+			direction: "out",
+			peer: alice.instanceId,
+			entry: { kind: "reply", text: "16", thread, error: false },
+		});
+		// The main agent's context never receives the question: only the human sees it.
+		expect(session.delivered).toEqual([]);
 	});
 
 	it("shows notes to the human and steers the main session, never answering either itself", async () => {
