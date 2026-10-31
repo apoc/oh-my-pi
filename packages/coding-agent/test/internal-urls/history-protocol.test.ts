@@ -23,6 +23,7 @@ import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+import { meshResponderArtifactsDir } from "@oh-my-pi/pi-coding-agent/mesh/paths";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -706,6 +707,11 @@ describe("history:// protocol", () => {
 		const grandchildFile = path.join(sourceArtifacts, "Sub1", "Sub1.Grandchild.jsonl");
 		await Bun.write(childFile, sessionFixtureJsonl("source child history"));
 		await Bun.write(grandchildFile, sessionFixtureJsonl("source grandchild history", "grandchild"));
+		// Another mesh peer's responder lives in the source's private mesh-threads tree.
+		await Bun.write(
+			path.join(meshResponderArtifactsDir(sourceArtifacts, "T1"), "MeshAsk.jsonl"),
+			sessionFixtureJsonl("other peer's question"),
+		);
 		const externalArtifacts = path.join(dir, "external-artifacts");
 		await Bun.write(path.join(externalArtifacts, "ExternalOnly.jsonl"), sessionFixtureJsonl("external transcript"));
 		registerArtifactsDir(externalArtifacts);
@@ -731,9 +737,11 @@ describe("history:// protocol", () => {
 		expect(index.content).toContain("| Sub1 | on disk |");
 		expect(index.content).toContain("| Sub1.Grandchild | on disk |");
 		expect(index.content).not.toContain("ForeignOnly");
+		expect(index.content).not.toContain("MeshAsk");
 		expect(index.content).not.toContain("ExternalOnly");
 		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
 		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
+		await expect(router.resolve("history://MeshAsk", context)).rejects.toThrow("Unknown agent: MeshAsk");
 
 		// The editor binds the seance scope as a scalar, without a tool session.
 		const seanceSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({

@@ -68,6 +68,9 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { isMeshToolSession } from "../mesh/tool-refs";
+import { MeshPeersTool } from "./mesh-peers";
+import { MeshSendTool } from "./mesh-send";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -147,6 +150,8 @@ export * from "./memory-edit";
 export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
+export * from "./mesh-peers";
+export * from "./mesh-send";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -618,6 +623,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	mesh_peers: MeshPeersTool.createIf,
+	mesh_send: MeshSendTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
@@ -825,6 +832,8 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings))
 			);
 		}
+		// The bound top-level session only, whatever the requested list says: mesh responders and subagents never get mesh tools.
+		if (name === "mesh_peers" || name === "mesh_send") return isMeshToolSession(session);
 		if (name === "task") {
 			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
 		}

@@ -158,6 +158,8 @@ export interface SchemeHost {
 	outReplies: boolean;
 	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
 	subagent: boolean;
+	/** The mesh tools exist: `mesh.enabled` in a top-level session. */
+	mesh: boolean;
 }
 
 /**

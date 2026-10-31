@@ -294,6 +294,13 @@
 - Fixed `read` of a whole URL returning no content when the page's first line is over the 50 KB output budget, as on minified pages read with `:raw`; it now shows that line's first 50 KB ([#17500](https://github.com/can1357/oh-my-pi/pull/17500) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed an advisor whose usage-limited account kept being reported as switchable retrying the same capped account thousands of times; it now tries each sibling account at most once per provider per failing review, then falls back, waits, or pauses on the quota ([#17472](https://github.com/can1357/oh-my-pi/issues/17472))
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+### Added
+
+- Added oh my pi mesh (`mesh.enabled`, off by default): running omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`, mDNS plus static `mesh.peers`, sealed with a key from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, governed per kind by `mesh.inbound.*` policies ([docs](../../docs/mesh.md))
+- Added `/mesh`, a manager for mesh peers, pending approvals, mode, key phrase, hide/block and composing messages, plus a `mesh: N local · M remote` status line
+- Added the `xd://mesh_peers` and `xd://mesh_send` tools so the main agent can list peers (optionally ranked by relevance to a need) and message them
+- Added the read-only `mesh://` scheme for peer snapshots and the threads this instance opened with a peer
+- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
 
 ## [18.14.1] - 2026-10-31
 

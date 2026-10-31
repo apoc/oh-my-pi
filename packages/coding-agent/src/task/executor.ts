@@ -590,6 +590,8 @@ export interface ExecutorOptions {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name `task.agentCompactionThresholdOverrides` pair selected by dispatch. */
 	compactionThresholdOverride?: CompactionThresholdPair;
+	/** Host-imposed child setting overrides (e.g. mesh responders disable `fetch.enabled`), applied last. */
+	settingsOverrides?: Readonly<Record<string, unknown>>;
 	/** Exact-name `task.agentAccountPools` entry selected by dispatch; see `CreateAgentSessionOptions.oauthAccountPools`. */
 	oauthAccountPools?: OAuthAccountPools;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
@@ -4521,6 +4523,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			...(advisorRolePattern
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorRolePattern } }
 				: undefined),
+			...options.settingsOverrides,
 		},
 		options.parentServiceTier,
 	);

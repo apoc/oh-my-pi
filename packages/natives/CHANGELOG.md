@@ -95,6 +95,9 @@
 ### Added
 
 - Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+### Added
+
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through an owner-only registry over a Unix socket or current-user named pipe, LAN discovery over mDNS and static peers, AES-256-GCM sealed transport on both, snapshots and request/response messaging
 
 ## [18.14.1] - 2026-10-31
 

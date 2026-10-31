@@ -12,6 +12,7 @@ const host: SchemeHost = {
 	settingsApproval: false,
 	outReplies: false,
 	subagent: false,
+	mesh: false,
 };
 
 /** A caller session; `enabled` undefined leaves `out.enabled` unset. */

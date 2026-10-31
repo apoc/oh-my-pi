@@ -580,6 +580,8 @@ export interface BuildSystemPromptOptions {
 	settingsApproval?: boolean;
 	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
 	outReplies?: boolean;
+	/** Whether the mesh tools exist (`mesh.enabled`, top-level session); gates advertising `mesh://`. */
+	meshEnabled?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -693,6 +695,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled = false,
 		settingsApproval = false,
 		outReplies = false,
+		meshEnabled = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -977,6 +980,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		settingsApproval,
 		outReplies,
 		subagent,
+		mesh: meshEnabled,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],

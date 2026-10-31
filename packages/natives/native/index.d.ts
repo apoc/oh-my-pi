@@ -445,6 +445,54 @@ export declare class MacOSFrontApp {
   keepInFront(durationMs: number): Promise<number>
 }
 export type MacosFrontApp = MacOSFrontApp
+/**
+ * One mesh participant: local registry + LAN listener, discovery, peer
+ * table, snapshot serving and request/response messaging.
+ */
+export declare class MeshNode {
+  /**
+   * Create an idle node (mode `off` until `configure`).
+   *
+   * `close()` is required: the node keeps listening, publishing and
+   * announcing until it is closed, and the callback holds a strong
+   * reference to `onEvent` (and whatever it captures), so an unclosed node
+   * is never garbage-collected. "Weak" applies only to the event loop: an
+   * idle node does not keep the process alive.
+   */
+  static create(opts: MeshNodeOptions, onEvent: (event: MeshEvent) => void): MeshNode
+  get instanceId(): string
+  /**
+   * Reconcile local/LAN sides, discovery and static peers with `cfg`.
+   * Idempotent.
+   */
+  configure(cfg: MeshConfig): Promise<MeshStatus>
+  status(): MeshStatus
+  /**
+   * Replace the snapshot served for `snapshot` requests (must carry this
+   * node's instanceId).
+   */
+  setSnapshot(snapshotJson: string): void
+  peers(): Array<MeshPeerInfo>
+  /** Re-list local peers, query mDNS and refresh snapshots now. */
+  refresh(): void
+  setPeerFlags(instanceId: string, hidden: boolean, blocked: boolean): void
+  /**
+   * Send `bodyJson` (a `MeshRequest`) to peer `to` as `fromAgentId`;
+   * resolves to the `MeshResponse` JSON. Rejects with a message prefixed
+   * `unreachable:`, `timeout:`, `bad_response:` or `aborted:`.
+   */
+  request(to: string, fromAgentId: string, bodyJson: string, timeoutMs: number, signal?: AbortSignal): Promise<string>
+  /**
+   * Answer an `inbound` event with `responseJson` (a `MeshResponse`). Late or
+   * unknown ids are ignored.
+   */
+  respond(requestId: string, responseJson: string): void
+  /**
+   * Withdraw from the mesh and stop all background work. Required before
+   * dropping the node (see `create`). Idempotent.
+   */
+  close(): Promise<void>
+}
 
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
@@ -2921,6 +2969,70 @@ export interface MermaidTheme {
   bg?: string
   corner?: string
   junction?: string
+}
+
+export interface MeshConfig {
+  mode: 'off' | 'local' | 'remote' | 'both'
+  /** Stored mesh key; the remote side reports `no-key` without it. */
+  key?: string
+  /** LAN listener port (0 = any). */
+  lanPort: number
+  /** `host:port` peers probed directly. */
+  staticPeers: Array<string>
+  displayName: string
+}
+
+/**
+ * Derive the stored mesh key (unpadded base64url, 32 bytes) from a
+ * passphrase: NFC-normalized, surrounding whitespace trimmed, PBKDF2-SHA256
+ * 600k. Rejects a blank passphrase or one shorter than 12 characters.
+ */
+export declare function meshDeriveKey(passphrase: string): Promise<string>
+
+/**
+ * Engine notification. `peers`: re-read `peers()`. `status`: re-read
+ * `status()`. `inbound`: answer `requestId` via `respond()` within 30 s.
+ */
+export interface MeshEvent {
+  kind: 'peers' | 'status' | 'inbound'
+  requestId?: string
+  envelopeJson?: string
+  originKind?: 'local' | 'remote'
+  /** Source IP of a remote sender (absent for local senders). */
+  originAddress?: string
+}
+
+export interface MeshNodeOptions {
+  /** Fresh random id when omitted. */
+  instanceId?: string
+  displayName: string
+  host: string
+  /** Local registry directory (tests); `~/.omp/run/mesh` when omitted. */
+  registryDir?: string
+}
+
+export interface MeshPeerInfo {
+  instanceId: string
+  endpointKind: 'local' | 'remote'
+  address?: string
+  port?: number
+  hostname?: string
+  dnsName?: string
+  source: 'local' | 'mdns' | 'static' | 'contact'
+  state: 'online' | 'stale'
+  /** ms since the Unix epoch. */
+  lastSeen: number
+  hidden: boolean
+  blocked: boolean
+  snapshotJson?: string
+}
+
+export interface MeshStatus {
+  mode: string
+  local: 'on' | 'off' | 'error'
+  remote: 'on' | 'off' | 'no-key' | 'error'
+  lanPort?: number
+  error?: string
 }
 
 /** N-API opt-in handle for the minimizer. */

@@ -60,6 +60,7 @@ import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
+import { type MeshHostHandle, startMeshHost } from "../../mesh/host";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
@@ -820,6 +821,10 @@ export class AcpAgent implements Agent {
 	#handleWrites: Promise<void> = Promise.resolve();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
+	/** Mesh participation, served from the newest open session; absent while none is open. */
+	#meshHost: MeshHostHandle | undefined;
+	/** Dispose of the last host while no session is open; awaited before starting the next. */
+	#meshHostClosing: Promise<void> | undefined;
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
@@ -1754,6 +1759,7 @@ export class AcpAgent implements Agent {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(record.protocolSessionId, record);
+			await this.#syncMeshHost();
 			return record;
 		} catch (error) {
 			await this.#disposeSessionRecord(record);
@@ -3264,8 +3270,28 @@ export class AcpAgent implements Agent {
 	async #closeManagedSession(sessionId: string, record: ManagedSessionRecord): Promise<void> {
 		record.closedError ??= RequestError.resourceNotFound(sessionId);
 		this.#sessions.delete(sessionId);
+		// Move the mesh off the closing session before it is disposed.
+		await this.#syncMeshHost();
 		await this.#cancelPromptForClose(record);
 		await this.#disposeSessionRecord(record);
+	}
+
+	/** Serve the mesh from the newest open session; leave it when none is open. Never rejects. */
+	async #syncMeshHost(): Promise<void> {
+		// A host that is still closing holds its listener: a new one must not bind before it is gone.
+		await this.#meshHostClosing;
+		const newest = Array.from(this.#sessions.values()).at(-1)?.session;
+		const host = this.#meshHost;
+		if (!newest) {
+			if (!host) return;
+			this.#meshHost = undefined;
+			this.#meshHostClosing = host.dispose();
+			await this.#meshHostClosing;
+		} else if (host) {
+			await host.setSession(newest);
+		} else {
+			this.#meshHost = startMeshHost({ session: newest });
+		}
 	}
 
 	async #cancelPromptForClose(record: ManagedSessionRecord): Promise<void> {
@@ -3316,6 +3342,10 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
+			const meshHost = this.#meshHost;
+			this.#meshHost = undefined;
+			// A host closed with the last session may still be withdrawing; finish both before exit.
+			await Promise.all([this.#meshHostClosing, meshHost?.dispose()]);
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(
