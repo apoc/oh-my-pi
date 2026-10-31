@@ -1,8 +1,9 @@
 /**
  * One-paragraph smol-model summary of what this session is working on, served
- * in the mesh snapshot. Regenerated after a terminal `agent_end` once the
- * conversation advanced (a new operator turn and at least
- * {@link SUMMARY_MIN_INTERVAL_MS} since the last attempt), persisted beside the
+ * in the mesh snapshot. The first one waits until the session made
+ * {@link SUMMARY_MIN_TURNS} model turns, so it describes real work; it is then
+ * regenerated after a terminal `agent_end` once the conversation advanced (a new
+ * operator turn and at least {@link SUMMARY_MIN_INTERVAL_MS} since the last attempt), persisted beside the
  * session so a restart reuses it. Background work only: it never blocks or
  * fails the main turn.
  */
@@ -34,6 +35,8 @@ export interface MeshSummaryState {
 
 /** Minimum spacing between summary attempts. */
 export const SUMMARY_MIN_INTERVAL_MS = 2 * 60_000;
+/** Model turns (completed assistant replies) before the first summary: earlier ones say too little. */
+export const SUMMARY_MIN_TURNS = 3;
 /** Hard cap on the published summary. */
 export const MAX_SUMMARY_CHARS = 400;
 
@@ -45,19 +48,23 @@ export interface SummaryTriggerState {
 	summarizedUserTurnAt: number | null;
 	/** Newest operator turn in the conversation; `null` when the user has not spoken. */
 	latestUserTurnAt: number | null;
+	/** Completed model turns in the conversation. */
+	turns: number;
 }
 
 /**
  * Whether a settled turn should refresh the summary: the user must have spoken
- * since the covered turn; the first summary runs right away, later ones only
- * once `minIntervalMs` passed since the last attempt.
+ * since the covered turn; the first summary waits for `minTurns` model turns and
+ * then runs right away, later ones only once `minIntervalMs` passed since the last attempt.
  */
 export function shouldRegenerateSummary(
 	state: SummaryTriggerState,
 	now: number,
 	minIntervalMs: number = SUMMARY_MIN_INTERVAL_MS,
+	minTurns: number = SUMMARY_MIN_TURNS,
 ): boolean {
 	if (state.latestUserTurnAt === null) return false;
+	if (state.summarizedUserTurnAt === null && state.turns < minTurns) return false;
 	if (state.summarizedUserTurnAt !== null && state.latestUserTurnAt <= state.summarizedUserTurnAt) return false;
 	if (state.lastAttemptAt === null) return true;
 	return now - state.lastAttemptAt >= minIntervalMs;
@@ -66,6 +73,8 @@ export function shouldRegenerateSummary(
 export interface MeshSummaryGeneratorOptions {
 	/** Spacing between attempts; defaults to {@link SUMMARY_MIN_INTERVAL_MS}. */
 	minIntervalMs?: number;
+	/** Model turns before the first summary; defaults to {@link SUMMARY_MIN_TURNS}. */
+	minTurns?: number;
 }
 
 const SUMMARY_FILE = "mesh-summary.json";
@@ -97,11 +106,17 @@ type SummaryListener = (summary: MeshSummaryState | null) => void;
 
 export class MeshSummaryGenerator {
 	readonly #minIntervalMs: number;
+	readonly #minTurns: number;
 	#session: AgentSession | null = null;
 	/** Session-manager id the state below belongs to. */
 	#sessionId: string | null = null;
 	#summary: MeshSummaryState | null = null;
-	#trigger: SummaryTriggerState = { lastAttemptAt: null, summarizedUserTurnAt: null, latestUserTurnAt: null };
+	#trigger: SummaryTriggerState = {
+		lastAttemptAt: null,
+		summarizedUserTurnAt: null,
+		latestUserTurnAt: null,
+		turns: 0,
+	};
 	/** Isolated provider session for summary requests, minted per conversation. */
 	#providerSessionId: string | null = null;
 	#inflight: AbortController | null = null;
@@ -115,6 +130,7 @@ export class MeshSummaryGenerator {
 
 	constructor(options: MeshSummaryGeneratorOptions = {}) {
 		this.#minIntervalMs = options.minIntervalMs ?? SUMMARY_MIN_INTERVAL_MS;
+		this.#minTurns = options.minTurns ?? SUMMARY_MIN_TURNS;
 	}
 
 	/** Latest summary for the attached session; `null` when disabled or none yet. */
@@ -188,7 +204,7 @@ export class MeshSummaryGenerator {
 		this.#cancelPending();
 		this.#sessionId = session.sessionManager.getSessionId();
 		this.#providerSessionId = null;
-		this.#trigger = { lastAttemptAt: null, summarizedUserTurnAt: null, latestUserTurnAt: null };
+		this.#trigger = { lastAttemptAt: null, summarizedUserTurnAt: null, latestUserTurnAt: null, turns: 0 };
 		this.#setSummary(null);
 		this.#track(this.#load(session, this.#sessionId));
 	}
@@ -260,15 +276,19 @@ export class MeshSummaryGenerator {
 			return;
 		}
 		this.#trigger.latestUserTurnAt = latestOperatorTurnAt(session.messages);
+		this.#trigger.turns = completedModelTurns(session.messages, this.#minTurns);
 		const now = Date.now();
-		if (shouldRegenerateSummary(this.#trigger, now, this.#minIntervalMs)) {
+		if (shouldRegenerateSummary(this.#trigger, now, this.#minIntervalMs, this.#minTurns)) {
 			this.#track(this.#generate(session, now));
 			return;
 		}
-		const { lastAttemptAt, latestUserTurnAt, summarizedUserTurnAt } = this.#trigger;
+		const { lastAttemptAt, latestUserTurnAt, summarizedUserTurnAt, turns } = this.#trigger;
 		const pendingTurn =
 			latestUserTurnAt !== null && (summarizedUserTurnAt === null || latestUserTurnAt > summarizedUserTurnAt);
-		if (!pendingTurn || lastAttemptAt === null || this.#retryTimer) return;
+		// Waiting for model turns is not waiting for the interval: only a settled turn adds one, and
+		// its own `agent_end` re-evaluates. A timer here could fire with a past deadline, in a loop.
+		const awaitingTurns = summarizedUserTurnAt === null && turns < this.#minTurns;
+		if (!pendingTurn || awaitingTurns || lastAttemptAt === null || this.#retryTimer) return;
 		// Cover the last turns of a burst that ends inside the interval.
 		this.#retryTimer = setTimeout(
 			() => {
@@ -381,6 +401,16 @@ function latestOperatorTurnAt(messages: readonly AgentMessage[]): number | null 
 		if (operatorTitleText(message) !== undefined) return message.timestamp;
 	}
 	return null;
+}
+
+/** Assistant replies that completed (not aborted or failed), counted up to `limit`: only reaching it matters. */
+function completedModelTurns(messages: readonly AgentMessage[], limit: number): number {
+	let turns = 0;
+	for (const message of messages) {
+		if (turns >= limit) break;
+		if (message.role === "assistant" && message.stopReason !== "aborted" && message.stopReason !== "error") turns++;
+	}
+	return turns;
 }
 
 /** Render the summary request, or `null` when the operator has not asked anything yet. */

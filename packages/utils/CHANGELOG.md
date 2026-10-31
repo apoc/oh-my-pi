@@ -44,15 +44,15 @@
 ### Fixed
 
 - Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts; exit-time cleanup stays installed ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+### Added
+
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
 
 ## [18.14.2] - 2026-10-31
 
 ### Added
 
 - Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
-### Added
-
-- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
 
 ## [18.14.1] - 2026-10-31
 

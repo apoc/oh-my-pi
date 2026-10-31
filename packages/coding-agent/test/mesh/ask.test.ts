@@ -142,13 +142,13 @@ function harness() {
 	const cards: Component[] = [];
 	const errors: string[] = [];
 	let overlay: (Component & { handleInput?(data: string): void }) | undefined;
-	let controller: MeshAskController | undefined;
 	const ctx = {
 		present: (card: Component) => cards.push(card),
 		toolOutputExpanded: false,
 		showStatus: () => {},
 		showError: (message: string) => errors.push(message),
-		handleMeshAskReply: (from: MeshSender, entry: MeshTrafficEntry) => controller?.handleReply(from, entry),
+		// Called only after `controller` below is initialized.
+		handleMeshAskReply: (from: MeshSender, entry: MeshTrafficEntry) => controller.handleReply(from, entry),
 		keybindings: { getKeys: () => [] },
 		dictationSpaceHold: () => undefined,
 		ui: {
@@ -162,7 +162,7 @@ function harness() {
 			},
 		},
 	} as unknown as InteractiveModeContext;
-	controller = new MeshAskController(ctx);
+	const controller = new MeshAskController(ctx);
 	const outbound = new MeshOutbound({
 		engine,
 		main: { isDisposed: false, conversationId: "c1", deliverMeshMessage: async () => "injected" },

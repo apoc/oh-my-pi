@@ -15,7 +15,13 @@ import { createAgentSession } from "../../src/sdk";
 import type { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 
-function peer(instanceId: string, displayName: string, sessionName: string | null = null): MeshPeerView {
+/** A peer whose session already has a name and a summary, so it is announced; `null` leaves either out. */
+function peer(
+	instanceId: string,
+	displayName: string,
+	sessionName: string | null = "work",
+	summary: string | null = "Working on the task.",
+): MeshPeerView {
 	return {
 		instanceId,
 		endpoint: { kind: "local" },
@@ -33,7 +39,7 @@ function peer(instanceId: string, displayName: string, sessionName: string | nul
 			protocol: 1,
 			sessionId: null,
 			sessionName,
-			summary: null,
+			summary: summary === null ? null : { text: summary, updatedAt: 0 },
 			cwd: "/work",
 			repo: null,
 			model: null,
@@ -153,7 +159,7 @@ describe("mesh peer notices", () => {
 		await session.prompt("first");
 		await session.prompt("second");
 
-		expect(requestText(mock.calls[0]!.context)).toContain("No other omp agents are on the mesh");
+		expect(requestText(mock.calls[0]!.context)).toContain("No other omp agents to report on the mesh");
 		// The arrival lands after the tool batch, before the next model call of the same run.
 		const afterTool = requestText(mock.calls[2]!.context);
 		expect(afterTool).toContain("Dave (d00d00)");
@@ -210,5 +216,28 @@ describe("mesh peer notices", () => {
 		peers = [{ ...peer("c0ffee", "Carol"), hidden: true }];
 		await session.prompt("second");
 		expect(noticeDetails(session)).toEqual([{ added: [{ id: "c0ffee", name: "Carol" }], removed: [] }]);
+	});
+
+	it("announces a peer only once its session has a name and a summary", async () => {
+		const session = await boundSession();
+		const mock = createMockModel({ handler: { content: ["ok"] } });
+		session.agent.streamFn = mock.stream;
+
+		// Just connected: nothing to say about it yet, so the roster reports no one.
+		peers = [peer("f0f0f0", "Frank", null, null)];
+		await session.prompt("first");
+		// Either half alone is not enough.
+		peers = [peer("f0f0f0", "Frank", "billing export", null)];
+		await session.prompt("second");
+		peers = [peer("f0f0f0", "Frank", null, "Exporting invoices to CSV.")];
+		await session.prompt("third");
+		peers = [peer("f0f0f0", "Frank", "billing export", "Exporting invoices to CSV.")];
+		await session.prompt("fourth");
+
+		expect(noticeDetails(session)).toEqual([
+			{ added: [], removed: [] },
+			{ added: [{ id: "f0f0f0", name: "Frank" }], removed: [] },
+		]);
+		expect(requestText(mock.calls[3]!.context)).toContain("Exporting invoices to CSV.");
 	});
 });
