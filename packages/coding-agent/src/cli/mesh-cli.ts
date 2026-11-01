@@ -10,6 +10,7 @@ import { MESH_MIN_KEY_PHRASE_CHARS, meshDisplayText } from "@oh-my-pi/pi-tui/ove
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { Settings } from "../config/settings";
+import { sharedInstanceHost } from "../instances";
 import type { MeshPeerView } from "../mesh/engine";
 import { meshConfigFromSettings, resolveMeshDisplayName } from "../mesh/host";
 import { NativeMeshEngine } from "../mesh/native-engine";
@@ -53,7 +54,11 @@ export async function runMeshSetKeyCommand(): Promise<void> {
 export async function runMeshListCommand(args: MeshListCommandArgs): Promise<void> {
 	const settings = await Settings.init();
 	const config = meshConfigFromSettings(settings);
-	const engine = new NativeMeshEngine({ displayName: resolveMeshDisplayName(settings), host: os.hostname() });
+	const engine = new NativeMeshEngine({
+		host: sharedInstanceHost(),
+		displayName: resolveMeshDisplayName(settings),
+		hostName: os.hostname(),
+	});
 	let peers: MeshPeerView[];
 	try {
 		// Discovery needs no stable inbound port; a fixed `mesh.port` is held by a running instance.

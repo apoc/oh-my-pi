@@ -8,13 +8,14 @@
 
 use std::sync::Arc;
 
+/// The single validity rule for instance ids (envelopes, snapshots, registry
+/// entries, mDNS TXT `id=`): 16 lowercase ASCII letters or digits, so ids fit
+/// DNS labels, TXT records and file names unchanged.
+pub use pi_instances::is_instance_id;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use serde_json::{Value, value::RawValue};
 
-use crate::{
-	error::ProtocolError,
-	keys::{hex, random_bytes},
-};
+use crate::error::ProtocolError;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Hard cap on one serialized envelope or response.
@@ -36,23 +37,10 @@ pub const MAX_INBOUND_HOP: u32 = 0;
 ///
 /// Valid only with [`MeshRequest::Snapshot`], so a static peer known only as
 /// `host:port` can be asked for its snapshot, which carries its real instance
-/// id; every later request is addressed to that id. Transports bind the `to`
-/// actually sent (`*` included) into the response, not the responder's own id.
+/// id; every later request is addressed to that id. The LAN transport binds
+/// the `to` actually sent (`*` included) into the sealed response, not the
+/// responder's own id.
 pub const ANY_INSTANCE: &str = "*";
-/// Length of an instance id: lowercase ASCII letters and digits only
-/// (`^[a-z0-9]{16}$`), so it fits DNS labels, TXT records and file names
-/// unchanged. Checked only by [`is_instance_id`].
-pub const INSTANCE_ID_LEN: usize = 16;
-
-/// The single validity rule for instance ids (envelopes, snapshots, registry
-/// entries, mDNS TXT `id=`).
-pub fn is_instance_id(s: &str) -> bool {
-	s.len() == INSTANCE_ID_LEN
-		&& s
-			.bytes()
-			.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-}
-
 /// Longest message id; ids are `^[A-Za-z0-9_-]{1,64}$` (checked only by
 /// [`is_msg_id`]). Bounded so replay-guard and pending-map keys stay small.
 pub const MAX_MSG_ID_LEN: usize = 64;
@@ -63,16 +51,6 @@ pub fn is_msg_id(s: &str) -> bool {
 		&& s
 			.bytes()
 			.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// A fresh random instance id (8 random bytes, hex).
-///
-/// # Panics
-/// When the OS random source fails.
-pub fn new_instance_id() -> String {
-	let mut raw = [0u8; INSTANCE_ID_LEN / 2];
-	random_bytes(&mut raw);
-	hex(&raw)
 }
 
 /// Who sent an envelope.
@@ -713,7 +691,7 @@ mod tests {
 
 	#[test]
 	fn instance_ids_follow_the_single_pattern() {
-		assert!(is_instance_id(&new_instance_id()));
+		assert!(is_instance_id("0123456789abcdef"));
 		for bad in
 			["", "aaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaa", "AAAAAAAAAAAAAAAA", "aaaaaaaa-aaaaaaa"]
 		{

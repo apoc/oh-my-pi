@@ -1,8 +1,8 @@
 //! The mesh node orchestrator.
 //!
-//! Reconciles the configured sides (local registry + loopback listener, LAN
-//! listener + mDNS + static peers), keeps the peer table fresh, admits
-//! inbound envelopes and routes outbound requests.
+//! Reconciles the configured sides (the `mesh` namespace of the instance
+//! host, LAN listener + mDNS + static peers), keeps the peer table fresh,
+//! admits inbound envelopes and routes outbound requests.
 //!
 //! The frontend drives it through [`MeshNode`] and receives [`NodeEvent`]s:
 //! coalesced `Peers` changes, `Status` changes, and `Inbound` requests it must
@@ -16,12 +16,12 @@ mod tests;
 use std::{
 	collections::{HashMap, HashSet},
 	net::{IpAddr, Ipv4Addr, SocketAddr},
-	path::PathBuf,
 	sync::{Arc, Weak},
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
+use pi_instances::{InstanceHost, Registration};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -32,7 +32,7 @@ use tokio::{
 pub use self::peers::{EndpointKind, PeerInfo, PeerSource, PeerState};
 use self::{
 	inbound::{Admission, Limits, Pending, admit},
-	peers::{LocalEndpoint, MdnsEndpoint, PeerTable},
+	peers::{MdnsEndpoint, PeerTable},
 };
 use crate::{
 	discovery::{DiscoveryEvent, MdnsConfig, MdnsDiscovery},
@@ -41,11 +41,11 @@ use crate::{
 	net::{self, ReverseDns},
 	protocol::{
 		ANY_INSTANCE, MAX_ENVELOPE_BYTES, MeshEnvelope, MeshErrorCode, MeshRequest, MeshResponse,
-		MeshSender, PROTOCOL_VERSION, new_instance_id, parse_snapshot,
+		MeshSender, PROTOCOL_VERSION, parse_snapshot,
 	},
-	registry::{self, LocalPublication},
 	transport::{
 		BoxFuture, Endpoint, InboundSink, MeshClient, Origin, OriginKind, TransportError,
+		instance::{self, MeshNamespace},
 		lan::LanListener,
 	},
 };
@@ -54,6 +54,9 @@ use crate::{
 const PEERS_DEBOUNCE: Duration = Duration::from_millis(50);
 /// Agent id the engine uses for its own requests (snapshot fetch/probe).
 const ENGINE_AGENT_ID: &str = "Main";
+/// Liveness check deadline per registry entry on the local poll (checks run
+/// concurrently).
+const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Room left in an envelope-sized response for the `{ok, data}` wrapper.
 const SNAPSHOT_RESPONSE_OVERHEAD: usize = 64;
 
@@ -79,14 +82,13 @@ impl MeshMode {
 
 #[derive(Debug, Clone)]
 pub struct NodeOptions {
-	/// Fresh random id when `None`.
-	pub instance_id:  Option<String>,
+	/// Same-machine instance: its id is the node's instance id; the local side
+	/// registers the `mesh` namespace on it and lists peers in its registry
+	/// directory. Shared with other namespaces; the node never closes it.
+	pub host:         Arc<InstanceHost>,
 	pub display_name: String,
-	/// Host name sent in envelopes.
-	pub host:         String,
-	/// Local registry directory; [`registry::default_registry_dir`] when
-	/// `None`.
-	pub registry_dir: Option<PathBuf>,
+	/// Machine host name sent in envelopes.
+	pub host_name:    String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,9 +261,6 @@ struct State {
 	/// Static spec -> (address that answered, instance id it reported).
 	static_learned: HashMap<String, (SocketAddr, String)>,
 	closed:         bool,
-	/// Registry directory and our entry while the local side is on.
-	local_dir:      Option<PathBuf>,
-	local_pub:      Weak<LocalPublication>,
 }
 
 impl State {
@@ -307,7 +306,8 @@ struct RemotePart {
 
 #[derive(Default)]
 struct Parts {
-	local:  Option<Arc<LocalPublication>>,
+	/// The `mesh` namespace on the instance host while the local side is on.
+	local:  Option<Registration>,
 	remote: Option<RemotePart>,
 	/// Replay guard per mesh key; survives listener restarts so a port change
 	/// does not reopen the replay window.
@@ -316,16 +316,16 @@ struct Parts {
 
 /// One mesh participant. Create inside a tokio runtime.
 pub struct MeshNode {
-	me:           Weak<Self>,
-	instance_id:  String,
-	host:         String,
-	registry_dir: Option<PathBuf>,
-	seams:        Seams,
-	events:       mpsc::UnboundedSender<NodeEvent>,
-	state:        Mutex<State>,
-	parts:        tokio::sync::Mutex<Parts>,
-	signals:      Arc<Signals>,
-	background:   Mutex<Vec<JoinHandle<()>>>,
+	me:          Weak<Self>,
+	instance_id: String,
+	host_name:   String,
+	instances:   Arc<InstanceHost>,
+	seams:       Seams,
+	events:      mpsc::UnboundedSender<NodeEvent>,
+	state:       Mutex<State>,
+	parts:       tokio::sync::Mutex<Parts>,
+	signals:     Arc<Signals>,
+	background:  Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// Result of one engine snapshot exchange.
@@ -385,17 +385,12 @@ fn classify_snapshot(
 }
 
 impl MeshNode {
-	/// Creates the node (all sides off until [`Self::configure`]).
-	///
-	/// # Errors
-	/// `bad_request` when `instance_id` is not a valid instance id.
+	/// Creates the node (all sides off until [`Self::configure`]); its
+	/// instance id is `opts.host`'s.
 	///
 	/// # Panics
 	/// Outside a tokio runtime.
-	pub fn new(
-		opts: NodeOptions,
-		events: mpsc::UnboundedSender<NodeEvent>,
-	) -> Result<Arc<Self>, ProtocolError> {
+	pub fn new(opts: NodeOptions, events: mpsc::UnboundedSender<NodeEvent>) -> Arc<Self> {
 		Self::with_seams(opts, events, Seams::default())
 	}
 
@@ -403,17 +398,12 @@ impl MeshNode {
 		opts: NodeOptions,
 		events: mpsc::UnboundedSender<NodeEvent>,
 		seams: Seams,
-	) -> Result<Arc<Self>, ProtocolError> {
-		let instance_id = opts.instance_id.unwrap_or_else(new_instance_id);
-		if !crate::protocol::is_instance_id(&instance_id) {
-			return Err(ProtocolError::bad_request(format!(
-				"invalid mesh instance id {instance_id:?}"
-			)));
-		}
+	) -> Arc<Self> {
+		let instance_id = opts.host.instance_id().to_owned();
 		let node = Arc::new_cyclic(|me| Self {
 			me: me.clone(),
-			host: opts.host,
-			registry_dir: opts.registry_dir,
+			host_name: opts.host_name,
+			instances: opts.host,
 			seams,
 			events,
 			state: Mutex::new(State {
@@ -433,8 +423,6 @@ impl MeshNode {
 				static_specs:   Vec::new(),
 				static_learned: HashMap::new(),
 				closed:         false,
-				local_dir:      None,
-				local_pub:      Weak::new(),
 			}),
 			instance_id,
 			parts: tokio::sync::Mutex::new(Parts::default()),
@@ -448,7 +436,7 @@ impl MeshNode {
 			tokio::spawn(refresh_loop(Arc::downgrade(&node), Arc::clone(signals))),
 		];
 		*node.background.lock() = tasks;
-		Ok(node)
+		node
 	}
 
 	pub fn instance_id(&self) -> &str {
@@ -545,10 +533,10 @@ impl MeshNode {
 				instance_id: self.instance_id.clone(),
 				agent_id: agent_id.to_owned(),
 				display_name,
-				host: if self.host.is_empty() {
+				host: if self.host_name.is_empty() {
 					"unknown".to_owned()
 				} else {
-					self.host.clone()
+					self.host_name.clone()
 				},
 				lan_port: st.lan_port.filter(|_| st.remote_on),
 			},
@@ -606,28 +594,28 @@ impl MeshNode {
 		}
 	}
 
-	/// A local endpoint that now serves another instance is a stale registry
-	/// entry: drop the route, and the entry only if it is still the one we
-	/// dialed (the status byte is unauthenticated; a republished entry stays).
+	/// A local endpoint that now serves another instance (or, on Windows, a
+	/// pipe served by another process) is a stale registry entry: drop the
+	/// route, and the entry only if it is still the publication we dialed (a
+	/// republished entry stays).
 	fn on_misdirected(&self, id: &str, endpoint: &Endpoint, err: &TransportError) {
-		let (TransportError::Misdirected, Endpoint::Local { path, token, .. }) = (err, endpoint)
-		else {
+		let (TransportError::Misdirected, Endpoint::Local(entry)) = (err, endpoint) else {
 			return;
 		};
-		let (dropped, dir) = {
-			let mut st = self.state.lock();
-			(st.table.drop_local_if(id, path, token), st.local_dir.clone())
-		};
+		let dropped = self
+			.state
+			.lock()
+			.table
+			.drop_local_if(id, &entry.endpoint, &entry.token);
 		let Some(stale) = dropped else {
 			return;
 		};
 		self.mark_peers_dirty();
-		if let Some(dir) = dir {
-			tokio::task::spawn_blocking(move || {
-				let _ =
-					registry::remove_entry_if(&dir, &stale.instance_id, &stale.token, stale.created_at);
-			});
-		}
+		let dir = self.instances.dir().to_owned();
+		tokio::task::spawn_blocking(move || {
+			let _ =
+				pi_instances::remove_entry_if(&dir, &stale.instance_id, &stale.token, stale.created_at);
+		});
 	}
 
 	/// Reconciles running parts with `cfg`; only changed parts restart.
@@ -674,33 +662,22 @@ impl MeshNode {
 		dirty: &mut bool,
 	) -> LocalState {
 		if !want {
-			if let Some(publication) = parts.local.take() {
-				publication.close().await;
+			if let Some(registration) = parts.local.take() {
+				registration.unregister().await;
 			}
 			let mut st = self.state.lock();
 			st.local_on = false;
-			st.local_dir = None;
-			st.local_pub = Weak::new();
 			*dirty |= st.table.clear_local();
 			return LocalState::Off;
 		}
 		if parts.local.is_none() {
-			let Some(dir) = self
-				.registry_dir
-				.clone()
-				.or_else(registry::default_registry_dir)
-			else {
-				errors.push("local: no home directory for the mesh registry".to_owned());
-				return LocalState::Error;
-			};
-			match registry::publish_local(&dir, &self.instance_id, self.sink()).await {
-				Ok(publication) => {
-					let publication = Arc::new(publication);
-					let mut st = self.state.lock();
-					st.local_dir = Some(dir);
-					st.local_pub = Arc::downgrade(&publication);
-					parts.local = Some(publication);
-				},
+			let namespace = Arc::new(MeshNamespace::new(self.sink()));
+			match self
+				.instances
+				.register(instance::NAMESPACE, namespace)
+				.await
+			{
+				Ok(registration) => parts.local = Some(registration),
 				Err(err) => {
 					errors.push(format!("local: {err}"));
 					return LocalState::Error;
@@ -1128,41 +1105,31 @@ impl MeshNode {
 				}
 			},
 			OriginKind::Local => {
-				if st.local_on
-					&& !matches!(st.table.route(id, true, false), Some(Endpoint::Local { .. }))
-				{
+				if st.local_on && !matches!(st.table.route(id, true, false), Some(Endpoint::Local(_))) {
 					self.signals.wake_local.notify_one();
 				}
 			},
 		}
 	}
 
+	/// Re-list live `mesh` instances (connect-only check; snapshots are
+	/// fetched for new peers and on the refresh loop). An unusable registry
+	/// directory lists empty.
 	async fn poll_local(&self) {
-		let (dir, publication) = {
-			let st = self.state.lock();
-			let Some(dir) = st.local_dir.clone() else {
-				return;
-			};
-			(dir, st.local_pub.upgrade())
-		};
-		if let Some(publication) = publication {
-			// Self-heal: a racing prune elsewhere may have removed our entry.
-			let _ = tokio::task::spawn_blocking(move || publication.ensure_published()).await;
+		if !self.state.lock().local_on {
+			return;
 		}
-		let listing: Vec<LocalEndpoint> = registry::list_local(&dir, Some(&self.instance_id))
-			.await
-			.into_iter()
-			.filter_map(|entry| match entry.endpoint {
-				Endpoint::Local { path, token, pid } => Some(LocalEndpoint {
-					instance_id: entry.instance_id,
-					path,
-					token,
-					pid,
-					created_at: entry.created_at,
-				}),
-				Endpoint::Remote { .. } => None,
-			})
-			.collect();
+		// Self-heal: a racing prune elsewhere may have removed our entry.
+		let host = Arc::clone(&self.instances);
+		let _ = tokio::task::spawn_blocking(move || host.ensure_published()).await;
+		let listing = pi_instances::list_alive(
+			self.instances.dir(),
+			instance::NAMESPACE,
+			Some(&self.instance_id),
+			LOCAL_PROBE_TIMEOUT,
+		)
+		.await
+		.unwrap_or_default();
 		let (changed, fresh) = {
 			let mut st = self.state.lock();
 			if !st.local_on {

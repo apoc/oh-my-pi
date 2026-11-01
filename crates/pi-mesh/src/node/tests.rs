@@ -1,5 +1,6 @@
-//! Node integration over real loopback transports; mDNS replaced by a fake,
-//! reverse DNS by a resolver that never answers.
+//! Node integration over real transports (instance hosts in temp registry
+//! directories, loopback LAN); mDNS replaced by a fake, reverse DNS by a
+//! resolver that never answers.
 
 use std::{
 	net::{IpAddr, Ipv4Addr, TcpListener},
@@ -21,6 +22,7 @@ use crate::{
 	discovery::MdnsPeer,
 	net::ReverseDnsConfig,
 	protocol::{MeshErrorCode, MessageKind},
+	transport::instance,
 };
 
 const A: &str = "aaaaaaaaaaaaaaa1";
@@ -85,6 +87,15 @@ fn node(
 	mdns: &Arc<FakeMdns>,
 	opts: Opts,
 ) -> (Arc<MeshNode>, mpsc::UnboundedReceiver<NodeEvent>) {
+	let host = Arc::new(InstanceHost::new(dir, Some(id.into())).unwrap());
+	node_on(host, mdns, opts)
+}
+
+fn node_on(
+	host: Arc<InstanceHost>,
+	mdns: &Arc<FakeMdns>,
+	opts: Opts,
+) -> (Arc<MeshNode>, mpsc::UnboundedReceiver<NodeEvent>) {
 	let (tx, rx) = mpsc::unbounded_channel();
 	let seams = Seams {
 		mdns:             Arc::clone(mdns) as Arc<dyn MdnsStarter>,
@@ -96,13 +107,18 @@ fn node(
 		respond_timeout:  opts.respond_timeout,
 		probe_timeout:    Duration::from_secs(2),
 	};
-	let opts = NodeOptions {
-		instance_id:  Some(id.into()),
-		display_name: format!("node {id}"),
-		host:         "testhost".into(),
-		registry_dir: Some(dir.to_owned()),
-	};
-	(MeshNode::with_seams(opts, tx, seams).unwrap(), rx)
+	let id = host.instance_id().to_owned();
+	let opts =
+		NodeOptions { host, display_name: format!("node {id}"), host_name: "testhost".into() };
+	(MeshNode::with_seams(opts, tx, seams), rx)
+}
+
+/// Live `mesh` entries in `dir` (own included).
+async fn listed(dir: &Path) -> usize {
+	pi_instances::list_alive(dir, instance::NAMESPACE, None, Duration::from_secs(2))
+		.await
+		.unwrap()
+		.len()
 }
 
 fn key() -> String {
@@ -162,13 +178,13 @@ async fn reconcile_starts_and_stops_only_changed_parts() {
 	let dir = tempfile::tempdir().unwrap();
 	let mdns = Arc::new(FakeMdns::default());
 	let (a, _rx) = node(A, dir.path(), &mdns, Opts::default());
-	let listed = async || registry::list_local(dir.path(), None).await.len();
+	let dir = dir.path();
 
 	let st = a
 		.configure(cfg(MeshMode::Local, Some(key()), vec![], "a"))
 		.await;
 	assert_eq!((st.local, st.remote, st.lan_port), (LocalState::On, RemoteState::Off, None));
-	assert_eq!(listed().await, 1);
+	assert_eq!(listed(dir).await, 1);
 	assert!(mdns.starts.lock().is_empty());
 
 	let st = a
@@ -198,7 +214,8 @@ async fn reconcile_starts_and_stops_only_changed_parts() {
 
 	let st = a.configure(cfg(MeshMode::Remote, None, vec![], "a2")).await;
 	assert_eq!((st.local, st.remote, st.lan_port), (LocalState::Off, RemoteState::NoKey, None));
-	assert_eq!(listed().await, 0, "registry entry withdrawn");
+	assert_eq!(listed(dir).await, 0, "mesh capability withdrawn");
+	assert!(a.instances.entry().is_some(), "the shared host stays published");
 	assert_eq!(mdns.stops.load(Ordering::SeqCst), 2);
 
 	let st = a
@@ -483,4 +500,51 @@ async fn oversized_snapshot_is_rejected() {
 	let err = a.set_snapshot(&snap.to_string()).unwrap_err();
 	assert_eq!(err.code, MeshErrorCode::TooLarge);
 	a.close().await;
+}
+
+#[tokio::test]
+async fn dead_local_entry_is_pruned_and_unlisted() {
+	let dir = tempfile::tempdir().unwrap();
+	let (a, _rx_a) = node(A, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	let (b, _rx_b) = node(B, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	b.set_snapshot(&snapshot_json(B)).unwrap();
+	b.configure(cfg(MeshMode::Local, None, vec![], "b")).await;
+	a.configure(cfg(MeshMode::Local, None, vec![], "a")).await;
+	a.refresh();
+	eventually("B listed", || peer(&a, B).is_some_and(|p| p.source == PeerSource::Local)).await;
+
+	// B crashes: its entry stays behind, its endpoint is gone.
+	let entry_path = dir.path().join(format!("{B}.json"));
+	let bytes = std::fs::read(&entry_path).unwrap();
+	b.instances.close().await;
+	std::fs::write(&entry_path, &bytes).unwrap();
+	a.refresh();
+	eventually("B unlisted", || peer(&a, B).is_none()).await;
+	assert!(!entry_path.exists(), "dead entry pruned");
+	a.close().await;
+	b.close().await;
+}
+
+#[tokio::test]
+async fn local_side_reports_instance_host_errors() {
+	let dir = tempfile::tempdir().unwrap();
+	let host = Arc::new(InstanceHost::new(dir.path(), Some(A.into())).unwrap());
+	let mdns = Arc::new(FakeMdns::default());
+	let local = || cfg(MeshMode::Local, None, vec![], "a");
+	let (a, _rx_a) = node_on(Arc::clone(&host), &mdns, Opts::default());
+	let (dup, _rx_dup) = node_on(Arc::clone(&host), &mdns, Opts::default());
+	assert_eq!(a.instance_id(), A, "the node takes the host's id");
+	assert_eq!(a.configure(local()).await.local, LocalState::On);
+	let st = dup.configure(local()).await;
+	assert_eq!(st.local, LocalState::Error);
+	assert!(st.error.unwrap().contains("already registered"));
+	a.close().await;
+	dup.close().await;
+
+	host.close().await;
+	let (late, _rx_late) = node_on(host, &mdns, Opts::default());
+	let st = late.configure(local()).await;
+	assert_eq!(st.local, LocalState::Error);
+	assert!(st.error.unwrap().contains("closed"));
+	late.close().await;
 }

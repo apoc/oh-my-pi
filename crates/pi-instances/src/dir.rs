@@ -12,7 +12,7 @@
 
 use std::{
 	io,
-	path::{Component, Path, PathBuf},
+	path::{Path, PathBuf},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -21,38 +21,6 @@ pub enum DirError {
 	Insecure(PathBuf, &'static str),
 	#[error("instance registry directory {0}: {1}")]
 	Io(PathBuf, #[source] io::Error),
-}
-
-/// `<home>/<PI_CONFIG_DIR or .omp>/run/instances`.
-///
-/// Mirrors the frontend's `path.join(os.homedir(), getConfigDirName())`: the
-/// config dir is always appended under home, even when absolute. `None` without
-/// a home directory.
-pub fn default_registry_dir() -> Option<PathBuf> {
-	let home = std::env::home_dir()?;
-	let config = std::env::var_os("PI_CONFIG_DIR").filter(|v| !v.is_empty());
-	Some(
-		join_under(home, Path::new(config.as_deref().unwrap_or_else(|| ".omp".as_ref())))
-			.join("run")
-			.join("instances"),
-	)
-}
-
-/// Node `path.join(base, rel)`: `rel`'s root/prefix is dropped and `..`
-/// pops, so the result never escapes above `base` via an absolute `rel`.
-/// (Unlike Node on Windows, a drive prefix in `rel` is dropped, not kept as a
-/// literal `D:` segment.)
-pub(crate) fn join_under(mut base: PathBuf, rel: &Path) -> PathBuf {
-	for component in rel.components() {
-		match component {
-			Component::Normal(part) => base.push(part),
-			Component::ParentDir => {
-				base.pop();
-			},
-			Component::CurDir | Component::RootDir | Component::Prefix(_) => {},
-		}
-	}
-	base
 }
 
 /// Create `dir` (and missing parents) owner-only, then secure it like

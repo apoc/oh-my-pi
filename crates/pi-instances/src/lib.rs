@@ -1,8 +1,9 @@
 //! Same-machine instance registry: one owner-only directory, one long-lived
 //! endpoint per [`InstanceHost`], multiplexed by namespace.
 //!
-//! - [`dir`]: the registry directory (`<home>/<PI_CONFIG_DIR or
-//!   .omp>/run/instances`) and its owner-only checks.
+//! - [`dir`]: the registry directory's owner-only checks. Callers always pass
+//!   the directory (omp uses `<home>/<PI_CONFIG_DIR or .omp>/run/instances`);
+//!   there is no built-in default.
 //! - [`InstanceEntry`]: `<instanceId>.json`, format v1 `{v, instanceId, pid,
 //!   nonce, endpoint, token, createdAt, capabilities}`, written atomically
 //!   (0600 temp file + rename) and present for the whole lifetime of the host's
@@ -48,7 +49,7 @@ mod tests;
 
 pub use self::{
 	client::{InstanceError, request},
-	dir::{DirError, assert_private_dir, default_registry_dir, ensure_private_dir},
+	dir::{DirError, assert_private_dir, ensure_private_dir},
 	entry::{InstanceEntry, is_instance_id, is_namespace},
 	host::{
 		Handler, HandlerReply, HostError, InstanceHost, RESERVED_CODES, Registration, RequestCtx,

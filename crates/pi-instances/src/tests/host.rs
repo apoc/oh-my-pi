@@ -1,13 +1,10 @@
 //! `InstanceHost` lifecycle and the endpoint wire protocol.
 
-use std::path::Path;
-
 use serde_json::{Value, json};
 
 use super::*;
 use crate::{
-	HostError, InstanceError, InstanceHost, Probe, ProbeRequest, dir::join_under, list,
-	remove_entry_if, request,
+	HostError, InstanceError, InstanceHost, Probe, ProbeRequest, list, remove_entry_if, request,
 };
 
 fn ping() -> Box<RawValue> {
@@ -48,7 +45,7 @@ async fn first_registration_publishes_a_v1_entry_that_serves_requests() {
 
 	#[cfg(unix)]
 	{
-		use std::os::unix::fs::PermissionsExt;
+		use std::{os::unix::fs::PermissionsExt, path::Path};
 		let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
 		assert_eq!(mode(&dir), 0o700);
 		assert_eq!(mode(&entry_file(&dir, A)), 0o600);
@@ -399,19 +396,6 @@ async fn pipe_served_by_another_pid_is_misdirected_and_pruned() {
 	);
 	assert!(!entry_file(dir, A).exists());
 	assert!(host.ensure_published().unwrap(), "the owner republishes");
-}
-
-#[test]
-fn config_dir_is_always_joined_under_home() {
-	let home = PathBuf::from("home").join("me");
-	assert_eq!(join_under(home.clone(), Path::new(".omp")), home.join(".omp"));
-	let absolute = if cfg!(windows) {
-		r"D:\elsewhere\cfg"
-	} else {
-		"/elsewhere/cfg"
-	};
-	assert_eq!(join_under(home.clone(), Path::new(absolute)), home.join("elsewhere").join("cfg"));
-	assert_eq!(join_under(home, Path::new("../x")), PathBuf::from("home").join("x"));
 }
 
 #[tokio::test]

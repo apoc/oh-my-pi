@@ -13,10 +13,7 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     version = "18.14.1",
-    deps = all_crate_deps(normal = True) + select({
-        "@platforms//os:windows": ["//crates/pi-ipc"],
-        "//conditions:default": [],
-    }),
+    deps = all_crate_deps(normal = True) + ["//crates/pi-instances"],
 )
 
 rust_test(

@@ -238,7 +238,8 @@
 - `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it) ([#17628](https://github.com/can1357/oh-my-pi/pull/17628) by [@sjawhar](https://github.com/sjawhar))
 ### Added
 
-- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through an owner-only registry over a Unix socket or current-user named pipe, LAN discovery over mDNS and static peers, AES-256-GCM sealed transport on both, snapshots and request/response messaging
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
 
 ## [18.14.2] - 2026-10-31
 
