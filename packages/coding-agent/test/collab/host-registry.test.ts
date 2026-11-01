@@ -8,9 +8,10 @@
  * fails, and guests joining through the relay never add an entry.
  *
  * The in-memory relay harness (./helpers/in-memory-relay) replaces the real
- * WebSocket so a real CollabHost/CollabSocket run unchanged; a per-test spy on
- * the `publishCollabHost` export redirects discovery metadata into a temp dir,
- * so the registry's real Unix-socket IPC is exercised without touching ~/.omp.
+ * WebSocket so a real CollabHost/CollabSocket run unchanged; every test gets a
+ * real instance host in a temp dir (standing in for the process's shared one),
+ * so the registry's real IPC is exercised without touching ~/.omp. A
+ * call-through spy on `publishCollabHost` counts and gates publications.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -27,10 +28,12 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as instances from "@oh-my-pi/pi-coding-agent/instances";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 const RELAY_URL = "ws://localhost:8788";
@@ -130,6 +133,8 @@ function makeHostContext(): { ctx: InteractiveModeContext; state: HostContextSta
 
 let tmp: string;
 let publishSpy: Mock<typeof registry.publishCollabHost>;
+let sharedSpy: Mock<typeof instances.sharedInstanceHost>;
+let instanceHost: InstanceHost;
 let capturedSockets: FakeWebSocket[] = [];
 let host: CollabHost | undefined;
 const guestCleanups: (() => void)[] = [];
@@ -147,12 +152,12 @@ beforeEach(async () => {
 		}
 	};
 	globalThis.WebSocket = Capturing as unknown as typeof WebSocket;
-	// Redirect publication into the temp dir. Captured before the spy so the
-	// implementation calls the genuine registry (real Unix-socket IPC).
+	// Every room publishes on this temp-dir host. Captured before the spy so
+	// the implementation calls the genuine registry (real IPC).
+	instanceHost = new InstanceHost({ dir: tmp });
+	sharedSpy = spyOn(instances, "sharedInstanceHost").mockReturnValue(instanceHost);
 	const real = registry.publishCollabHost;
-	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
-		real(source, { ...options, dir: tmp }),
-	);
+	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) => real(source, options));
 	host = undefined;
 });
 
@@ -161,6 +166,8 @@ afterEach(async () => {
 	if (host) await host.stop("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
 	publishSpy?.mockRestore();
+	sharedSpy?.mockRestore();
+	await instanceHost.close();
 	await fs.rm(tmp, { recursive: true, force: true });
 });
 
@@ -668,7 +675,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 	}
 	it("publishes metadata after the relay connects and hands out links per access", async () => {
 		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx, { instanceId: "host-under-test", generation: 3, access: "control" });
+		host = new CollabHost(ctx, { generation: 3, access: "control" });
 
 		// Constructing the host publishes nothing; the registry is empty.
 		expect(publishSpy).toHaveBeenCalledTimes(0);
@@ -684,7 +691,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(hosts).toHaveLength(1);
 		const [snapshot] = hosts;
 		expect(snapshot).toMatchObject({
-			instanceId: "host-under-test",
+			instanceId: instanceHost.instanceId,
 			generation: 3,
 			pid: process.pid,
 			sessionId: state.sessionId,
@@ -698,29 +705,29 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(JSON.stringify(snapshot)).not.toContain(WEB_URL);
 
 		// Links come only from an explicit, generation-bound request.
-		const control = await registry.resolveCollabHostLink("host-under-test", "control", { dir: tmp });
-		expect(control).toEqual({ instanceId: "host-under-test", generation: 3, access: "control", url: host.webLink });
-		const view = await registry.resolveCollabHostLink("host-under-test", "view", { dir: tmp });
+		const control = await registry.resolveCollabHostLink(host.instanceId, "control", { dir: tmp });
+		expect(control).toEqual({ instanceId: host.instanceId, generation: 3, access: "control", url: host.webLink });
+		const view = await registry.resolveCollabHostLink(host.instanceId, "view", { dir: tmp });
 		expect(view.url).toBe(host.webViewLink);
 	});
 
 	it("refuses a control link for a room published with view access", async () => {
 		const { ctx } = makeHostContext();
-		host = new CollabHost(ctx, { instanceId: "view-only-host", access: "view" });
+		host = new CollabHost(ctx, { access: "view" });
 		await host.start(RELAY_URL, WEB_URL);
 
 		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
 		expect(snapshot!.access).toBe("view");
-		await expect(registry.resolveCollabHostLink("view-only-host", "control", { dir: tmp })).rejects.toMatchObject({
+		await expect(registry.resolveCollabHostLink(host.instanceId, "control", { dir: tmp })).rejects.toMatchObject({
 			code: "access_unavailable",
 		});
-		const view = await registry.resolveCollabHostLink("view-only-host", "view", { dir: tmp });
+		const view = await registry.resolveCollabHostLink(host.instanceId, "view", { dir: tmp });
 		expect(view.url).toBe(host.webViewLink);
 	});
 
 	it("reports inputRequired while a guest UI request is retained", async () => {
 		const { ctx } = makeHostContext();
-		host = new CollabHost(ctx, { instanceId: "attention-host" });
+		host = new CollabHost(ctx);
 		await host.start(RELAY_URL, WEB_URL);
 
 		const abort = new AbortController();
@@ -738,7 +745,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 
 	it("reports busy for the session's turn and idle once it ends", async () => {
 		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx, { instanceId: "activity-host" });
+		host = new CollabHost(ctx);
 		await host.start(RELAY_URL, WEB_URL);
 
 		state.isStreaming = true;
@@ -748,7 +755,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		// and only `busy` reports that it stopped working.
 		state.isStreaming = false;
 		const [idle] = await registry.listCollabHosts({ dir: tmp });
-		expect(idle).toMatchObject({ instanceId: "activity-host", busy: false });
+		expect(idle).toMatchObject({ instanceId: host.instanceId, busy: false });
 	});
 
 	it("retains a guest UI request raised before the relay connects", async () => {
@@ -959,7 +966,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 
 	it("refuses guest actions and discovery from the moment stop() begins, while the goodbye is still draining", async () => {
 		const { ctx, state } = makeHostContext();
-		host = new CollabHost(ctx, { instanceId: "stopping-host" });
+		host = new CollabHost(ctx);
 		await host.start(RELAY_URL, WEB_URL);
 		const parsed = parseCollabLink(host.link);
 		if ("error" in parsed) throw new Error(parsed.error);
@@ -997,7 +1004,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		// Nor may discovery still offer the room: it is omitted (not pruned —
 		// teardown withdraws it) and no link is handed out.
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		await expect(registry.resolveCollabHostLink("stopping-host", "control", { dir: tmp })).rejects.toMatchObject({
+		await expect(registry.resolveCollabHostLink(host.instanceId, "control", { dir: tmp })).rejects.toMatchObject({
 			code: "not_found",
 		});
 		flush.mockRestore();
@@ -1126,7 +1133,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			};
 			return publication;
 		});
-		host = new CollabHost(ctx, { instanceId: "reused-endpoint" });
+		host = new CollabHost(ctx);
 		const started = host.start(RELAY_URL, WEB_URL);
 		await publishing.promise;
 
@@ -1137,7 +1144,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		// started safely if the withdrawal happened before stop() resolved.
 		expect(events).toEqual(["withdrawn", "stopped"]);
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		const successor = new CollabHost(ctx, { instanceId: "reused-endpoint", generation: 2 });
+		const successor = new CollabHost(ctx, { generation: 2 });
 		await successor.start(RELAY_URL, WEB_URL);
 		expect((await registry.listCollabHosts({ dir: tmp })).map(h => h.generation)).toEqual([2]);
 		await successor.stop("done");

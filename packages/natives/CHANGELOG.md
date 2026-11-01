@@ -240,6 +240,7 @@
 
 - Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
 - Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
 
 ## [18.14.2] - 2026-10-31
 

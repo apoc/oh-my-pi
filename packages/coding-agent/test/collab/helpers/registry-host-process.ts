@@ -3,21 +3,24 @@
  * Used by registry-smoke.test.ts for discovery, explicit link retrieval,
  * crash cleanup, and the real CLI path.
  *
- * argv[2]  metadata dir override; empty/absent → default `~/.omp/run/collab-hosts`.
+ * argv[2]  registry dir override; empty/absent → default `~/.omp/run/instances`.
  * argv[3]  URL marker; falls back to OMP_SMOKE_MARKER, then "smoke".
- * argv[4]  instance ID; falls back to OMP_SMOKE_INSTANCE_ID, then "smoke-host".
+ * argv[4]  instance ID (16 lowercase letters/digits); falls back to OMP_SMOKE_INSTANCE_ID, then "smokehost0000001".
  *
  * Emits `READY\n` once published. SIGTERM runs postmortem cleanup, which closes
- * the publication, then exits 143 like every omp process.
+ * the publication and the instance host, then exits 143 like every omp process.
  */
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { type CollabHostRegistrySource, publishCollabHost } from "../../../src/collab/registry";
+import { instanceRegistryDir } from "../../../src/instances";
+
 postmortem.installProcessHandlers();
 
 const dirArg = process.argv[2];
 const marker = process.argv[3] ?? process.env.OMP_SMOKE_MARKER ?? "smoke";
-const instanceId = process.argv[4] ?? process.env.OMP_SMOKE_INSTANCE_ID ?? "smoke-host";
-const dir = dirArg && dirArg.length > 0 ? dirArg : undefined;
+const instanceId = process.argv[4] ?? process.env.OMP_SMOKE_INSTANCE_ID ?? "smokehost0000001";
+const dir = dirArg && dirArg.length > 0 ? dirArg : instanceRegistryDir();
 const startedAt = Date.now();
 
 const source: CollabHostRegistrySource = {
@@ -38,12 +41,17 @@ const source: CollabHostRegistrySource = {
 	}),
 	link: access => `https://collab.example/${access}/${marker}`,
 };
-const publication = await publishCollabHost(source, { dir, instanceId });
+const host = new InstanceHost({ dir, instanceId });
+const publication = await publishCollabHost(source, { host });
 
 // postmortem owns the signal exit and awaits registered cleanups first; a
 // separate signal handler would race its exit against the native close.
-postmortem.register("collab-smoke-host", () => publication.close());
+postmortem.register("collab-smoke-host", async () => {
+	await publication.close();
+	await host.close();
+});
 process.stdout.write("READY\n");
 
-// Stay alive until a signal arrives (or the parent SIGKILLs us).
-await Promise.withResolvers<never>().promise;
+// The native endpoint does not hold the event loop open: stay alive until a
+// signal arrives (or the parent SIGKILLs us).
+setInterval(() => {}, 1 << 30);

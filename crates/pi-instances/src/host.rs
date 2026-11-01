@@ -44,13 +44,22 @@ const REFUSE_LINGER: Duration = Duration::from_secs(1);
 /// Request bytes drained after a `busy` / `too_large` answer.
 const MAX_DRAIN_BYTES: usize = 2 * MAX_REQUEST_LINE_BYTES;
 
-/// A namespace handler's answer.
-#[derive(Debug)]
+/// A namespace handler's answer. `Debug` omits the body (it may carry a
+/// capability, e.g. a collab link URL).
 pub enum HandlerReply {
 	/// `{"v":1,"ok":true,"body":<body>}`.
 	Ok(Box<RawValue>),
 	/// `{"v":1,"ok":false,"error":<code>}`.
 	Error(Cow<'static, str>),
+}
+
+impl fmt::Debug for HandlerReply {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Ok(body) => write!(f, "Ok(<{} bytes>)", body.get().len()),
+			Self::Error(code) => f.debug_tuple("Error").field(code).finish(),
+		}
+	}
 }
 
 /// Context of one authenticated request.

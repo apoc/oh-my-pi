@@ -9,9 +9,10 @@
  * and incremental subagent-transcript reads.
  */
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { InstanceHost } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
@@ -21,6 +22,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { sharedInstanceHost } from "../instances";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -156,13 +158,15 @@ interface PendingCollabUiRequest {
 }
 
 /**
- * Identity a host publishes to the local registry. The controller that owns
- * hosting supplies a process-lifetime `instanceId` and bumps `generation` for
- * every room it starts; `access` caps what the registry hands out for this
- * room (the room itself always carries a write token for its own links).
+ * Identity a host publishes to the local registry. Every room of a process
+ * publishes on its shared instance host (whose id they all share); the
+ * controller that owns hosting bumps `generation` for every room, and
+ * `access` caps what the registry hands out for this room (the room itself
+ * always carries a write token for its own links).
  */
 export interface CollabHostOptions {
-	instanceId?: string;
+	/** Instance the room publishes on; its id is the room's registry identity. Defaults to {@link sharedInstanceHost}. */
+	instanceHost?: InstanceHost;
 	generation?: number;
 	access?: CollabAccess;
 	/**
@@ -215,7 +219,8 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId: string;
 	#startedAt = 0;
-	readonly #instanceId: string;
+	/** Set from the options, else resolved to the shared host when first needed (publication). */
+	#instanceHost: InstanceHost | undefined;
 	readonly #generation: number;
 	readonly #guestActionsReady: () => boolean;
 	readonly #onEnded: (() => void) | undefined;
@@ -264,7 +269,7 @@ export class CollabHost {
 
 	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
-		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
+		this.#instanceHost = options.instanceHost;
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
 		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
@@ -276,7 +281,12 @@ export class CollabHost {
 
 	/** Registry identity shared by every room this process hosts. */
 	get instanceId(): string {
-		return this.#instanceId;
+		return this.#publishingHost().instanceId;
+	}
+
+	#publishingHost(): InstanceHost {
+		this.#instanceHost ??= sharedInstanceHost();
+		return this.#instanceHost;
 	}
 
 	/** Registry generation of this room; a later room in the same process has a higher one. */
@@ -576,7 +586,9 @@ export class CollabHost {
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
 		// The in-flight task is tracked so a stop() that overtakes it withdraws
 		// the result before resolving: a successor room reuses this endpoint.
-		const publishing = publishCollabHost(this.#registrySource(), { instanceId: this.#instanceId }).then(
+		const publishing = Promise.try(() =>
+			publishCollabHost(this.#registrySource(), { host: this.#publishingHost() }),
+		).then(
 			publication => publication,
 			err => {
 				logger.warn("Collab host registry publication failed", { error: String(err) });
@@ -649,9 +661,9 @@ export class CollabHost {
 		const publication = this.#registryPublication;
 		this.#registryPublication = null;
 		if (publication) {
-			// close() removes discovery metadata synchronously before awaiting the
-			// server shutdown, so a stopped room disappears from lists immediately;
-			// awaiting it lets a successor room reuse the same instance endpoint.
+			// close() stops answering queries at once, so a stopped room disappears
+			// from lists immediately; awaiting it frees the `collab` namespace for
+			// a successor room on the same instance host.
 			await publication
 				.close()
 				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
@@ -680,8 +692,8 @@ export class CollabHost {
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
 		// A publication still being created when the room ended is withdrawn
-		// before stop() resolves: a successor room reuses this instance
-		// endpoint, and this room's late cleanup must never unlink the winner.
+		// before stop() resolves: a successor room publishes on the same
+		// instance host and needs the `collab` namespace free.
 		const pending = this.#pendingPublication;
 		this.#pendingPublication = null;
 		const late = pending ? await pending : null;
@@ -710,7 +722,7 @@ export class CollabHost {
 	#registrySource(): CollabHostRegistrySource {
 		return {
 			snapshot: () => this.#registrySnapshot(),
-			link: access => (access === "view" ? this.#webViewLink : this.#webLink),
+			link: access => (access === "view" ? this.#webViewLink : this.#access === "control" ? this.#webLink : null),
 		};
 	}
 
@@ -726,7 +738,7 @@ export class CollabHost {
 		if (this.#ctx.session.isSessionTransitioning) throw new Error("session transition in progress");
 		const model = this.#ctx.session.model;
 		return {
-			instanceId: this.#instanceId,
+			instanceId: this.instanceId,
 			generation: this.#generation,
 			pid: process.pid,
 			sessionId: this.#sessionId,

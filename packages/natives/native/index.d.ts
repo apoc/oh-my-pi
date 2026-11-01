@@ -28,6 +28,22 @@ export declare class AudioPlayback {
   stop(): void
 }
 
+/** A host published under the `collab` namespace. `close()` withdraws it. */
+export declare class CollabRegistration {
+  /**
+   * Answer query `requestId`: `answer` read in one tick from the host's
+   * state, or `null` when the host cannot vouch for its session. Unknown or
+   * late ids (past the 5 s deadline) are ignored.
+   */
+  respond(requestId: string, answer?: CollabHostAnswer | undefined | null): void
+  /**
+   * Stop serving `collab` on the host (the host itself stays open). From
+   * the call on, no query reaches `onQuery` and pending ones fail.
+   * Idempotent.
+   */
+  close(): Promise<void>
+}
+
 /** Persistent, serialized native desktop capture/input/accessibility session. */
 export declare class DesktopSession {
   constructor(options?: DesktopSessionOptions | undefined | null)
@@ -1557,6 +1573,90 @@ export interface ClipboardImage {
  */
 export declare function closeDesktopEventTaps(): void
 
+/**
+ * A source's answer, read in one tick: the snapshot (`null` when the host
+ * cannot vouch for its session) and, for `link`, the URL for the requested
+ * access (`null` when that access is not published).
+ */
+export interface CollabHostAnswer {
+  snapshot: CollabHostSnapshot | null
+  url: string | null
+}
+
+/**
+ * One request a published host must answer via its registration's
+ * `respond()`.
+ */
+export interface CollabHostQuery {
+  requestId: string
+  op: 'snapshot' | 'link'
+  /** For `link`: the access whose URL is wanted. */
+  access?: 'view' | 'control'
+}
+
+/**
+ * Non-capability host state, computed by the host at query time. Free-form
+ * strings (session id and name, cwd, model) are bounded to 1024 UTF-16 code
+ * units on the wire.
+ */
+export interface CollabHostSnapshot {
+  /**
+   * The publishing host's instance id (listers take it from the registry
+   * entry, whatever the source reported).
+   */
+  instanceId: string
+  /** Increments every time the process starts a new room (≥ 1). */
+  generation: number
+  /** Host process id (listers take it from the registry entry). */
+  pid: number
+  /** Session id of the hosted conversation. */
+  sessionId: string
+  /** Human-readable session name, when one is set. */
+  sessionName: string | null
+  /** Host working directory. */
+  cwd: string
+  /** Model the host session is using, when one is selected. */
+  model: CollabModel | null
+  /** Epoch milliseconds when the host first connected to the relay. */
+  startedAt: number
+  /** Participant count, including the host. */
+  participants: number
+  /** Whether the host holds an open relay connection. */
+  relayConnected: boolean
+  /**
+   * Whether a host-side question waits for an answer a writable guest
+   * could give.
+   */
+  inputRequired: boolean
+  /**
+   * Whether the session is running a turn (streaming or executing tools).
+   * `null` when the host does not report it; unknown is not idle.
+   */
+  busy: boolean | null
+  /** Highest access the host hands out. */
+  access: 'view' | 'control'
+}
+
+export interface CollabLookupOptions {
+  /** Registry directory. */
+  dir: string
+  /** Per-host deadline in milliseconds (default 1500). */
+  timeoutMs?: number
+}
+
+export interface CollabModel {
+  provider: string
+  id: string
+}
+
+/** One resolved capability. */
+export interface CollabResolvedLink {
+  instanceId: string
+  generation: number
+  access: 'view' | 'control'
+  url: string
+}
+
 /** A context line (before or after a match). */
 export interface ContextLine {
   /** 1-indexed line number in the source file. */
@@ -2938,6 +3038,16 @@ export interface LineRange {
 }
 
 /**
+ * Live Collab hosts in `options.dir`, sorted by `startedAt`, pid, then
+ * instance id.
+ *
+ * Dead and malformed entries are pruned on the way; the result carries no
+ * URLs. Rejects (code `registry_dir`) when the directory is insecure or
+ * unreadable; a missing directory lists nothing.
+ */
+export declare function listCollabHosts(options: CollabLookupOptions): Promise<CollabHostSnapshot[]>
+
+/**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
@@ -3603,6 +3713,16 @@ export interface PtyStartOptions {
 }
 
 /**
+ * Serve the `collab` namespace on `host`.
+ *
+ * Every request calls `onQuery`, which must answer through the returned
+ * registration's `respond()` within 5 s. The first registration on a host
+ * binds its endpoint and writes its registry entry; rejects when `collab` is
+ * already served on `host` or the host is closed.
+ */
+export declare function publishCollab(host: InstanceHost, onQuery: (query: CollabHostQuery) => void): Promise<CollabRegistration>
+
+/**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
  * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
@@ -3676,6 +3796,13 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/**
+ * One URL for the host `selector` names (exact instance id, else pid).
+ * Rejects with `code` `not_found`, `ambiguous`, `stale_generation`,
+ * `access_unavailable`, `unreachable`, or `registry_dir`.
+ */
+export declare function resolveCollabHostLink(selector: string, access: 'view' | 'control', options: CollabLookupOptions): Promise<CollabResolvedLink>
 
 /**
  * Run the pi-shell engine as a process shell in this process (`omp zsh`,
