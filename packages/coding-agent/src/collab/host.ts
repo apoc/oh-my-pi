@@ -722,7 +722,7 @@ export class CollabHost {
 	#registrySource(): CollabHostRegistrySource {
 		return {
 			snapshot: () => this.#registrySnapshot(),
-			link: access => (access === "view" ? this.#webViewLink : this.#access === "control" ? this.#webLink : null),
+			link: access => (access === "view" ? this.#webViewLink : this.#webLink),
 		};
 	}
 

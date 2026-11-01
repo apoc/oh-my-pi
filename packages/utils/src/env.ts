@@ -156,6 +156,7 @@ function filterChildShellEnvInternal(
 	env: Record<string, string | undefined>,
 	cwd: string,
 	onDotenvValue?: (value: string) => void,
+	onDotenvName?: (name: string) => void,
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
@@ -221,6 +222,7 @@ function filterChildShellEnvInternal(
 			// from a project dotenv file, not the parent shell.
 			const value = result[key];
 			if (value !== undefined) onDotenvValue?.(value);
+			if (key in result) onDotenvName?.(key);
 			delete result[key];
 		} else if (
 			result[key] === launchEnv[key] ||
@@ -232,6 +234,7 @@ function filterChildShellEnvInternal(
 			// value match against the Bun-parsed dotenv.
 			const value = result[key];
 			if (value !== undefined) onDotenvValue?.(value);
+			if (key in result) onDotenvName?.(key);
 			delete result[key];
 		}
 	}
@@ -260,6 +263,21 @@ export function getDotenvEnvValues(
 }
 
 /**
+ * True when `Bun.env[name]` came from the launch directory's dotenv files (`.env`, `.env.<mode>`,
+ * `.env.local`), whether Bun autoloaded them or omp did, rather than from the launch environment.
+ * Decided like {@link filterChildShellEnv}: by the launch environment when it is known (procfs,
+ * `--no-env-file`), otherwise by the dotenv files defining the same value. `cwd` defaults to the
+ * project directory at startup (where those files were loaded from), not a later `setProjectDir`.
+ */
+export function isEnvFromProjectDotenv(name: string, cwd: string = launchProjectDir): boolean {
+	let found = false;
+	filterChildShellEnvInternal(Bun.env, cwd, undefined, key => {
+		if (key === name) found = true;
+	});
+	return found;
+}
+
+/**
  * Parses a complete .env file with the runtime's dotenv grammar, then retains
  * only shell-identifier names and spawn-safe values before mirroring valid
  * `OMP_` variables to their `PI_` aliases.
@@ -285,6 +303,9 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 
 	return result;
 }
+
+// The project directory the dotenv files were loaded from; later `setProjectDir` calls do not move it.
+const launchProjectDir = getProjectDir();
 
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));

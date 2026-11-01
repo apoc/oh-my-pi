@@ -82,6 +82,7 @@
 ### Added
 
 - Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
+- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ## [18.14.2] - 2026-10-31
 

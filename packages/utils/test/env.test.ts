@@ -375,6 +375,59 @@ describe("isBunTestRuntime", () => {
 			),
 		).toBe(true);
 	});
+
+	async function probeTestRuntimeSource(
+		dotenv: string,
+		launchValue: string | undefined,
+		bunArgs: string[],
+		moveProjectDir = false,
+	): Promise<[boolean, boolean, boolean]> {
+		const cwd = path.dirname(writeTempEnv(dotenv));
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const dirsModulePath = path.join(import.meta.dir, "..", "src", "dirs.ts");
+		const script = [
+			`import { isBunTestEntrypoint, isBunTestRuntime, isEnvFromProjectDotenv } from ${JSON.stringify(envModulePath)};`,
+			`import { setProjectDir } from ${JSON.stringify(dirsModulePath)};`,
+			moveProjectDir ? `setProjectDir(${JSON.stringify(os.tmpdir())});` : "",
+			'process.stdout.write(JSON.stringify([isEnvFromProjectDotenv("PI_TEST_RUNTIME"), isBunTestRuntime(), isBunTestEntrypoint()]));',
+		].join("\n");
+		const env: Record<string, string | undefined> = { ...process.env };
+		for (const name of ["PI_TEST_RUNTIME", "OMP_TEST_RUNTIME", "NODE_ENV", "BUN_ENV"]) delete env[name];
+		if (launchValue !== undefined) env.PI_TEST_RUNTIME = launchValue;
+		const proc = Bun.spawn([process.execPath, ...bunArgs, "--no-install", "--eval", script], {
+			cwd,
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return JSON.parse(stdout);
+	}
+
+	it("reports a PI_TEST_RUNTIME that omp loaded from the project .env as project-sourced", async () => {
+		expect(await probeTestRuntimeSource("PI_TEST_RUNTIME=1\n", undefined, ["--no-env-file"])).toEqual([
+			true,
+			true,
+			false,
+		]);
+	});
+
+	it("reports a PI_TEST_RUNTIME that Bun autoloaded from the project .env as project-sourced", async () => {
+		expect(await probeTestRuntimeSource("PI_TEST_RUNTIME=1\n", undefined, [])).toEqual([true, true, false]);
+	});
+
+	it("judges the PI_TEST_RUNTIME source by the launch directory after the project dir moves", async () => {
+		expect(await probeTestRuntimeSource("PI_TEST_RUNTIME=1\n", undefined, [], true)).toEqual([true, true, false]);
+	});
+
+	it("keeps a PI_TEST_RUNTIME from the launch environment", async () => {
+		expect(await probeTestRuntimeSource("", "1", [])).toEqual([false, true, false]);
+	});
 });
 
 /**

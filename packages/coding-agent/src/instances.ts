@@ -6,26 +6,37 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { InstanceHost } from "@oh-my-pi/pi-natives";
-import { getBaseConfigRoot, isBunTestRuntime, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	getBaseConfigRoot,
+	isBunTestEntrypoint,
+	isBunTestRuntime,
+	isEnvFromProjectDotenv,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 
 let withdrawRegistered = false;
-let testRegistryDir: string | undefined;
+let registryDir: string | undefined;
 
 /**
- * The registry directory of {@link sharedInstanceHost}. `bun test` processes get
- * `<tmpdir>/omp-test-instances-<uid>` instead (like the logs dir), fixed on first use, so suites
- * never publish into the developer's real registry and a test that later changes HOME or TMPDIR
- * never asks the process-wide host for a different directory.
+ * The registry directory of {@link sharedInstanceHost}, decided once per process on first use
+ * (the process-wide host can only ever serve one directory). `bun test` processes get
+ * `<tmpdir>/omp-test-instances-<uid>` instead (like the logs dir), so suites never publish into
+ * the developer's real registry and a test that later changes HOME or TMPDIR never asks the
+ * process-wide host for a different directory. Outside a `bun test` entrypoint the
+ * `PI_TEST_RUNTIME` marker counts only when it did not come from the working directory's dotenv
+ * files (`.env`, `.env.<mode>`, `.env.local`), so a cloned repository cannot move a real
+ * instance's registry; the user's own home, config-root and agent `.env` files are trusted.
  */
 export function instanceRegistryDir(): string {
-	if (isBunTestRuntime()) {
-		if (testRegistryDir === undefined) {
-			const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-			testRegistryDir = path.join(os.tmpdir(), `omp-test-instances-${uid}`);
-		}
-		return testRegistryDir;
+	if (registryDir !== undefined) return registryDir;
+	const testRuntime = isBunTestEntrypoint() || (isBunTestRuntime() && !isEnvFromProjectDotenv("PI_TEST_RUNTIME"));
+	if (testRuntime) {
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		registryDir = path.join(os.tmpdir(), `omp-test-instances-${uid}`);
+	} else {
+		registryDir = path.join(getBaseConfigRoot(), "run", "instances");
 	}
-	return path.join(getBaseConfigRoot(), "run", "instances");
+	return registryDir;
 }
 
 /**

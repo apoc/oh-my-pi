@@ -160,6 +160,23 @@ async fn an_inaccessible_endpoint_is_skipped_not_pruned() {
 	assert_eq!(listed_ids(dir, "echo", None).await, [A]);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_directory_is_a_listing_error_not_empty() {
+	use std::os::unix::fs::PermissionsExt;
+	// SAFETY: geteuid has no preconditions.
+	if unsafe { libc::geteuid() } == 0 {
+		return; // root reads any directory
+	}
+	let tmp = tempfile::tempdir().unwrap();
+	let dir = tmp.path().join("instances");
+	std::fs::create_dir(&dir).unwrap();
+	std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+	let result = list_alive(&dir, "echo", None, TIMEOUT).await;
+	std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+	assert!(matches!(result, Err(crate::DirError::Io(..))), "{result:?}");
+}
+
 #[tokio::test]
 async fn capability_filter_probes_only_matching_hosts_and_any_lister_prunes_the_dead() {
 	let tmp = tempfile::tempdir().unwrap();

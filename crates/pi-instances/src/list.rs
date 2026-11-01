@@ -185,7 +185,7 @@ async fn survey(
 			if !assert_private_dir(&dir)? {
 				return Ok(Vec::new());
 			}
-			Ok(scan(&dir, &dir_text, exclude.as_deref()))
+			scan(&dir, &dir_text, exclude.as_deref())
 		}
 	})
 	.await
@@ -328,9 +328,12 @@ fn classify(dir: &str, stem: &str, bytes: &[u8], referenced: &mut HashSet<String
 
 /// Read the directory: sweep, prune what is malformed or provably dead from
 /// its file alone, and return the v1 entries other than `exclude` to check.
-fn scan(dir: &Path, dir_text: &str, exclude: Option<&str>) -> Vec<InstanceEntry> {
-	let Ok(read) = std::fs::read_dir(dir) else {
-		return Vec::new();
+/// A missing directory is empty; any other read failure is an error.
+fn scan(dir: &Path, dir_text: &str, exclude: Option<&str>) -> Result<Vec<InstanceEntry>, DirError> {
+	let read = match std::fs::read_dir(dir) {
+		Ok(read) => read,
+		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+		Err(error) => return Err(DirError::Io(dir.to_owned(), error)),
 	};
 	let mut entries = Vec::new();
 	let mut referenced = HashSet::new();
@@ -382,7 +385,7 @@ fn scan(dir: &Path, dir_text: &str, exclude: Option<&str>) -> Vec<InstanceEntry>
 			}
 		}
 	}
-	entries
+	Ok(entries)
 }
 
 /// Whether `stem` names an endpoint: `<instanceId>-<16 hex>`.

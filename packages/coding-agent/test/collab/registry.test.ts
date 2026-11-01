@@ -191,34 +191,6 @@ describe("collab registry", () => {
 		expect(ambiguous.message).toStartWith(`${process.pid} matches more than one Collab host; use an instance id: `);
 	});
 
-	it("surfaces stale_generation when the host rotates between resolution's listing and link request", async () => {
-		const dir = await tempDir();
-		const f = makeFixture({ access: "view" });
-		const source = sourceFor(f);
-		let rotate = false;
-		source.snapshot = () => {
-			const snapshot = { ...f.snapshot };
-			if (rotate) {
-				// The next generation is a control room: the caller must be told to
-				// re-list, not that control is unavailable.
-				f.snapshot = { ...f.snapshot, generation: f.snapshot.generation + 1, access: "control" };
-				rotate = false;
-			}
-			return snapshot;
-		};
-		await publishSource(dir, f.snapshot.instanceId, source);
-		rotate = true;
-
-		await expect(resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).rejects.toMatchObject({
-			name: "CollabLinkError",
-			code: "stale_generation",
-		});
-		expect(await resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).toMatchObject({
-			generation: 2,
-			url: f.controlUrl,
-		});
-	});
-
 	it("omits a host whose source throws or answers a malformed snapshot, without leaking the error", async () => {
 		const dir = await tempDir();
 		const healthy = makeFixture({ sessionId: "healthy" });
