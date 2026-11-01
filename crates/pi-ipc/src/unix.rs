@@ -140,24 +140,32 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 
 	let mut lock_path = path.clone().into_os_string();
 	lock_path.push(".bind.lock");
-	let lock = OpenOptions::new()
-		.read(true)
-		.write(true)
-		.create(true)
-		.truncate(false)
-		.mode(0o600)
-		.custom_flags(libc::O_NOFOLLOW)
-		.open(&lock_path)
-		.map_err(|error| {
-			IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
-		})?;
-	loop {
-		match lock.lock() {
-			Ok(()) => break,
-			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
-			Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
+	// A sweeper may unlink the lock file between our open and our flock;
+	// holding a lock on an unlinked inode excludes nobody, so retry until the
+	// locked file is the one at `lock_path`.
+	let lock = loop {
+		let lock = OpenOptions::new()
+			.read(true)
+			.write(true)
+			.create(true)
+			.truncate(false)
+			.mode(0o600)
+			.custom_flags(libc::O_NOFOLLOW)
+			.open(&lock_path)
+			.map_err(|error| {
+				IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
+			})?;
+		loop {
+			match lock.lock() {
+				Ok(()) => break,
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+				Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
+			}
 		}
-	}
+		if is_same_file(&lock, Path::new(&lock_path)) {
+			break lock;
+		}
+	};
 
 	match fs::symlink_metadata(&path) {
 		Ok(meta) if !meta.file_type().is_socket() => {
@@ -308,6 +316,24 @@ fn ensure_private_dir(dir: &Path, euid: u32) -> Result<(), IpcError> {
 	Ok(())
 }
 
+/// Whether `dir` is a real directory (not a link) owned by our effective uid
+/// with no group/other access. Check-only: nothing is created or changed.
+pub fn is_private_dir(dir: &Path) -> bool {
+	fs::symlink_metadata(dir).is_ok_and(|meta| {
+		meta.file_type().is_dir() && meta.uid() == euid() && meta.mode() & 0o077 == 0
+	})
+}
+
+/// Whether the open `file` is still the file at `path` (same device and
+/// inode, `path` not a link): a lock held on a file unlinked or replaced
+/// meanwhile guards nothing.
+pub fn is_same_file(file: &fs::File, path: &Path) -> bool {
+	match (file.metadata(), fs::symlink_metadata(path)) {
+		(Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+		_ => false,
+	}
+}
+
 /// Dial `endpoint` and verify the server runs as our effective uid.
 ///
 /// `timeout` is unused here (it bounds Windows busy retries only); wrap the
@@ -321,10 +347,10 @@ pub async fn connect(endpoint: &str, _timeout: Duration) -> Result<Stream, IpcEr
 		.map_err(|error| IpcError::io(&error, "read peer credentials"))?;
 	let euid = euid();
 	if cred.uid() != euid {
-		return Err(IpcError::new(
-			"EACCES",
-			format!("{endpoint} is served by uid {}, expected {euid}", cred.uid()),
-		));
+		return Err(IpcError::foreign_peer(format!(
+			"{endpoint} is served by uid {}, expected {euid}",
+			cred.uid()
+		)));
 	}
 	Ok(Stream(stream))
 }

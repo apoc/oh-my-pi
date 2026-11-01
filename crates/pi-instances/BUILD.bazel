@@ -1,0 +1,25 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "pi-instances",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "pi_instances",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "18.14.2",
+    deps = all_crate_deps(normal = True) + ["//crates/pi-ipc"],
+)
+
+rust_test(
+    name = "pi-instances_test",
+    crate = ":pi-instances",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

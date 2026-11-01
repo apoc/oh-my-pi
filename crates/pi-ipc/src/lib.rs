@@ -33,6 +33,8 @@ use unix as platform;
 #[cfg(windows)]
 use windows as platform;
 
+#[cfg(unix)]
+pub use self::unix::{is_private_dir, is_same_file};
 pub use self::{
 	endpoint::endpoint,
 	platform::{
@@ -46,18 +48,32 @@ compile_error!("pi-ipc requires Unix or Windows");
 /// Transport failure carrying an errno-style code (`ENOENT`, `EADDRINUSE`, …).
 #[derive(Debug)]
 pub struct IpcError {
-	code:    &'static str,
-	message: String,
+	code:         &'static str,
+	message:      String,
+	foreign_peer: bool,
 }
 
 impl IpcError {
 	pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-		Self { code, message: message.into() }
+		Self { code, message: message.into(), foreign_peer: false }
+	}
+
+	/// The dialed endpoint is served by a process of another user. Its code
+	/// stays `EACCES`; [`Self::is_foreign_peer`] tells it apart from other
+	/// permission errors.
+	pub fn foreign_peer(message: impl Into<String>) -> Self {
+		Self { code: "EACCES", message: message.into(), foreign_peer: true }
 	}
 
 	/// `error` with its errno-style code, described as `"<context>: <error>"`.
 	pub fn io(error: &io::Error, context: &str) -> Self {
-		Self { code: io_error_code(error), message: format!("{context}: {error}") }
+		Self::new(io_error_code(error), format!("{context}: {error}"))
+	}
+
+	/// Whether the peer runs as another user ([`Self::foreign_peer`]): such
+	/// an endpoint can never belong to one of our processes.
+	pub const fn is_foreign_peer(&self) -> bool {
+		self.foreign_peer
 	}
 
 	/// Errno-style code.
@@ -240,5 +256,39 @@ mod tests {
 
 		server.await.unwrap();
 		release(bound);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn private_dir_check_never_trusts_links_or_loose_modes() {
+		use std::os::unix::fs::PermissionsExt;
+		let tmp = tempfile::tempdir().unwrap();
+		let dir = tmp.path().join("private");
+		std::fs::create_dir(&dir).unwrap();
+		std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+		assert!(!is_private_dir(&dir), "group/other access");
+		std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+		assert!(is_private_dir(&dir));
+		let link = tmp.path().join("link");
+		std::os::unix::fs::symlink(&dir, &link).unwrap();
+		assert!(!is_private_dir(&link), "a link to a private dir is not one");
+		assert_eq!(
+			std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+			0o700,
+			"check-only"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn an_unlinked_or_replaced_file_is_not_the_same_file() {
+		let tmp = tempfile::tempdir().unwrap();
+		let path = tmp.path().join("x.bind.lock");
+		let file = std::fs::File::create(&path).unwrap();
+		assert!(is_same_file(&file, &path));
+		std::fs::remove_file(&path).unwrap();
+		assert!(!is_same_file(&file, &path));
+		std::fs::write(&path, b"").unwrap();
+		assert!(!is_same_file(&file, &path), "a new file at the path is another inode");
 	}
 }

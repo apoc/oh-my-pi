@@ -8,6 +8,7 @@ members = [
    "crates/pi-builtins",
    "crates/pi-diff",
    "crates/pi-edit",
+   "crates/pi-instances",
    "crates/pi-ipc",
    "crates/pi-iso",
    "crates/pi-mesh",
@@ -254,6 +255,7 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 pi-ast = { path = "crates/pi-ast", default-features = false }
 pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
+pi-instances = { path = "crates/pi-instances" }
 pi-ipc = { path = "crates/pi-ipc" }
 pi-iso = { path = "crates/pi-iso" }
 pi-mesh = { path = "crates/pi-mesh" }
