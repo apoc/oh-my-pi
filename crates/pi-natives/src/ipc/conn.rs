@@ -34,15 +34,13 @@ use napi::{
 	},
 };
 use parking_lot::Mutex;
+use pi_ipc::{
+	IpcError, Stream, WriteFinish, is_orderly_eof,
+	lines::{FrameTooLarge, LineBatch, LineReader, READ_CHUNK, Text},
+};
 use tokio::sync::{
 	Notify,
 	mpsc::{UnboundedReceiver, UnboundedSender},
-};
-
-use super::{
-	IpcError,
-	lines::{FrameTooLarge, LineBatch, LineReader, READ_CHUNK, Text},
-	platform::{self, Stream, WriteFinish},
 };
 
 /// Queued-but-unwritten bytes above which `send` reports backpressure.
@@ -707,7 +705,7 @@ fn read_burst(
 					},
 					Err(error) if error.kind() == io::ErrorKind::WouldBlock => break Ok(false),
 					Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
-					Err(error) if platform::is_orderly_eof(&error) => break Ok(true),
+					Err(error) if is_orderly_eof(&error) => break Ok(true),
 					Err(error) => break Err(IpcError::io(&error, "read failed").reason()),
 				}
 			};
@@ -746,7 +744,7 @@ fn read_burst(
 				{
 					Flow::Open
 				},
-				Err(error) if platform::is_orderly_eof(&error) => Flow::Closed(None),
+				Err(error) if is_orderly_eof(&error) => Flow::Closed(None),
 				Err(error) => Flow::Closed(Some(IpcError::io(&error, "read failed").reason())),
 			}
 		},

@@ -494,7 +494,7 @@ fn ensure_private_dir(dir: &Path) -> Result<(), RegistryError> {
 		if !meta.file_type().is_dir() {
 			return Err(RegistryError::InsecureDir(dir.to_owned(), "not a directory"));
 		}
-		crate::winsec::restrict_dir_to_current_user(dir).map_err(|_| {
+		pi_ipc::winsec::restrict_dir_to_current_user(dir).map_err(|_| {
 			RegistryError::InsecureDir(dir.to_owned(), "cannot restrict access to the current user")
 		})?;
 	}

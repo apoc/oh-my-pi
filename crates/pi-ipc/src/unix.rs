@@ -14,12 +14,17 @@ use std::{
 		},
 	},
 	path::{Path, PathBuf},
+	pin::Pin,
+	task::{Context, Poll},
 	time::Duration,
 };
 
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+	io::{AsyncRead, AsyncWrite, ReadBuf},
+	net::{UnixListener, UnixStream},
+};
 
-use super::{IpcError, endpoint};
+use crate::{IpcError, endpoint};
 
 /// `listen()` backlog.
 const BACKLOG: libc::c_int = 512;
@@ -113,10 +118,15 @@ impl Listener {
 	}
 }
 
-/// Bind `endpoint` (see `IpcServer.listen`).
+/// Bind `endpoint`.
+///
+/// Creates the parent dir (0700) if missing; under an exclusive flock on
+/// `<path>.bind.lock`, rejects EADDRINUSE when a live server answers,
+/// otherwise replaces the stale socket file; the socket is chmod 0600 before
+/// `listen()`. The lock file is left in place. Requires a Tokio runtime.
 pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
 	let path = PathBuf::from(endpoint);
-	let (std_listener, bound) = napi::bindgen_prelude::spawn_blocking(move || bind_locked(path))
+	let (std_listener, bound) = tokio::task::spawn_blocking(move || bind_locked(path))
 		.await
 		.map_err(|error| IpcError::new("EIO", format!("bind task failed: {error}")))??;
 	let listener = UnixListener::from_std(std_listener)
@@ -136,6 +146,7 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 		.create(true)
 		.truncate(false)
 		.mode(0o600)
+		.custom_flags(libc::O_NOFOLLOW)
 		.open(&lock_path)
 		.map_err(|error| {
 			IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
@@ -298,6 +309,9 @@ fn ensure_private_dir(dir: &Path, euid: u32) -> Result<(), IpcError> {
 }
 
 /// Dial `endpoint` and verify the server runs as our effective uid.
+///
+/// `timeout` is unused here (it bounds Windows busy retries only); wrap the
+/// call in `tokio::time::timeout` for a full deadline.
 pub async fn connect(endpoint: &str, _timeout: Duration) -> Result<Stream, IpcError> {
 	let stream = UnixStream::connect(endpoint)
 		.await
@@ -320,11 +334,11 @@ pub enum WriteFinish {
 	/// Write side shut; reading continues until EOF.
 	HalfClosed,
 	/// The whole stream must be dropped now.
-	#[allow(dead_code, reason = "Windows-only outcome kept in the shared shape")]
 	Closed,
 }
 
-/// Connected socket.
+/// Connected socket whose peer runs as our effective uid. Only
+/// [`Listener::accept`] and [`connect`] create one.
 pub struct Stream(UnixStream);
 
 impl Stream {
@@ -352,5 +366,47 @@ impl Stream {
 			return Err(io::Error::last_os_error());
 		}
 		Ok(WriteFinish::HalfClosed)
+	}
+}
+
+impl AsyncRead for Stream {
+	fn poll_read(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &mut ReadBuf<'_>,
+	) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+	}
+}
+
+/// `shutdown` shuts the write half (`SHUT_WR`); the peer reads EOF while this
+/// side keeps reading.
+impl AsyncWrite for Stream {
+	fn poll_write(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &[u8],
+	) -> Poll<io::Result<usize>> {
+		Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+	}
+
+	fn poll_write_vectored(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		bufs: &[IoSlice<'_>],
+	) -> Poll<io::Result<usize>> {
+		Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+	}
+
+	fn is_write_vectored(&self) -> bool {
+		self.0.is_write_vectored()
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_flush(cx)
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
 	}
 }

@@ -4,11 +4,13 @@ use std::{
 	ffi::c_void,
 	io::{self, IoSlice},
 	os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
+	pin::Pin,
+	task::{Context, Poll},
 	time::Duration,
 };
 
-use pi_mesh::winsec::{Descriptor, current_user, process_user};
 use tokio::{
+	io::{AsyncRead, AsyncWrite, ReadBuf},
 	net::windows::named_pipe::{
 		ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
 	},
@@ -29,7 +31,10 @@ use windows_sys::Win32::{
 	},
 };
 
-use super::IpcError;
+use crate::{
+	IpcError,
+	winsec::{Descriptor, current_user, process_user},
+};
 
 /// Delay between `ERROR_PIPE_BUSY` retries while every instance is taken.
 const BUSY_RETRY: Duration = Duration::from_millis(20);
@@ -85,7 +90,7 @@ fn create_instance(security: &Descriptor, name: &str, first: bool) -> io::Result
 }
 
 /// Named pipes leave nothing on disk to clean up.
-pub struct Bound;
+pub struct Bound(());
 
 #[allow(clippy::needless_pass_by_value, reason = "consumes the bound endpoint like Unix")]
 pub const fn release(_bound: Bound) {}
@@ -110,12 +115,15 @@ impl Listener {
 		self.pending = create_instance(&self.security, &self.name, false).ok();
 		connected?;
 		instance
-			.map(Stream::Server)
+			.map(|pipe| Stream(Inner::Server(pipe)))
 			.ok_or_else(|| io::ErrorKind::NotConnected.into())
 	}
 }
 
-/// Create the first instance of `endpoint` (see `IpcServer.listen`).
+/// Create the first instance of `endpoint` (existing instance: EADDRINUSE).
+///
+/// Remote clients are rejected and the DACL grants only the current user.
+/// Requires a Tokio runtime (the pipe registers with its reactor).
 #[allow(clippy::unused_async, reason = "async on Unix; one shared call shape")]
 pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
 	let security =
@@ -128,11 +136,13 @@ pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
 			_ => IpcError::io(&error, &format!("create {endpoint}")),
 		}
 	})?;
-	Ok((Listener { name: endpoint.to_owned(), security, pending: Some(first) }, Bound))
+	Ok((Listener { name: endpoint.to_owned(), security, pending: Some(first) }, Bound(())))
 }
 
-/// Dial `endpoint`, waiting out `ERROR_PIPE_BUSY` until `timeout`, then
-/// verify the server process runs as our user.
+/// Dial `endpoint` and verify the server process runs as our user.
+///
+/// `ERROR_PIPE_BUSY` is retried until `timeout`; that is all `timeout`
+/// bounds. Wrap the call in `tokio::time::timeout` for a full deadline.
 pub async fn connect(endpoint: &str, timeout: Duration) -> Result<Stream, IpcError> {
 	let deadline = Instant::now() + timeout;
 	let client = loop {
@@ -152,15 +162,22 @@ pub async fn connect(endpoint: &str, timeout: Duration) -> Result<Stream, IpcErr
 		}
 	};
 	verify_server_user(client.as_raw_handle(), endpoint)?;
-	Ok(Stream::Client(client))
+	Ok(Stream(Inner::Client(client)))
 }
 
-fn verify_server_user(pipe: HANDLE, endpoint: &str) -> Result<(), IpcError> {
+/// Process id of the server end of the client pipe `pipe`.
+fn server_process_id(pipe: HANDLE) -> io::Result<u32> {
 	let mut pid = 0u32;
 	// SAFETY: `pipe` is a live client pipe handle; `pid` a valid out pointer.
 	if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) } == 0 {
-		return Err(IpcError::io(&io::Error::last_os_error(), "query pipe server process"));
+		return Err(io::Error::last_os_error());
 	}
+	Ok(pid)
+}
+
+fn verify_server_user(pipe: HANDLE, endpoint: &str) -> Result<(), IpcError> {
+	let pid =
+		server_process_id(pipe).map_err(|error| IpcError::io(&error, "query pipe server process"))?;
 	// SAFETY: plain OpenProcess call; the result is checked before use.
 	let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
 	if raw.is_null() {
@@ -184,45 +201,62 @@ fn verify_server_user(pipe: HANDLE, endpoint: &str) -> Result<(), IpcError> {
 /// How [`Stream::finish_write`] left the stream.
 pub enum WriteFinish {
 	/// Write side shut; reading continues until EOF.
-	#[allow(dead_code, reason = "Unix-only outcome kept in the shared shape")]
 	HalfClosed,
 	/// The whole stream must be dropped now.
 	Closed,
 }
 
-/// Connected pipe end.
-pub enum Stream {
+/// Connected pipe end whose peer runs as our user. Only [`Listener::accept`]
+/// and [`connect`] create one.
+pub struct Stream(Inner);
+
+enum Inner {
 	Server(NamedPipeServer),
 	Client(NamedPipeClient),
 }
 
 impl Stream {
+	/// Process id of the pipe server, for matching a dialed endpoint against
+	/// the pid a registry entry recorded. Not an identity proof: pids are
+	/// reused (the user check in [`connect`] is the security boundary). Only
+	/// a dialed (client) end knows it; an accepted end reports
+	/// `ErrorKind::Unsupported`.
+	pub fn server_pid(&self) -> io::Result<u32> {
+		match &self.0 {
+			Inner::Client(pipe) => server_process_id(pipe.as_raw_handle()),
+			Inner::Server(_) => Err(io::Error::new(
+				io::ErrorKind::Unsupported,
+				"server_pid is only known on a dialed pipe",
+			)),
+		}
+	}
+
 	pub async fn readable(&self) -> io::Result<()> {
-		match self {
-			Self::Server(pipe) => pipe.readable().await,
-			Self::Client(pipe) => pipe.readable().await,
+		match &self.0 {
+			Inner::Server(pipe) => pipe.readable().await,
+			Inner::Client(pipe) => pipe.readable().await,
 		}
 	}
 
 	/// Read into `buf`'s spare capacity without initializing it first.
 	pub fn try_read_buf(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
-		match self {
-			Self::Server(pipe) => pipe.try_read_buf(buf),
-			Self::Client(pipe) => pipe.try_read_buf(buf),
+		match &self.0 {
+			Inner::Server(pipe) => pipe.try_read_buf(buf),
+			Inner::Client(pipe) => pipe.try_read_buf(buf),
 		}
 	}
 
 	pub async fn writable(&self) -> io::Result<()> {
-		match self {
-			Self::Server(pipe) => pipe.writable().await,
-			Self::Client(pipe) => pipe.writable().await,
+		match &self.0 {
+			Inner::Server(pipe) => pipe.writable().await,
+			Inner::Client(pipe) => pipe.writable().await,
 		}
 	}
 
 	pub fn try_write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-		match self {
-			Self::Server(pipe) => pipe.try_write_vectored(bufs),
-			Self::Client(pipe) => pipe.try_write_vectored(bufs),
+		match &self.0 {
+			Inner::Server(pipe) => pipe.try_write_vectored(bufs),
+			Inner::Client(pipe) => pipe.try_write_vectored(bufs),
 		}
 	}
 
@@ -237,5 +271,65 @@ impl Stream {
 	)]
 	pub const fn finish_write(&self) -> io::Result<WriteFinish> {
 		Ok(WriteFinish::Closed)
+	}
+}
+
+impl AsyncRead for Stream {
+	fn poll_read(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &mut ReadBuf<'_>,
+	) -> Poll<io::Result<()>> {
+		match &mut self.get_mut().0 {
+			Inner::Server(pipe) => Pin::new(pipe).poll_read(cx, buf),
+			Inner::Client(pipe) => Pin::new(pipe).poll_read(cx, buf),
+		}
+	}
+}
+
+/// Pipes have no half-close: `shutdown` only flushes, and the peer reads EOF
+/// once this stream is dropped (see [`WriteFinish::Closed`]).
+impl AsyncWrite for Stream {
+	fn poll_write(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &[u8],
+	) -> Poll<io::Result<usize>> {
+		match &mut self.get_mut().0 {
+			Inner::Server(pipe) => Pin::new(pipe).poll_write(cx, buf),
+			Inner::Client(pipe) => Pin::new(pipe).poll_write(cx, buf),
+		}
+	}
+
+	fn poll_write_vectored(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		bufs: &[IoSlice<'_>],
+	) -> Poll<io::Result<usize>> {
+		match &mut self.get_mut().0 {
+			Inner::Server(pipe) => Pin::new(pipe).poll_write_vectored(cx, bufs),
+			Inner::Client(pipe) => Pin::new(pipe).poll_write_vectored(cx, bufs),
+		}
+	}
+
+	fn is_write_vectored(&self) -> bool {
+		match &self.0 {
+			Inner::Server(pipe) => pipe.is_write_vectored(),
+			Inner::Client(pipe) => pipe.is_write_vectored(),
+		}
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		match &mut self.get_mut().0 {
+			Inner::Server(pipe) => Pin::new(pipe).poll_flush(cx),
+			Inner::Client(pipe) => Pin::new(pipe).poll_flush(cx),
+		}
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		match &mut self.get_mut().0 {
+			Inner::Server(pipe) => Pin::new(pipe).poll_shutdown(cx),
+			Inner::Client(pipe) => Pin::new(pipe).poll_shutdown(cx),
+		}
 	}
 }
