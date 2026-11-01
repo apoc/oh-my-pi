@@ -8,8 +8,8 @@ use parking_lot::Mutex;
 use tokio::net::TcpListener;
 
 use super::{
-	InboundSink, Listener, MAX_CONNECTIONS_PER_IP, OriginKind,
-	sealed::{self, Server, ServerKey},
+	InboundSink, Listener, MAX_CONNECTIONS_PER_IP,
+	sealed::{self, Server},
 };
 use crate::keys::{MeshKeys, ReplayGuard};
 
@@ -38,14 +38,8 @@ impl LanListener {
 	) -> io::Result<Self> {
 		let tcp = TcpListener::bind(bind).await?;
 		let addr = tcp.local_addr()?;
-		let server = Arc::new(Server {
-			instance_id,
-			key: ServerKey::Mesh(keys),
-			guard,
-			sink,
-			origin: OriginKind::Remote,
-		});
-		let listener = Listener::spawn(tcp, Some(MAX_CONNECTIONS_PER_IP), move |stream, peer| {
+		let server = Arc::new(Server { instance_id, keys, guard, sink });
+		let listener = Listener::spawn(tcp, MAX_CONNECTIONS_PER_IP, move |stream, peer| {
 			sealed::serve(stream, peer, Arc::clone(&server))
 		});
 		Ok(Self { listener, addr })

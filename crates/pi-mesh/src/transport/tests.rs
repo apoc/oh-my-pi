@@ -1,27 +1,29 @@
 use std::{
 	net::{Ipv4Addr, SocketAddr},
+	path::Path,
 	sync::Arc,
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use parking_lot::Mutex;
-use serde_json::json;
+use pi_instances::{InstanceEntry, InstanceError, InstanceHost, Registration};
+use serde_json::{json, value::RawValue};
 use tokio::net::TcpStream;
 
 use super::{
-	BoxFuture, Endpoint, InboundSink, MAX_CONNECTIONS_PER_IP, MeshClient, Origin, OriginKind,
-	STATUS_OK, STATUS_TOO_LARGE, TransportError, exchange,
+	BUSY_TEXT, BoxFuture, Endpoint, InboundSink, MAX_CONNECTIONS_PER_IP, MeshClient, Origin,
+	OriginKind, REJECTED_TEXT, STATUS_TOO_LARGE, TOO_LARGE_TEXT, TransportError, exchange,
+	instance::{self, MAX_RESPONSE_LINE, MeshNamespace},
 	lan::LanListener,
-	local::LocalListener,
 	sealed::{MAX_RESPONSE_FRAME, decode_response, encode_request},
 };
 use crate::{
-	frame::{MAX_FRAME_BYTES, read_frame, write_frame},
+	frame::{MAX_FRAME_BYTES, read_frame},
 	keys::{MeshKeys, ReplayGuard},
 	protocol::{
-		ANY_INSTANCE, MAX_TEXT_CHARS, MeshEnvelope, MeshErrorCode, MeshRequest, MeshResponse,
-		MeshSender, MessageKind,
+		ANY_INSTANCE, MAX_ENVELOPE_BYTES, MAX_TEXT_CHARS, MeshEnvelope, MeshErrorCode, MeshRequest,
+		MeshResponse, MeshSender, MessageKind,
 	},
 };
 
@@ -105,12 +107,45 @@ fn remote(listener: &LanListener) -> Endpoint {
 	Endpoint::Remote { addr: listener.addr() }
 }
 
+/// Never answers (the peer's handler is stuck).
+struct Silent;
+
+impl InboundSink for Silent {
+	fn handle(&self, _envelope: MeshEnvelope, _origin: Origin) -> BoxFuture<MeshResponse> {
+		Box::pin(std::future::pending())
+	}
+}
+
+/// Host `ME` in `dir` serving `namespace` with `sink`; keep the host and the
+/// registration alive while the endpoint is used.
+async fn local_host(
+	dir: &Path,
+	namespace: &str,
+	sink: Arc<dyn InboundSink>,
+) -> (InstanceHost, Registration, InstanceEntry) {
+	let host = InstanceHost::new(dir, Some(ME.into())).unwrap();
+	let registration = host
+		.register(namespace, Arc::new(MeshNamespace::new(sink)))
+		.await
+		.unwrap();
+	let entry = host.entry().unwrap();
+	(host, registration, entry)
+}
+
+async fn mesh_host(dir: &Path) -> (InstanceHost, Registration, InstanceEntry) {
+	local_host(dir, instance::NAMESPACE, Arc::new(Echo)).await
+}
+
+fn raw(json: String) -> Box<RawValue> {
+	RawValue::from_string(json).unwrap()
+}
+
 #[tokio::test]
 async fn local_round_trip_and_wildcard_snapshot() {
 	let dir = tempfile::tempdir().unwrap();
-	let listener = LocalListener::start(dir.path(), ME.into(), Arc::new(Echo)).unwrap();
+	let (_host, _reg, entry) = mesh_host(dir.path()).await;
 	let client = MeshClient::new(None);
-	let endpoint = listener.endpoint();
+	let endpoint = Endpoint::Local(entry);
 	let got = client
 		.request(&endpoint, &note("m1", ME), TIMEOUT)
 		.await
@@ -121,41 +156,62 @@ async fn local_round_trip_and_wildcard_snapshot() {
 }
 
 #[tokio::test]
-async fn local_rejects_wrong_token_misdirection_and_bad_envelopes() {
+async fn local_validates_envelope_and_recipient_in_band() {
 	let dir = tempfile::tempdir().unwrap();
-	let listener = LocalListener::start(dir.path(), ME.into(), Arc::new(Echo)).unwrap();
+	let (_host, _reg, entry) = mesh_host(dir.path()).await;
 	let client = MeshClient::new(None);
-	let wrong = Endpoint::Local {
-		path:  listener.path().into(),
-		token: "00".repeat(32),
-		pid:   std::process::id(),
-	};
-	let got = client
-		.request(&wrong, &note("m1", ME), TIMEOUT)
+	let endpoint = Endpoint::Local(entry);
+	// Authenticated but addressed elsewhere, or `*` on a non-snapshot request.
+	for env in [note("m1", PEER), note("m2", ANY_INSTANCE)] {
+		let got = client.request(&endpoint, &env, TIMEOUT).await.unwrap();
+		assert_eq!(error_code(&got), MeshErrorCode::BadRequest, "{}", env.to);
+	}
+}
+
+/// Row `authentication_failed` -> `Ok(unauthorized)`.
+#[tokio::test]
+async fn local_wrong_token_is_unauthorized() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, mut entry) = mesh_host(dir.path()).await;
+	entry.token = "00".repeat(32);
+	let got = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", ME), TIMEOUT)
 		.await
 		.unwrap();
-	assert_eq!(error_code(&got), MeshErrorCode::Unauthorized);
+	assert_eq!(got, MeshResponse::error(MeshErrorCode::Unauthorized, REJECTED_TEXT));
+}
 
-	let endpoint = listener.endpoint();
-	let err = client
-		.request(&endpoint, &note("m2", PEER), TIMEOUT)
+/// Row `misdirected` -> `Err(Misdirected)`: the endpoint serves another id.
+#[tokio::test]
+async fn local_endpoint_serving_another_instance_is_misdirected() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, mut entry) = mesh_host(dir.path()).await;
+	entry.instance_id = PEER.into();
+	let err = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", PEER), TIMEOUT)
 		.await
 		.unwrap_err();
 	assert_eq!(err, TransportError::Misdirected);
+}
 
-	// Authenticated but invalid: answered with the validation code.
-	let star_note = note("m3", ANY_INSTANCE);
-	let got = client
-		.request(&endpoint, &star_note, TIMEOUT)
+/// Row `misdirected` (Windows): a pipe served by another process.
+#[cfg(windows)]
+#[tokio::test]
+async fn pipe_served_by_another_process_is_misdirected() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, mut entry) = mesh_host(dir.path()).await;
+	entry.pid = entry.pid.wrapping_add(1);
+	let err = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", ME), TIMEOUT)
 		.await
-		.unwrap();
-	assert_eq!(error_code(&got), MeshErrorCode::BadRequest);
+		.unwrap_err();
+	assert_eq!(err, TransportError::Misdirected);
 }
 
 #[tokio::test]
 async fn oversize_envelope_is_refused_client_side() {
 	let dir = tempfile::tempdir().unwrap();
-	let listener = LocalListener::start(dir.path(), ME.into(), Arc::new(Echo)).unwrap();
+	let (_host, _reg, entry) = mesh_host(dir.path()).await;
 	let mut big = note("m1", ME);
 	// Under the text cap per field, over the envelope cap in total.
 	big.body = MeshRequest::Reply {
@@ -165,10 +221,116 @@ async fn oversize_envelope_is_refused_client_side() {
 		error:    Some("\u{e9}".repeat(MAX_TEXT_CHARS)),
 	};
 	let got = MeshClient::new(None)
-		.request(&listener.endpoint(), &big, TIMEOUT)
+		.request(&Endpoint::Local(entry), &big, TIMEOUT)
 		.await
 		.unwrap();
 	assert_eq!(error_code(&got), MeshErrorCode::TooLarge);
+}
+
+/// Row `too_large` -> `Ok(too_large)`: the host enforces the namespace's body
+/// cap before the handler runs.
+#[tokio::test]
+async fn local_oversize_body_is_too_large() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, entry) = mesh_host(dir.path()).await;
+	let big = raw(format!("\"{}\"", "x".repeat(MAX_ENVELOPE_BYTES)));
+	let result =
+		pi_instances::request(&entry, "mesh.envelope", &big, TIMEOUT, MAX_RESPONSE_LINE).await;
+	assert_eq!(result.as_ref().unwrap_err(), &InstanceError::Remote("too_large".into()));
+	assert_eq!(
+		instance::map_outcome(&entry, result),
+		Ok(MeshResponse::error(MeshErrorCode::TooLarge, TOO_LARGE_TEXT))
+	);
+}
+
+/// Row `unavailable` -> `Err(Unreachable)`: the instance does not serve mesh.
+#[tokio::test]
+async fn local_instance_without_mesh_is_unreachable() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, entry) = local_host(dir.path(), "other", Arc::new(Echo)).await;
+	let err = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", ME), TIMEOUT)
+		.await
+		.unwrap_err();
+	assert!(matches!(err, TransportError::Unreachable(_)), "{err}");
+}
+
+/// Row connect failure -> `Err(Unreachable)`.
+#[tokio::test]
+async fn closed_local_host_is_unreachable() {
+	let dir = tempfile::tempdir().unwrap();
+	let (host, _reg, entry) = mesh_host(dir.path()).await;
+	host.close().await;
+	let endpoint = entry.endpoint.clone();
+	let err = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", ME), TIMEOUT)
+		.await
+		.unwrap_err();
+	let TransportError::Unreachable(text) = &err else {
+		panic!("{err}");
+	};
+	let prefix = format!("cannot connect to {endpoint}: ");
+	assert!(text.starts_with(&prefix), "{text}");
+	assert!(!text[prefix.len()..].contains(&endpoint), "endpoint named once: {text}");
+}
+
+/// Row client-side deadline -> `Err(Timeout)`.
+#[tokio::test]
+async fn local_peer_that_never_answers_times_out() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, entry) = local_host(dir.path(), instance::NAMESPACE, Arc::new(Silent)).await;
+	let err = MeshClient::new(None)
+		.request(&Endpoint::Local(entry), &note("m1", ME), Duration::from_millis(300))
+		.await
+		.unwrap_err();
+	assert_eq!(err, TransportError::Timeout);
+}
+
+/// Row "any other remote code" -> `Err(BadResponse)`, live: an unknown op.
+#[tokio::test]
+async fn local_unknown_op_is_bad_response() {
+	let dir = tempfile::tempdir().unwrap();
+	let (_host, _reg, entry) = mesh_host(dir.path()).await;
+	let body = raw(serde_json::to_string(&note("m1", ME)).unwrap());
+	let result =
+		pi_instances::request(&entry, "mesh.bogus", &body, TIMEOUT, MAX_RESPONSE_LINE).await;
+	assert_eq!(result.as_ref().unwrap_err(), &InstanceError::Remote("invalid_operation".into()));
+	let err = instance::map_outcome(&entry, result).unwrap_err();
+	assert!(matches!(err, TransportError::BadResponse(_)), "{err}");
+}
+
+/// Mapping rows the live tests above cannot reach, and the error texts.
+#[test]
+fn instance_outcomes_map_to_mesh_results() {
+	let entry = InstanceEntry {
+		instance_id:  ME.into(),
+		pid:          1,
+		nonce:        "0".repeat(16),
+		endpoint:     "ep".into(),
+		token:        "0".repeat(64),
+		created_at:   1,
+		capabilities: vec![instance::NAMESPACE.into()],
+	};
+	let map = |result| instance::map_outcome(&entry, result);
+	let remote = |code: &str| Err(InstanceError::Remote(code.into()));
+	assert_eq!(map(remote("busy")), Ok(MeshResponse::error(MeshErrorCode::Busy, BUSY_TEXT)));
+	let unreachable = |message: &str| {
+		map(Err(InstanceError::Unreachable { code: "ECONNREFUSED", message: message.into() }))
+	};
+	assert_eq!(
+		unreachable("connect ep: refused"),
+		Err(TransportError::Unreachable("cannot connect to ep: refused".into()))
+	);
+	assert_eq!(
+		unreachable("instance connection failed: reset"),
+		Err(TransportError::Unreachable("mesh connection failed: reset".into()))
+	);
+	assert_eq!(
+		map(Err(InstanceError::BadResponse("closed without answering".into()))),
+		Err(TransportError::BadResponse("mesh peer closed without answering".into()))
+	);
+	assert!(matches!(map(Ok(raw("[1]".into()))), Err(TransportError::BadResponse(_))));
+	assert_eq!(map(Ok(raw(r#"{"ok":true,"data":1}"#.into()))), Ok(MeshResponse::Ok(json!(1))));
 }
 
 #[tokio::test]
@@ -321,89 +483,6 @@ async fn replay_guard_survives_listener_restart() {
 	assert_eq!(error_code(&replay), MeshErrorCode::Unauthorized);
 }
 
-/// A fake local server: answers its first connection with `answer` and
-/// yields the request frame it received.
-#[cfg(unix)]
-fn fake_local(
-	dir: &std::path::Path,
-	answer: Vec<u8>,
-) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
-	let path = dir.join("fake.sock");
-	let listener = tokio::net::UnixListener::bind(&path).unwrap();
-	let seen = tokio::spawn(async move {
-		let (mut stream, _) = listener.accept().await.unwrap();
-		let request = read_frame(&mut stream, MAX_FRAME_BYTES)
-			.await
-			.unwrap()
-			.unwrap();
-		write_frame(&mut stream, &answer, usize::MAX).await.unwrap();
-		request
-	});
-	(path.to_str().unwrap().to_owned(), seen)
-}
-
-#[cfg(windows)]
-fn fake_local(
-	_dir: &std::path::Path,
-	answer: Vec<u8>,
-) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
-	let mut suffix = [0u8; 8];
-	crate::keys::random_bytes(&mut suffix);
-	let name = format!(r"\\.\pipe\omp-mesh-test-{}", crate::keys::hex(&suffix));
-	let mut server = tokio::net::windows::named_pipe::ServerOptions::new()
-		.first_pipe_instance(true)
-		.create(&name)
-		.unwrap();
-	let seen = tokio::spawn(async move {
-		server.connect().await.unwrap();
-		let request = read_frame(&mut server, MAX_FRAME_BYTES)
-			.await
-			.unwrap()
-			.unwrap();
-		write_frame(&mut server, &answer, usize::MAX).await.unwrap();
-		request
-	});
-	(name, seen)
-}
-
-#[tokio::test]
-async fn local_client_never_sends_token_and_rejects_forged_answers() {
-	let dir = tempfile::tempdir().unwrap();
-	let forged = [&[STATUS_OK][..], &br#"{"ok":true,"data":"forged"}"#[..]].concat();
-	let (path, seen) = fake_local(dir.path(), forged);
-	let token = "ab".repeat(32);
-	let err = MeshClient::new(None)
-		.request(
-			&Endpoint::Local { path, token: token.clone(), pid: std::process::id() },
-			&note("m1", ME),
-			TIMEOUT,
-		)
-		.await
-		.unwrap_err();
-	assert!(matches!(err, TransportError::BadResponse(_)), "{err}");
-	let request = seen.await.unwrap();
-	let raw = [0xabu8; 32];
-	assert!(!request.windows(raw.len()).any(|w| w == raw), "raw token on the wire");
-	assert!(!request.windows(token.len()).any(|w| w == token.as_bytes()), "hex token on the wire");
-}
-
-#[tokio::test]
-async fn closed_local_listener_is_dead_to_probes_and_clients() {
-	let dir = tempfile::tempdir().unwrap();
-	let listener = LocalListener::start(dir.path(), ME.into(), Arc::new(Echo)).unwrap();
-	let endpoint = listener.endpoint();
-	let path = listener.path().to_owned();
-	let pid = std::process::id();
-	assert!(crate::transport::local::probe(&path, pid).await.unwrap());
-	listener.close().await;
-	assert!(!crate::transport::local::probe(&path, pid).await.unwrap());
-	let err = MeshClient::new(None)
-		.request(&endpoint, &note("m1", ME), TIMEOUT)
-		.await
-		.unwrap_err();
-	assert!(matches!(err, TransportError::Unreachable(_)), "{err}");
-}
-
 #[tokio::test]
 async fn closed_listener_is_unreachable() {
 	let listener = lan().await;
@@ -421,38 +500,4 @@ fn raw_ok_fast_path_matches_serde_encoding() {
 	let raw = MeshResponse::OkRaw(r#"{"a":[1,"x"]}"#.into());
 	let decoded = crate::protocol::parse_response(&super::encode_response(&raw)).unwrap();
 	assert_eq!(decoded, MeshResponse::Ok(json!({ "a": [1, "x"] })));
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn pipe_served_by_another_process_counts_as_dead() {
-	let dir = tempfile::tempdir().unwrap();
-	let listener = LocalListener::start(dir.path(), ME.into(), Arc::new(Echo)).unwrap();
-	let Endpoint::Local { path, token, pid } = listener.endpoint() else {
-		unreachable!()
-	};
-	let other = pid.wrapping_add(1);
-	assert!(!crate::transport::local::probe(&path, other).await.unwrap());
-	let err = MeshClient::new(None)
-		.request(&Endpoint::Local { path, token, pid: other }, &note("m1", ME), TIMEOUT)
-		.await
-		.unwrap_err();
-	assert_eq!(err, TransportError::Misdirected);
-}
-
-#[cfg(unix)]
-#[test]
-fn overlong_socket_path_fails_with_a_clear_error() {
-	let tmp = tempfile::tempdir().unwrap();
-	let dir = tmp.path().join("d".repeat(120));
-	std::fs::create_dir(&dir).unwrap();
-	let rt = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let err = rt
-		.block_on(async { LocalListener::start(&dir, ME.into(), Arc::new(Echo)) })
-		.unwrap_err();
-	assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-	assert!(err.to_string().contains("PI_CONFIG_DIR"), "{err}");
 }

@@ -31,6 +31,7 @@ export const EditSession = nativeBindings.EditSession ?? missingNativeClass("Edi
 export const EditStore = nativeBindings.EditStore ?? missingNativeClass("EditStore");
 export const FileLock = nativeBindings.FileLock ?? missingNativeClass("FileLock");
 export const HighlightStream = nativeBindings.HighlightStream ?? missingNativeClass("HighlightStream");
+export const InstanceHost = nativeBindings.InstanceHost ?? missingNativeClass("InstanceHost");
 export const IpcConnection = nativeBindings.IpcConnection ?? missingNativeClass("IpcConnection");
 export const IpcServer = nativeBindings.IpcServer ?? missingNativeClass("IpcServer");
 export const LineMatcher = nativeBindings.LineMatcher ?? missingNativeClass("LineMatcher");

@@ -1,4 +1,15 @@
 //! Client side: one request line, one response line.
+//!
+//! Before the bearer token is sent, the client verifies the server: its OS
+//! user must be ours (peer uid on Unix, the server process's token user on
+//! Windows) and, on Windows, the pipe's server process must be the entry's
+//! `pid`. Only the same OS user can therefore receive the token or a request,
+//! which is why requests are not sealed.
+//!
+//! Windows caveat: a non-elevated process cannot open an elevated server's
+//! process token, so it cannot verify (and therefore neither lists nor
+//! reaches) an elevated instance's pipe. Instances meant to see each other
+//! must run at the same elevation.
 
 use std::time::Duration;
 

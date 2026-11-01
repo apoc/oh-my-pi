@@ -1,4 +1,4 @@
-//! Length-prefixed frames shared by the local and LAN transports:
+//! Length-prefixed frames of the LAN transport:
 //! `[u32 big-endian payload length][payload]`.
 //!
 //! The declared length is checked against the caller's cap before anything

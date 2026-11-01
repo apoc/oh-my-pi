@@ -284,6 +284,36 @@ export declare class HighlightStream {
   push(chunk: string): string
 }
 
+/**
+ * A same-machine instance.
+ *
+ * Nothing is bound or written until a namespace registers (e.g. a
+ * `MeshNode` with a local side); the entry then lives until `close()` /
+ * `withdrawSync()`. A closed host is terminal: later registrations fail.
+ */
+export declare class InstanceHost {
+  /** A host publishing into `opts.dir`. */
+  constructor(opts: InstanceHostOptions)
+  /**
+   * This process's host in `dir`, created with a random id on the first
+   * call. Throws when a later call names a different directory.
+   */
+  static shared(dir: string): InstanceHost
+  get instanceId(): string
+  /** Registry directory. */
+  get dir(): string
+  /**
+   * Withdraw the entry, stop the listener and remove the endpoint.
+   * Idempotent.
+   */
+  close(): Promise<void>
+  /**
+   * `close()` for exit handlers: removes the entry, the socket and its
+   * bind lock synchronously and leaves the host closed.
+   */
+  withdrawSync(): void
+}
+
 /** One accepted or dialed IPC connection. */
 export declare class IpcConnection {
   /**
@@ -2611,6 +2641,13 @@ export interface InlineSloppyRegion {
  */
 export declare function installSqliteLockShim(): boolean
 
+export interface InstanceHostOptions {
+  /** Registry directory (created owner-only on the first registration). */
+  dir: string
+  /** 16 lowercase ASCII letters or digits; random when omitted. */
+  instanceId?: string
+}
+
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
   /**
@@ -2984,8 +3021,11 @@ export interface MeshConfig {
 
 /**
  * Derive the stored mesh key (unpadded base64url, 32 bytes) from a
- * passphrase: NFC-normalized, surrounding whitespace trimmed, PBKDF2-SHA256
- * 600k. Rejects a blank passphrase or one shorter than 12 characters.
+ * passphrase.
+ *
+ * The phrase is NFC-normalized and trimmed, then stretched with
+ * PBKDF2-SHA256 (600k rounds). Rejects a blank passphrase or one shorter
+ * than 12 characters.
  */
 export declare function meshDeriveKey(passphrase: string): Promise<string>
 
@@ -3003,12 +3043,15 @@ export interface MeshEvent {
 }
 
 export interface MeshNodeOptions {
-  /** Fresh random id when omitted. */
-  instanceId?: string
+  /**
+   * Same-machine instance: supplies the node's instance id and registry
+   * directory; the local side serves the `mesh` namespace on it. Closing
+   * the node leaves the host open.
+   */
+  host: InstanceHost
   displayName: string
-  host: string
-  /** Local registry directory (tests); `~/.omp/run/mesh` when omitted. */
-  registryDir?: string
+  /** Machine host name sent in envelopes. */
+  hostName: string
 }
 
 export interface MeshPeerInfo {

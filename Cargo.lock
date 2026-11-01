@@ -6464,10 +6464,9 @@ dependencies = [
  "base64 0.23.1",
  "dns-lookup",
  "if-addrs",
- "libc",
  "mdns-sd",
  "parking_lot",
- "pi-ipc",
+ "pi-instances",
  "ring",
  "serde",
  "serde_json",
@@ -6475,7 +6474,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "unicode-normalization",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6530,6 +6528,7 @@ dependencies = [
  "pi-builtins",
  "pi-diff",
  "pi-edit",
+ "pi-instances",
  "pi-ipc",
  "pi-iso",
  "pi-mesh",

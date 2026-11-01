@@ -5,8 +5,6 @@
 //!            (stored as unpadded base64url in `mesh.key`)
 //! mesh key   -HKDF-SHA256 (salt "omp-mesh/v1")-> info "mesh-group": 8-byte public group tag (hex)
 //!                                             -> info "mesh-seal":  AES-256-GCM key (LAN)
-//! local token (32 random bytes from the owner-only registry)
-//!            -HKDF-SHA256 (salt "omp-mesh/v1")-> info "mesh-local-seal": AES-256-GCM key (loopback)
 //! ```
 //!
 //! Sealed layout: `[12-byte random nonce][ciphertext][16-byte GCM tag]`.
@@ -41,7 +39,6 @@ const GROUP_TAG_BYTES: usize = 8;
 const GCM_TAG_BYTES: usize = 16;
 const INFO_GROUP: &[u8] = b"mesh-group";
 const INFO_SEAL: &[u8] = b"mesh-seal";
-const INFO_LOCAL_SEAL: &[u8] = b"mesh-local-seal";
 /// Bytes `seal` adds on top of the plaintext.
 pub const SEAL_OVERHEAD: usize = NONCE_LEN + GCM_TAG_BYTES;
 
@@ -104,12 +101,6 @@ impl SealKey {
 			.map(UnboundKey::from)
 			.expect("HKDF output length fits AES-256");
 		Self { key: LessSafeKey::new(key), rng: SystemRandom::new() }
-	}
-
-	/// The loopback transport key for a registry bearer token.
-	pub fn for_local_token(token: &[u8]) -> Self {
-		let prk = hkdf::Salt::new(HKDF_SHA256, KDF_SALT).extract(token);
-		Self::expand(&prk, INFO_LOCAL_SEAL)
 	}
 
 	/// Append `[nonce][seal(plain)][tag]` to `out` (one copy of `plain`).

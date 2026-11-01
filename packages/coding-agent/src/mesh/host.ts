@@ -9,6 +9,7 @@ import type { MeshConfig } from "@oh-my-pi/pi-natives";
 import { logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { cfgCollabDisplayName } from "../collab/settings";
 import type { ScopeLike } from "../config/registry";
+import { sharedInstanceHost } from "../instances";
 import type { AgentSession } from "../session/agent-session";
 import type { MeshUiHooks } from "./bridge";
 import { MeshFrontend } from "./inbound";
@@ -73,12 +74,6 @@ export function meshConfigFromSettings(settings: ScopeLike): MeshConfig {
 	};
 }
 
-/**
- * This process's mesh instance id, minted by the first engine and reused by every later one
- * (mesh disabled and re-enabled, ACP host replaced): peers key threads and replies on it.
- */
-let processInstanceId: string | undefined;
-
 export function startMeshHost(options: MeshHostOptions): MeshHostHandle {
 	return new MeshHost(options);
 }
@@ -96,7 +91,8 @@ class MeshHost implements MeshHostHandle {
 	constructor(options: MeshHostOptions) {
 		this.#session = options.session;
 		this.#ui = options.ui;
-		// Signals and fatal exits: withdraw the registry entry and send the mDNS goodbye.
+		// Signals and fatal exits: drop the `mesh` capability and send the mDNS goodbye (the shared
+		// instance host's own exit hook withdraws the registry entry).
 		this.#cancelPostmortem = postmortem.register("mesh-host", () => this.dispose(), { exitOnly: true });
 		this.#listen();
 		this.#enqueue(() => this.#reconcile());
@@ -183,9 +179,10 @@ class MeshHost implements MeshHostHandle {
 
 	#start(displayName: string): RunningMesh {
 		const host = os.hostname();
-		// The previous engine (if any) is fully closed before a new one starts: ops are serialized.
-		const engine = new NativeMeshEngine({ instanceId: processInstanceId, displayName, host });
-		processInstanceId = engine.instanceId;
+		// The previous engine (if any) is fully closed before a new one starts: ops are serialized. Every
+		// engine serves the process's shared instance host, so the instance id stays the same across
+		// restarts (peers key threads and replies on it).
+		const engine = new NativeMeshEngine({ host: sharedInstanceHost(), displayName, hostName: host });
 		const running: RunningMesh = {
 			engine,
 			identity: { instanceId: engine.instanceId, displayName, host, startedAt: Date.now() },

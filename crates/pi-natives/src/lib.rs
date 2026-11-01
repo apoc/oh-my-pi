@@ -43,6 +43,8 @@ pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
 pub mod html;
+/// Same-machine instance host (`pi_instances`) shared by its namespaces.
+pub mod instances;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;
 pub mod js;

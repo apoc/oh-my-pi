@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { MeshEngineError } from "../../src/mesh/engine";
 import { NativeMeshEngine } from "../../src/mesh/native-engine";
@@ -30,12 +31,17 @@ function snapshotOf(engine: NativeMeshEngine, displayName: string): MeshSnapshot
 	};
 }
 
-/** Two engines sharing a private local registry, configured `local`, each serving a snapshot. */
+/** Two engines on their own instance hosts in one private registry, configured `local`, each serving a snapshot. */
 async function pair(): Promise<[NativeMeshEngine, NativeMeshEngine]> {
 	const registryDir = TempDir.createSync("@pi-mesh-engine-");
 	cleanups.push(() => registryDir.removeSync());
-	const a = new NativeMeshEngine({ displayName: "alice", host: "box", registryDir: registryDir.path() });
-	const b = new NativeMeshEngine({ displayName: "bob", host: "box", registryDir: registryDir.path() });
+	const hostA = new InstanceHost({ dir: registryDir.path() });
+	const hostB = new InstanceHost({ dir: registryDir.path() });
+	cleanups.push(() => hostA.close());
+	cleanups.push(() => hostB.close());
+	const a = new NativeMeshEngine({ host: hostA, displayName: "alice", hostName: "box" });
+	const b = new NativeMeshEngine({ host: hostB, displayName: "bob", hostName: "box" });
+	expect(a.instanceId).toBe(hostA.instanceId);
 	cleanups.push(() => a.close());
 	cleanups.push(() => b.close());
 	a.setSnapshot(snapshotOf(a, "alice"));

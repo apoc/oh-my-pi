@@ -1,4 +1,4 @@
-//! The sealed request/response protocol shared by both transports.
+//! The sealed request/response protocol of the LAN transport.
 //!
 //! Request frame: `[u16 BE header length][header][seal(envelope JSON,
 //! AAD_req)]` where `header` is the JSON array `[v, msgId, sentAt, from, to]`
@@ -47,28 +47,12 @@ pub(super) const MAX_RESPONSE_FRAME: usize = 1 + MAX_ENVELOPE_BYTES + SEAL_OVERH
 /// Plaintext routing header: `[v, msgId, sentAt, from, to]`.
 type Header = (u32, String, u64, String, String);
 
-/// Where a server's key comes from.
-pub(super) enum ServerKey {
-	Mesh(Arc<MeshKeys>),
-	Local(Box<SealKey>),
-}
-
-impl ServerKey {
-	fn get(&self) -> &SealKey {
-		match self {
-			Self::Mesh(keys) => keys.seal_key(),
-			Self::Local(key) => key,
-		}
-	}
-}
-
 /// Per-listener state.
 pub(super) struct Server {
 	pub instance_id: String,
-	pub key:         ServerKey,
+	pub keys:        Arc<MeshKeys>,
 	pub guard:       Arc<Mutex<ReplayGuard>>,
 	pub sink:        Arc<dyn InboundSink>,
-	pub origin:      OriginKind,
 }
 
 fn now_ms() -> u64 {
@@ -92,7 +76,7 @@ fn addressed_to_us(to: &str, instance_id: &str) -> bool {
 	to == instance_id || to == ANY_INSTANCE
 }
 
-pub(super) async fn serve<S: Conn>(mut stream: S, peer: Option<SocketAddr>, server: Arc<Server>) {
+pub(super) async fn serve<S: Conn>(mut stream: S, peer: SocketAddr, server: Arc<Server>) {
 	let mut frame =
 		match read_frame_timeout(&mut stream, MAX_FRAME_BYTES, REQUEST_READ_TIMEOUT).await {
 			Ok(Some(frame)) => frame,
@@ -118,7 +102,7 @@ pub(super) async fn serve<S: Conn>(mut stream: S, peer: Option<SocketAddr>, serv
 	if !addressed_to_us(&to, &server.instance_id) {
 		return reply(&mut stream, &[STATUS_MISDIRECTED]).await;
 	}
-	let key = server.key.get();
+	let key = server.keys.seal_key();
 	let Some(plain) = key.open_in_place(sealed, &request_aad(raw_header)) else {
 		return reply(&mut stream, &[STATUS_REJECTED]).await;
 	};
@@ -143,7 +127,7 @@ pub(super) async fn serve<S: Conn>(mut stream: S, peer: Option<SocketAddr>, serv
 					MeshResponse::error(MeshErrorCode::Unauthorized, "replayed mesh message")
 				},
 				ReplayVerdict::Ok => {
-					let origin = Origin { kind: server.origin, addr: peer };
+					let origin = Origin { kind: OriginKind::Remote, addr: Some(peer) };
 					dispatch(&*server.sink, env, origin).await
 				},
 			}

@@ -6,7 +6,7 @@
 //! code-prefixed rejections (`unreachable:`, `timeout:`, `bad_response:`,
 //! `aborted:`).
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use napi::{
 	Env, Error, Result, Status,
@@ -24,7 +24,7 @@ use pi_mesh::{
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::task;
+use crate::{instances::InstanceHost, task};
 
 /// Weak: an idle mesh never keeps the event loop alive (the callback itself
 /// is still strongly referenced until `close`).
@@ -32,8 +32,11 @@ type EventCallback =
 	ThreadsafeFunction<MeshEvent, UnknownReturnValue, MeshEvent, Status, false, true>;
 
 /// Derive the stored mesh key (unpadded base64url, 32 bytes) from a
-/// passphrase: NFC-normalized, surrounding whitespace trimmed, PBKDF2-SHA256
-/// 600k. Rejects a blank passphrase or one shorter than 12 characters.
+/// passphrase.
+///
+/// The phrase is NFC-normalized and trimmed, then stretched with
+/// PBKDF2-SHA256 (600k rounds). Rejects a blank passphrase or one shorter
+/// than 12 characters.
 #[napi(js_name = "meshDeriveKey", ts_return_type = "Promise<string>")]
 pub fn mesh_derive_key(passphrase: String) -> AsyncTask<task::Blocking<String>> {
 	task::blocking("mesh_derive_key", (), move |_| {
@@ -41,14 +44,15 @@ pub fn mesh_derive_key(passphrase: String) -> AsyncTask<task::Blocking<String>> 
 	})
 }
 
-#[napi(object)]
-pub struct MeshNodeOptions {
-	/// Fresh random id when omitted.
-	pub instance_id:  Option<String>,
+#[napi(object, object_to_js = false)]
+pub struct MeshNodeOptions<'env> {
+	/// Same-machine instance: supplies the node's instance id and registry
+	/// directory; the local side serves the `mesh` namespace on it. Closing
+	/// the node leaves the host open.
+	pub host:         ClassInstance<'env, InstanceHost>,
 	pub display_name: String,
-	pub host:         String,
-	/// Local registry directory (tests); `~/.omp/run/mesh` when omitted.
-	pub registry_dir: Option<String>,
+	/// Machine host name sent in envelopes.
+	pub host_name:    String,
 }
 
 #[napi(object)]
@@ -211,9 +215,9 @@ impl MeshNode {
 	/// is never garbage-collected. "Weak" applies only to the event loop: an
 	/// idle node does not keep the process alive.
 	#[napi(factory, ts_args_type = "opts: MeshNodeOptions, onEvent: (event: MeshEvent) => void")]
-	pub fn create(
-		opts: MeshNodeOptions,
-		on_event: Function<'_, MeshEvent, UnknownReturnValue>,
+	pub fn create<'env>(
+		opts: MeshNodeOptions<'env>,
+		on_event: Function<'env, MeshEvent, UnknownReturnValue>,
 	) -> Result<Self> {
 		let callback: EventCallback = on_event
 			.build_threadsafe_function()
@@ -222,13 +226,11 @@ impl MeshNode {
 			.build()?;
 		let (tx, mut rx) = mpsc::unbounded_channel();
 		let options = NodeOptions {
-			instance_id:  opts.instance_id,
+			host:         Arc::clone(opts.host.inner()),
 			display_name: opts.display_name,
-			host:         opts.host,
-			registry_dir: opts.registry_dir.map(PathBuf::from),
+			host_name:    opts.host_name,
 		};
-		let node =
-			within_runtime_if_available(|| node::MeshNode::new(options, tx)).map_err(invalid_arg)?;
+		let node = within_runtime_if_available(|| node::MeshNode::new(options, tx));
 		let pump = spawn(async move {
 			while let Some(event) = rx.recv().await {
 				callback.call(to_js_event(event), ThreadsafeFunctionCallMode::NonBlocking);

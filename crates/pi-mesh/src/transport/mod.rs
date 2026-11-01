@@ -1,27 +1,27 @@
-//! Request/response transports: one connection per request, one frame each
-//! way ([`crate::frame`]).
+//! Request/response transports: one connection per request.
 //!
-//! Connections are Unix sockets or named pipes locally and TCP on the LAN.
-//! Both transports speak the same sealed protocol ([`sealed`]) and differ only
-//! in the key and the endpoint:
+//! - [`instance`]: same machine. The node serves the `mesh` namespace of its
+//!   [`pi_instances::InstanceHost`] (one long-lived Unix socket inside the
+//!   owner-only instance registry, or a current-user-only named pipe on
+//!   Windows), so other accounts cannot even connect. A request is
+//!   `mesh.envelope` with the envelope as body, authenticated by the bearer
+//!   token from the registry; it is not sealed.
+//! - [`lan`]: LAN listener over TCP, one length-prefixed frame each way
+//!   ([`crate::frame`]), sealed with a key derived from the shared mesh key
+//!   ([`sealed`]).
 //!
-//! - [`local`]: same-machine listener on a Unix socket inside the owner-only
-//!   registry directory, or a current-user-only named pipe on Windows, so other
-//!   accounts cannot even connect; key derived from the bearer token in the
-//!   registry (the token never travels).
-//! - [`lan`]: LAN listener; key derived from the shared mesh key.
-//!
-//! Response frame payload: `[status byte][body]`. Only [`STATUS_OK`] carries a
-//! body (a sealed [`MeshResponse`]). The other statuses answer requests that
-//! never authenticated and reveal nothing secret: [`STATUS_REJECTED`] (bad
-//! key, or a malformed pre-auth frame), [`STATUS_MISDIRECTED`] (the endpoint
-//! now serves another instance), [`STATUS_TOO_LARGE`] (request frame over the
-//! cap), [`STATUS_BUSY`] (connection limits reached). They are not
-//! authenticated, so an on-path attacker can forge them (denial of service
-//! only).
+//! LAN response frame payload: `[status byte][body]`. Only [`STATUS_OK`]
+//! carries a body (a sealed [`MeshResponse`]). The other statuses answer
+//! requests that never authenticated and reveal nothing secret:
+//! [`STATUS_REJECTED`] (bad key, or a malformed pre-auth frame),
+//! [`STATUS_MISDIRECTED`] (the endpoint now serves another instance),
+//! [`STATUS_TOO_LARGE`] (request frame over the cap), [`STATUS_BUSY`]
+//! (connection limits reached). They are not authenticated, so an on-path
+//! attacker can forge them (denial of service only). The local side gets the
+//! same outcomes from `pi-instances` error codes (`instance::map_outcome`).
 
+pub mod instance;
 pub mod lan;
-pub mod local;
 mod sealed;
 #[cfg(test)]
 mod tests;
@@ -29,7 +29,6 @@ mod tests;
 use std::{
 	collections::HashMap,
 	future::Future,
-	io,
 	net::{IpAddr, SocketAddr},
 	pin::Pin,
 	sync::Arc,
@@ -37,6 +36,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use pi_instances::InstanceEntry;
 use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
 	net::{TcpListener, TcpStream},
@@ -47,7 +47,7 @@ use tokio::{
 use crate::{
 	error::FrameError,
 	frame::{MAX_FRAME_BYTES, read_frame, write_frame},
-	keys::{MeshKeys, SealKey},
+	keys::MeshKeys,
 	protocol::{MAX_ENVELOPE_BYTES, MeshEnvelope, MeshErrorCode, MeshResponse},
 };
 
@@ -68,17 +68,23 @@ pub const HANDLER_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`STATUS_BUSY`].
 pub const MAX_CONNECTIONS: usize = 64;
 /// Concurrent connections per source IP on the LAN listener, counted before a
-/// global slot is taken, so one host cannot occupy every slot. Not applied
-/// on loopback, where every peer shares 127.0.0.1.
+/// global slot is taken, so one host cannot occupy every slot.
 pub const MAX_CONNECTIONS_PER_IP: usize = 8;
 
+/// `unauthorized` text when a peer rejects our key or token.
+const REJECTED_TEXT: &str = "mesh peer rejected our credentials";
+/// `too_large` text when a peer refuses an oversized request.
+const TOO_LARGE_TEXT: &str = "mesh peer rejected an oversized request";
+/// `busy` text when a peer is at its connection limit.
+const BUSY_TEXT: &str = "mesh peer has too many open connections";
+
 /// Where a peer listens.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
-	/// Same machine: Unix socket path or Windows pipe name, bearer token (64
-	/// hex chars) and owner pid, all from the registry. On Windows a pipe
-	/// served by another process is treated as misdirected.
-	Local { path: String, token: String, pid: u32 },
+	/// Same machine: the peer's entry in the instance registry (endpoint,
+	/// bearer token, owner pid). On Windows a pipe served by another process
+	/// is treated as misdirected.
+	Local(InstanceEntry),
 	/// LAN listener; needs the mesh key.
 	Remote { addr: SocketAddr },
 }
@@ -103,9 +109,9 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 /// Receives every authenticated, validated envelope addressed to this
 /// instance (or `*` + `snapshot`).
 ///
-/// Transports already checked: key, envelope shape and caps, recipient, and
-/// the replay window. Everything else — hop, blocked senders, rate limits,
-/// dispatch — is the sink's job.
+/// Transports already checked: key (LAN) or token (local), envelope shape and
+/// caps, recipient, and (LAN) the replay window. Everything else — hop,
+/// blocked senders, rate limits, dispatch — is the sink's job.
 pub trait InboundSink: Send + Sync + 'static {
 	fn handle(&self, envelope: MeshEnvelope, origin: Origin) -> BoxFuture<MeshResponse>;
 }
@@ -154,7 +160,7 @@ impl MeshClient {
 	/// abort.
 	///
 	/// Envelopes over [`MAX_ENVELOPE_BYTES`] resolve to `too_large` without
-	/// contacting the peer; a peer rejecting our key resolves to
+	/// contacting the peer; a peer rejecting our key or token resolves to
 	/// `unauthorized`; a full peer to `busy`.
 	///
 	/// # Errors
@@ -165,9 +171,9 @@ impl MeshClient {
 		envelope: &MeshEnvelope,
 		timeout: Duration,
 	) -> Result<MeshResponse, TransportError> {
-		let json = serde_json::to_vec(envelope)
+		let json = serde_json::value::to_raw_value(envelope)
 			.map_err(|e| TransportError::BadResponse(format!("cannot encode envelope: {e}")))?;
-		if json.len() > MAX_ENVELOPE_BYTES {
+		if json.get().len() > MAX_ENVELOPE_BYTES {
 			return Ok(MeshResponse::error(
 				MeshErrorCode::TooLarge,
 				format!("mesh envelope exceeds {MAX_ENVELOPE_BYTES} bytes"),
@@ -175,19 +181,13 @@ impl MeshClient {
 		}
 		tokio::time::timeout(timeout, async {
 			match endpoint {
-				Endpoint::Local { path, token, pid } => {
-					let token = local::parse_token(token).ok_or_else(|| {
-						TransportError::Unreachable("malformed local mesh token".into())
-					})?;
-					let key = SealKey::for_local_token(&token);
-					let stream = local::connect(path, *pid).await?;
-					sealed::request(stream, &key, envelope, &json).await
-				},
+				Endpoint::Local(entry) => instance::request(entry, &json, timeout).await,
 				Endpoint::Remote { addr } => {
 					let keys = self.keys.as_deref().ok_or_else(|| {
 						TransportError::Unreachable("remote mesh side has no key".into())
 					})?;
-					sealed::request(connect(*addr).await?, keys.seal_key(), envelope, &json).await
+					let stream = connect(*addr).await?;
+					sealed::request(stream, keys.seal_key(), envelope, json.get().as_bytes()).await
 				},
 			}
 		})
@@ -230,19 +230,14 @@ async fn exchange<S: Conn>(
 	let _ = stream.shutdown().await;
 	match frame.first().copied() {
 		Some(STATUS_OK) => Ok(Ok(frame)),
-		Some(STATUS_REJECTED) => Ok(Err(MeshResponse::error(
-			MeshErrorCode::Unauthorized,
-			"mesh peer rejected our credentials",
-		))),
+		Some(STATUS_REJECTED) => {
+			Ok(Err(MeshResponse::error(MeshErrorCode::Unauthorized, REJECTED_TEXT)))
+		},
 		Some(STATUS_MISDIRECTED) => Err(TransportError::Misdirected),
-		Some(STATUS_TOO_LARGE) => Ok(Err(MeshResponse::error(
-			MeshErrorCode::TooLarge,
-			"mesh peer rejected an oversized request",
-		))),
-		Some(STATUS_BUSY) => Ok(Err(MeshResponse::error(
-			MeshErrorCode::Busy,
-			"mesh peer has too many open connections",
-		))),
+		Some(STATUS_TOO_LARGE) => {
+			Ok(Err(MeshResponse::error(MeshErrorCode::TooLarge, TOO_LARGE_TEXT)))
+		},
+		Some(STATUS_BUSY) => Ok(Err(MeshResponse::error(MeshErrorCode::Busy, BUSY_TEXT))),
 		Some(other) => {
 			Err(TransportError::BadResponse(format!("unknown mesh response status {other}")))
 		},
@@ -350,46 +345,25 @@ impl Drop for IpSlot {
 	}
 }
 
-/// A connection byte stream (TCP, Unix socket, named pipe).
+/// A connection byte stream (TCP).
 pub(crate) trait Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Conn for T {}
 
-/// Source of accepted connections for [`Listener`].
-trait Acceptor: Send + 'static {
-	type Stream: Conn;
-	/// The next connection and, for TCP, its source address.
-	fn accept(
-		&mut self,
-	) -> impl Future<Output = io::Result<(Self::Stream, Option<SocketAddr>)>> + Send;
-}
-
-impl Acceptor for TcpListener {
-	type Stream = TcpStream;
-
-	async fn accept(&mut self) -> io::Result<(TcpStream, Option<SocketAddr>)> {
-		let (stream, peer) = Self::accept(self).await?;
-		// Best effort: one small frame each way.
-		let _ = stream.set_nodelay(true);
-		Ok((stream, Some(peer)))
-	}
-}
-
-/// An accept loop serving each connection on its own task: at most
-/// `per_ip` per TCP source address (when set) and [`MAX_CONNECTIONS`] in
-/// total. Refused connections get [`STATUS_BUSY`] from at most
-/// [`MAX_BUSY_REPLIES`] short-lived tasks and are dropped beyond that.
-/// Dropping or closing the listener stops accepting and aborts in-flight
-/// connections, so the sink is never called afterwards.
+/// An accept loop serving each TCP connection on its own task: at most
+/// `per_ip` per source address and [`MAX_CONNECTIONS`] in total. Refused
+/// connections get [`STATUS_BUSY`] from at most [`MAX_BUSY_REPLIES`]
+/// short-lived tasks and are dropped beyond that. Dropping or closing the
+/// listener stops accepting and aborts in-flight connections, so the sink is
+/// never called afterwards.
 #[derive(Debug)]
 struct Listener {
 	task: JoinHandle<()>,
 }
 
 impl Listener {
-	fn spawn<A, F, Fut>(mut acceptor: A, per_ip: Option<usize>, serve: F) -> Self
+	fn spawn<F, Fut>(listener: TcpListener, per_ip: usize, serve: F) -> Self
 	where
-		A: Acceptor,
-		F: Fn(A::Stream, Option<SocketAddr>) -> Fut + Send + Sync + 'static,
+		F: Fn(TcpStream, SocketAddr) -> Fut + Send + Sync + 'static,
 		Fut: Future<Output = ()> + Send + 'static,
 	{
 		let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -399,17 +373,17 @@ impl Listener {
 			let mut connections = JoinSet::new();
 			loop {
 				while connections.try_join_next().is_some() {}
-				let Ok((stream, peer)) = acceptor.accept().await else {
+				let Ok((stream, peer)) = listener.accept().await else {
 					// Transient (e.g. out of file descriptors): back off, keep
 					// serving.
 					tokio::time::sleep(Duration::from_millis(50)).await;
 					continue;
 				};
-				let ip_slot = per_ip
-					.zip(peer)
-					.map(|(max, peer)| ip_slots.acquire(peer.ip(), max));
+				// Best effort: one small frame each way.
+				let _ = stream.set_nodelay(true);
+				let ip_slot = ip_slots.acquire(peer.ip(), per_ip);
 				let permit = Arc::clone(&permits).try_acquire_owned();
-				let (Ok(permit), None | Some(Some(_))) = (permit, &ip_slot) else {
+				let (Ok(permit), Some(ip_slot)) = (permit, ip_slot) else {
 					// Refuse: bounded tasks answer `busy`; beyond that, just drop.
 					if let Ok(busy) = Arc::clone(&busy_permits).try_acquire_owned() {
 						connections.spawn(async move {

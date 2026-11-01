@@ -19,6 +19,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
+use pi_instances::InstanceEntry;
 use serde::Serialize;
 
 use crate::transport::Endpoint;
@@ -72,19 +73,6 @@ pub enum PeerState {
 	Stale,
 }
 
-/// A same-machine endpoint (Unix socket path / named pipe) from the local
-/// registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalEndpoint {
-	pub instance_id: String,
-	pub path:        String,
-	pub token:       String,
-	/// Owning process (Windows checks the pipe server against it).
-	pub pid:         u32,
-	/// Registry entry creation time (identifies the entry for pruning).
-	pub created_at:  u64,
-}
-
 /// LAN endpoint learned from mDNS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdnsEndpoint {
@@ -112,7 +100,8 @@ pub struct PeerInfo {
 
 #[derive(Debug, Default)]
 struct Peer {
-	local:          Option<LocalEndpoint>,
+	/// Registry entry (Unix socket / named pipe) of a same-machine instance.
+	local:          Option<InstanceEntry>,
 	/// Verified mDNS route.
 	mdns:           Option<MdnsEndpoint>,
 	/// Announced but not yet verified mDNS address.
@@ -270,14 +259,18 @@ impl PeerTable {
 
 	/// Replaces the local endpoints with a fresh registry listing. Returns the
 	/// overall change and the ids that became locally reachable.
+	///
+	/// An entry is a new endpoint only when its `(endpoint, token)` changed
+	/// (a new listener); a rewrite of the same publication (e.g. its
+	/// `capabilities`) is kept without counting as a change.
 	pub fn set_local_listing(
 		&mut self,
-		listing: &[LocalEndpoint],
+		listing: &[InstanceEntry],
 		now_ms: u64,
 	) -> (bool, Vec<String>) {
 		let mut changed = false;
 		let mut fresh = Vec::new();
-		let listed: HashMap<&str, &LocalEndpoint> = listing
+		let listed: HashMap<&str, &InstanceEntry> = listing
 			.iter()
 			.filter(|e| e.instance_id != self.own_id)
 			.map(|e| (e.instance_id.as_str(), e))
@@ -296,27 +289,31 @@ impl PeerTable {
 				continue;
 			};
 			peer.seen(now_ms);
-			if peer.local.as_ref() != Some(ep) {
-				peer.local = Some(ep.clone());
+			let same = peer
+				.local
+				.as_ref()
+				.is_some_and(|cur| cur.endpoint == ep.endpoint && cur.token == ep.token);
+			if !same {
 				fresh.push(id.to_owned());
 				changed = true;
 			}
+			peer.local = Some(ep.clone());
 		}
 		(changed, fresh)
 	}
 
 	/// Forgets `id`'s local endpoint (unlisted) and returns it.
-	pub fn drop_local(&mut self, id: &str) -> Option<LocalEndpoint> {
+	pub fn drop_local(&mut self, id: &str) -> Option<InstanceEntry> {
 		let local = self.peers.get_mut(id)?.local.take()?;
 		self.prune(id);
 		Some(local)
 	}
 
-	/// Forgets `id`'s local endpoint only if it is still the one at `path`
-	/// with `token` (a concurrent re-listing may have replaced it).
-	pub fn drop_local_if(&mut self, id: &str, path: &str, token: &str) -> Option<LocalEndpoint> {
+	/// Forgets `id`'s local endpoint only if it is still the one at
+	/// `endpoint` with `token` (a concurrent re-listing may have replaced it).
+	pub fn drop_local_if(&mut self, id: &str, endpoint: &str, token: &str) -> Option<InstanceEntry> {
 		let current = self.peers.get(id)?.local.as_ref()?;
-		if current.path != path || current.token != token {
+		if current.endpoint != endpoint || current.token != token {
 			return None;
 		}
 		self.drop_local(id)
@@ -583,11 +580,7 @@ impl PeerTable {
 	pub fn route(&self, id: &str, local_on: bool, remote_on: bool) -> Option<Endpoint> {
 		let peer = self.peers.get(id)?;
 		if local_on && let Some(local) = &peer.local {
-			return Some(Endpoint::Local {
-				path:  local.path.clone(),
-				token: local.token.clone(),
-				pid:   local.pid,
-			});
+			return Some(Endpoint::Local(local.clone()));
 		}
 		if remote_on {
 			return peer.remote_addr().map(|addr| Endpoint::Remote { addr });
@@ -665,18 +658,20 @@ mod tests {
 	const OWN: &str = "0000000000000000";
 	const P: &str = "1111111111111111";
 
-	fn local(id: &str, n: u16) -> LocalEndpoint {
-		LocalEndpoint {
-			instance_id: id.into(),
-			path:        format!("sock{n}"),
-			token:       "t".into(),
-			pid:         1,
-			created_at:  1,
+	fn local(id: &str, n: u16) -> InstanceEntry {
+		InstanceEntry {
+			instance_id:  id.into(),
+			pid:          1,
+			nonce:        "0".repeat(16),
+			endpoint:     format!("sock{n}"),
+			token:        "t".into(),
+			created_at:   1,
+			capabilities: vec!["mesh".into()],
 		}
 	}
 
 	fn lo(n: u16) -> Endpoint {
-		Endpoint::Local { path: format!("sock{n}"), token: "t".into(), pid: 1 }
+		Endpoint::Local(local(P, n))
 	}
 
 	fn re(addr: &str) -> Endpoint {
@@ -759,6 +754,24 @@ mod tests {
 		assert!(t.drop_local_if(P, "sock2", "other").is_none(), "different token");
 		assert!(t.drop_local_if(P, "sock2", "t").is_some());
 		assert!(!t.contains(P));
+	}
+
+	#[test]
+	fn local_listing_compares_endpoint_and_token_only() {
+		let mut t = PeerTable::new(OWN);
+		assert_eq!(t.set_local_listing(&[local(P, 1)], 1), (true, vec![P.to_owned()]));
+		let mut rewritten = local(P, 1);
+		rewritten.capabilities.push("collab".into());
+		rewritten.created_at = 2;
+		assert_eq!(t.set_local_listing(&[rewritten], 2), (false, vec![]), "same publication");
+		let mut rotated = local(P, 1);
+		rotated.token = "u".into();
+		assert_eq!(t.set_local_listing(&[rotated], 3), (true, vec![P.to_owned()]), "new token");
+		assert_eq!(
+			t.set_local_listing(&[local(P, 2)], 4),
+			(true, vec![P.to_owned()]),
+			"new endpoint"
+		);
 	}
 
 	#[test]

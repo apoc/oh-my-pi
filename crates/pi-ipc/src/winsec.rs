@@ -1,8 +1,8 @@
 //! Windows security helpers for named pipes and owner-only directories.
 //!
 //! The user of a process token, and security descriptors granting only the
-//! current user: for this crate's IPC pipes, `pi-mesh`'s registry directory
-//! (owner and protected inherited DACL) and its local transport's named pipe.
+//! current user: for this crate's IPC pipes and owner-only directories (owner
+//! and protected inherited DACL).
 
 use std::{
 	fs, io, iter,
@@ -143,11 +143,10 @@ impl Descriptor {
 	}
 
 	/// Owner: the current user. DACL: protected, full control for the current
-	/// user only; `inherit` adds object/container inheritance.
-	fn current_user_only(inherit: bool) -> io::Result<Self> {
+	/// user only, inherited by files and subdirectories.
+	fn current_user_only() -> io::Result<Self> {
 		let sid = current_user()?.sid_string()?;
-		let flags = if inherit { "OICI" } else { "" };
-		Self::from_sddl(&format!("O:{sid}D:P(A;{flags};FA;;;{sid})"))
+		Self::from_sddl(&format!("O:{sid}D:P(A;OICI;FA;;;{sid})"))
 	}
 
 	/// `SECURITY_ATTRIBUTES` pointing at this descriptor; valid while `self`
@@ -166,12 +165,6 @@ impl Drop for Descriptor {
 		// SAFETY: allocated by the SDDL conversion; freed exactly once.
 		unsafe { LocalFree(self.0) };
 	}
-}
-
-/// Pipe descriptor: owner and DACL granting only the current user. Used by
-/// `pi-mesh`'s local transport pipe (removed in Phase C).
-pub fn pipe_descriptor() -> io::Result<Descriptor> {
-	Descriptor::current_user_only(false)
 }
 
 /// Make the current user `dir`'s owner, with a protected owner-only DACL.
@@ -193,7 +186,7 @@ pub fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
 			format!("{} is not a real directory", dir.display()),
 		));
 	}
-	let descriptor = Descriptor::current_user_only(true)?;
+	let descriptor = Descriptor::current_user_only()?;
 	let (mut present, mut defaulted) = (0, 0);
 	let mut dacl: *mut ACL = ptr::null_mut();
 	// SAFETY: `descriptor` is a valid self-relative descriptor; outputs are

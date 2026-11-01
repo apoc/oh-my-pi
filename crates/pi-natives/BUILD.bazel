@@ -192,6 +192,7 @@ rust_shared_library(
         "//crates/pi-diff",
         "//crates/pi-edit",
         "//crates/pi-walker",
+        "//crates/pi-instances",
         "//crates/pi-ipc",
         "//crates/pi-iso",
         "//crates/pi-mesh",
