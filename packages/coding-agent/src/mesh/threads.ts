@@ -93,7 +93,7 @@ const recordSchema = type({
 	"+": "reject",
 });
 
-export function isValidMeshThreadId(id: string): boolean {
+function isValidMeshThreadId(id: string): boolean {
 	return THREAD_ID_RE.test(id);
 }
 

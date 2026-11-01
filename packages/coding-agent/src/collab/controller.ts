@@ -13,7 +13,6 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
-import { sharedInstanceHost } from "../instances";
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { CollabHost, CollabHostStoppedError, CollabRelayUnavailableError } from "./host";
@@ -66,11 +65,6 @@ export class CollabController {
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
-	}
-
-	/** Registry identity of every room this process hosts: the shared instance host's id. */
-	get instanceId(): string {
-		return sharedInstanceHost().instanceId;
 	}
 
 	/** The live room for the current session; stale or ending rooms are absent. */

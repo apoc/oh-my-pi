@@ -10,8 +10,6 @@ export const MAX_TEXT_CHARS = 64 * 1024;
 export const MAX_FIELD_CHARS = 1024;
 /** Upper bound for a watch registration lifetime. */
 export const MAX_WATCH_TTL_SEC = 3600;
-/** Envelope `to` for a peer whose instance id is not known yet (static peers before the first snapshot). */
-export const MESH_ANY_INSTANCE = "*";
 
 /** Kinds carried by `op: "message"`. */
 export type MeshMessageKind = "status" | "ask" | "task" | "steer" | "note";
@@ -42,7 +40,7 @@ export interface MeshEnvelope {
 	sentAt: number;
 	hop: number;
 	from: MeshSender;
-	/** Recipient instance id, or {@link MESH_ANY_INSTANCE}. */
+	/** Recipient instance id, or `*` for a peer whose id is not known yet (static peers before the first snapshot). */
 	to: string;
 	body: MeshRequest;
 }

@@ -466,16 +466,12 @@ describe("interactive collaboration startup", () => {
 			expect(this.sessionManager.getSessionFile()).toBe(localFile);
 			expect(this.session.messages).toMatchObject([{ role: "user", content: "dedicated local transcript" }]);
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					host => host.instanceId === this.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(host => host.instanceId === instanceHost.instanceId),
 			).toMatchObject([{ access: "view", generation: 1 }]);
 			await this.session.newSession();
 			await this.collabController.idle();
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					host => host.instanceId === this.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(host => host.instanceId === instanceHost.instanceId),
 			).toMatchObject([{ access: "view", generation: 2, sessionId: this.sessionManager.getSessionId() }]);
 			throw finished;
 		});
@@ -550,9 +546,7 @@ describe("interactive collaboration startup", () => {
 		await local.collabController.idle();
 		expect(local.sessionManager.getSessionFile()).toBe(localFile);
 		expect(
-			(await registry.listCollabHosts({ dir: tmp })).filter(
-				row => row.instanceId === local.collabController.instanceId,
-			),
+			(await registry.listCollabHosts({ dir: tmp })).filter(row => row.instanceId === instanceHost.instanceId),
 		).toEqual([]);
 	});
 
@@ -572,9 +566,7 @@ describe("interactive collaboration startup", () => {
 			expect(local.collabGuest).toBeDefined();
 			expect(local.collabHost).toBeUndefined();
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					h => h.instanceId === local.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(h => h.instanceId === instanceHost.instanceId),
 			).toEqual([]);
 		} finally {
 			gate.resolve();
@@ -934,7 +926,7 @@ describe("CollabController", () => {
 		await settled(publishSpy, 1);
 		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
 		expect(snapshot).toMatchObject({
-			instanceId: controller.instanceId,
+			instanceId: instanceHost.instanceId,
 			generation: 1,
 			access: "control",
 			inputRequired: true,
@@ -973,7 +965,11 @@ describe("CollabController", () => {
 		await settled(publishSpy, 1);
 
 		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
-		expect(snapshot).toMatchObject({ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId });
+		expect(snapshot).toMatchObject({
+			instanceId: instanceHost.instanceId,
+			generation: 1,
+			sessionId: state.sessionId,
+		});
 	});
 
 	it("reports an auto-start failure without throwing into startup", async () => {
@@ -1019,10 +1015,14 @@ describe("CollabController", () => {
 		expect(second).not.toBe(first);
 		const hosts = await registry.listCollabHosts({ dir: tmp });
 		expect(hosts).toHaveLength(1);
-		expect(hosts[0]).toMatchObject({ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId });
+		expect(hosts[0]).toMatchObject({
+			instanceId: instanceHost.instanceId,
+			generation: 2,
+			sessionId: state.sessionId,
+		});
 		// A card that still names generation 1 cannot obtain the new room.
 		await expect(
-			registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp }).then(link => link.generation),
+			registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp }).then(link => link.generation),
 		).resolves.toBe(2);
 		expect(second!.webLink).not.toBe(first.webLink);
 	});
@@ -1048,7 +1048,7 @@ describe("CollabController", () => {
 		// The moved session is shared again and the old registry entry is gone.
 		expect(ctx.collabHost?.sessionId).toBe(state.sessionId);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId },
+			{ instanceId: instanceHost.instanceId, generation: 2, sessionId: state.sessionId },
 		]);
 	});
 
@@ -1076,9 +1076,9 @@ describe("CollabController", () => {
 		if (!viewRoom) throw new Error("view room missing");
 
 		await expect(
-			registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp }),
+			registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp }),
 		).rejects.toMatchObject({ code: "access_unavailable" });
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "view", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "view", { dir: tmp })).url).toBe(
 			viewRoom.webViewLink,
 		);
 
@@ -1090,7 +1090,7 @@ describe("CollabController", () => {
 		const hosts = await registry.listCollabHosts({ dir: tmp });
 		expect(hosts).toHaveLength(1);
 		expect(hosts[0]).toMatchObject({ generation: 2, access: "control" });
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp })).url).toBe(
 			controlRoom.webLink,
 		);
 	});
@@ -1332,7 +1332,7 @@ describe("CollabController", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
 			{ sessionId: "upgraded-session", access: "control" },
 		]);
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp })).url).toBe(
 			room.webLink,
 		);
 	});
@@ -1555,7 +1555,7 @@ describe("CollabController", () => {
 		expect(replacement).not.toBe(first);
 		expect(controller.host).toBe(replacement);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId, access: "control" },
+			{ instanceId: instanceHost.instanceId, generation: 2, sessionId: state.sessionId, access: "control" },
 		]);
 		await joinAsWriter(replacement!);
 	});
@@ -1596,7 +1596,7 @@ describe("CollabController", () => {
 			expect(hostAttempts).toBe(2);
 			expect(controller.host).toBe(ctx.collabHost);
 			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-				{ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
+				{ instanceId: instanceHost.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
 			]);
 		});
 	});
