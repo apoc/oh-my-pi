@@ -3,10 +3,10 @@
  * short-lived engine discovers with the current settings.
  */
 import * as os from "node:os";
-import { meshDeriveKey } from "@oh-my-pi/pi-natives";
+import { meshDeriveKey, meshPassphraseCheck } from "@oh-my-pi/pi-natives";
 import { formatAge } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { MESH_MIN_KEY_PHRASE_CHARS, meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
+import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { Settings } from "../config/settings";
@@ -33,11 +33,11 @@ export async function runMeshSetKeyCommand(): Promise<void> {
 	const tty = process.stdin.isTTY;
 	const phrase = tty ? await promptHidden("Mesh key phrase: ") : ((await Bun.stdin.text()).split(/\r?\n/, 1)[0] ?? "");
 	const key = await meshDeriveKey(phrase);
-	const length = [...phrase.trim()].length;
-	if (length < MESH_MIN_KEY_PHRASE_CHARS) {
+	const check = meshPassphraseCheck(phrase);
+	if (check.weak) {
 		process.stderr.write(
 			chalk.yellow(
-				`warning: key phrase has ${length} characters; use at least ${MESH_MIN_KEY_PHRASE_CHARS} so LAN peers cannot guess it.\n`,
+				`warning: key phrase has ${check.chars} characters; use at least ${check.strongChars} so LAN peers cannot guess it.\n`,
 			),
 		);
 	}

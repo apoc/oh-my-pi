@@ -2,9 +2,10 @@
 //! the TypeScript frontend mirrors them type-only (`src/mesh/protocol.ts`).
 //!
 //! Every peer payload is untrusted until it went through [`parse_envelope`],
-//! [`parse_response`], [`parse_snapshot`] or [`parse_message_result`]: size
-//! caps, required fields, value ranges. Unknown fields are ignored and dropped
-//! (never re-serialized). "Characters" in the caps are Unicode scalar values.
+//! [`parse_response`], [`parse_snapshot`], [`parse_message_ack`] or
+//! [`parse_watch_ack`]: size caps, required fields, value ranges. Unknown
+//! fields are ignored and dropped (never re-serialized). "Characters" in the
+//! caps are Unicode scalar values.
 
 use std::sync::Arc;
 
@@ -53,6 +54,26 @@ pub fn is_msg_id(s: &str) -> bool {
 			.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// Longest thread id ([`is_thread_id`]).
+pub const MAX_THREAD_ID_LEN: usize = 128;
+
+/// The single validity rule for thread ids
+/// (`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`; they name thread record files on the
+/// recipient).
+pub fn is_thread_id(s: &str) -> bool {
+	let bytes = s.as_bytes();
+	match bytes.split_first() {
+		Some((first, rest)) => {
+			bytes.len() <= MAX_THREAD_ID_LEN
+				&& first.is_ascii_alphanumeric()
+				&& rest
+					.iter()
+					.all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+		},
+		None => false,
+	}
+}
+
 /// Who sent an envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,7 +113,8 @@ pub enum MeshWatchEvent {
 pub enum MeshRequest {
 	/// Answered by the engine from the snapshot the frontend pushed.
 	Snapshot,
-	/// Acknowledged at once with [`MeshMessageResult`]; `status`/`ask`/`task`
+	/// Acknowledged at once with `{accepted, msgId, thread?}`
+	/// ([`parse_message_ack`]); `status`/`ask`/`task`
 	/// answers arrive later as a separate [`MeshRequest::Reply`].
 	Message {
 		kind:   MessageKind,
@@ -210,7 +232,7 @@ impl MeshEnvelope {
 				}
 			},
 			MeshRequest::WatchEvent { watch_id, detail, .. } => {
-				field(watch_id, "watchId")?;
+				msg_id(watch_id, "watchId")?;
 				if let Some(detail) = detail {
 					text_field(detail, "detail")?;
 				}
@@ -328,14 +350,6 @@ impl Serialize for MeshResponse {
 			},
 		}
 	}
-}
-
-/// `ok` data of a `message` request: accepted for processing on `thread`
-/// (minted by the recipient when the request named none).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MeshMessageResult {
-	pub thread:   String,
-	pub accepted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,15 +508,37 @@ pub fn parse_snapshot(value: &Value) -> Result<MeshSnapshot, ProtocolError> {
 	Ok(snapshot)
 }
 
-/// Validate the `ok` data of a `message` request.
-///
-/// # Errors
-/// `bad_request` / `too_large` for a malformed result.
-pub fn parse_message_result(value: &Value) -> Result<MeshMessageResult, ProtocolError> {
-	let result = MeshMessageResult::deserialize(value)
-		.map_err(|e| ProtocolError::bad_request(format!("malformed mesh message result: {e}")))?;
-	field(&result.thread, "thread")?;
-	Ok(result)
+/// Acknowledgement of a `message` request (`{accepted, msgId, thread?}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAck {
+	pub msg_id: String,
+	/// Thread the recipient answers on (thread kinds only).
+	pub thread: Option<String>,
+}
+
+/// Validate the `ok` data of a `message` request: `accepted` is `true`,
+/// `msgId` passes [`is_msg_id`], `thread` is absent or passes
+/// [`is_thread_id`].
+pub fn parse_message_ack(value: &Value) -> Option<MessageAck> {
+	if value.get("accepted") != Some(&Value::Bool(true)) {
+		return None;
+	}
+	let msg_id = value.get("msgId")?.as_str().filter(|id| is_msg_id(id))?;
+	let thread = match value.get("thread") {
+		None => None,
+		Some(thread) => Some(thread.as_str().filter(|id| is_thread_id(id))?.to_owned()),
+	};
+	Some(MessageAck { msg_id: msg_id.to_owned(), thread })
+}
+
+/// Validate the `ok` data of a `watch` request; returns its `watchId`
+/// ([`is_msg_id`]).
+pub fn parse_watch_ack(value: &Value) -> Option<String> {
+	value
+		.get("watchId")?
+		.as_str()
+		.filter(|id| is_msg_id(id))
+		.map(str::to_owned)
 }
 
 fn decode(bytes: &[u8], what: &str) -> Result<Value, ProtocolError> {
@@ -754,6 +790,8 @@ mod tests {
 		}
 		let reply = envelope(&json!({ "op": "reply", "replyTo": "../x", "text": "t" }));
 		assert_eq!(code(&reply), MeshErrorCode::BadRequest);
+		let reply = envelope(&json!({ "op": "watch_event", "watchId": "a b", "event": "idle" }));
+		assert_eq!(code(&reply), MeshErrorCode::BadRequest);
 	}
 
 	#[test]
@@ -865,12 +903,37 @@ mod tests {
 	}
 
 	#[test]
-	fn message_result() {
-		let ok = parse_message_result(&json!({ "thread": "t1", "accepted": true, "x": 1 })).unwrap();
-		assert_eq!(ok, MeshMessageResult { thread: "t1".into(), accepted: true });
-		let empty = parse_message_result(&json!({ "thread": "", "accepted": true }));
-		assert_eq!(empty.unwrap_err().code, MeshErrorCode::BadRequest);
-		let missing = parse_message_result(&json!({ "thread": "t1" }));
-		assert_eq!(missing.unwrap_err().code, MeshErrorCode::BadRequest);
+	fn message_and_watch_acks() {
+		let ok =
+			parse_message_ack(&json!({ "accepted": true, "msgId": "m-1", "thread": "t1", "x": 1 }));
+		assert_eq!(ok, Some(MessageAck { msg_id: "m-1".into(), thread: Some("t1".into()) }));
+		let bare = parse_message_ack(&json!({ "accepted": true, "msgId": "m1" }));
+		assert_eq!(bare, Some(MessageAck { msg_id: "m1".into(), thread: None }));
+		for bad in [
+			json!({ "accepted": true }),
+			json!({ "accepted": true, "msgId": "../x" }),
+			json!({ "accepted": true, "msgId": 7 }),
+			json!({ "accepted": false, "msgId": "m1" }),
+			json!({ "msgId": "m1" }),
+			json!({ "accepted": true, "msgId": "m1", "thread": null }),
+			json!({ "accepted": true, "msgId": "m1", "thread": "-t" }),
+			json!(null),
+		] {
+			assert_eq!(parse_message_ack(&bad), None, "{bad}");
+		}
+		assert_eq!(parse_watch_ack(&json!({ "watchId": "w_1" })), Some("w_1".into()));
+		assert_eq!(parse_watch_ack(&json!({ "watchId": "w 1" })), None);
+		assert_eq!(parse_watch_ack(&json!({})), None);
+	}
+
+	#[test]
+	fn thread_id_pattern() {
+		for good in ["t", "0", "a-b_c", &format!("a{}", "b".repeat(MAX_THREAD_ID_LEN - 1))] {
+			assert!(is_thread_id(good), "{good}");
+		}
+		for bad in ["", "-a", "_a", "a b", "a/b", "a.b", "\u{e9}", &"a".repeat(MAX_THREAD_ID_LEN + 1)]
+		{
+			assert!(!is_thread_id(bad), "{bad}");
+		}
 	}
 }

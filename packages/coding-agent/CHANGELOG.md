@@ -274,6 +274,7 @@
 ### Changed
 
 - Local Collab host discovery (`omp collab list`, `omp collab link`, `/collab list`) now runs on the shared same-machine instance registry `~/.omp/run/instances` instead of `~/.omp/run/collab-hosts`: a host's instance ID is its process's instance ID, the registry directory is restricted to the current user on Windows too (no longer inheriting the configuration root's ACL), and hosts published by older omp builds are not listed (nor do they list newer ones) ([docs](../../docs/collab.md))
+- The mesh engine now tracks the answers (`reply`, `watch_event`) to sent messages and watches itself (a watch ends with its event; answers nobody asked for are refused with `bad_request`), and checks thread ids of `status`/`ask`/`task` messages before policy: a denied sender naming a malformed thread id now gets `unknown_thread` instead of `denied`. `omp mesh set-key` and `/mesh` count the key phrase the way the key is derived (Unicode NFC, trimmed), so composed and decomposed characters no longer count differently
 
 ## [18.14.2] - 2026-10-31
 

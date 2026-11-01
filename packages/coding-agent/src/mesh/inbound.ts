@@ -5,7 +5,8 @@
  * answered later by a `reply` request to the sender. Nothing here sends mesh requests other than
  * those replies and `watch_event`s.
  */
-import { logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { randomBytes } from "node:crypto";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import type { Derived, ScopeLike } from "../config/registry";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -24,7 +25,7 @@ import {
 	cfgMeshMaxConcurrentAsks,
 	cfgMeshThreadTtlHours,
 } from "./settings";
-import { isValidMeshThreadId, type MeshThreadRecord, MeshThreadStore } from "./threads";
+import { type MeshThreadRecord, MeshThreadStore } from "./threads";
 import { meshToolRefs } from "./tool-refs";
 import {
 	MAX_TEXT_CHARS,
@@ -42,7 +43,9 @@ import {
 export type MeshInboundPolicy = "allow" | "ask" | "deny";
 
 /** Active watches one peer instance may hold. */
-const MAX_WATCHES_PER_PEER = 16;
+export const MESH_MAX_WATCHES_PER_PEER = 16;
+/** Active watches across all peers (peer ids are self-claimed, so the per-peer cap alone does not bound them). */
+export const MESH_MAX_ACTIVE_WATCHES = 256;
 
 const INBOUND_POLICY: Record<MeshMessageKind, Derived<MeshInboundPolicy>> = {
 	status: cfgMeshInboundStatus,
@@ -228,7 +231,7 @@ export class MeshFrontend {
 					return await this.#onMessage(envelope, body);
 				case "reply":
 				case "watch_event":
-					return this.outbound.deliverIncomingReply(body, envelope.from);
+					return meshError("unsupported", "Answers are routed by the engine.");
 				case "watch":
 					return this.#onWatch(envelope.from, body.event, body.ttlSec);
 				case "threads":
@@ -268,7 +271,6 @@ export class MeshFrontend {
 		let record: MeshThreadRecord;
 		let turnIndex: number;
 		if (body.thread !== undefined) {
-			if (!isValidMeshThreadId(body.thread)) return meshError("unknown_thread", `Unknown thread ${body.thread}.`);
 			const lookup = await this.threads.lookup(body.thread, from.instanceId);
 			if (!lookup.ok) return meshError(lookup.code, lookup.message);
 			if (lookup.record.kind !== kind) {
@@ -415,9 +417,15 @@ export class MeshFrontend {
 		if (!Number.isFinite(ttlSec) || ttlSec <= 0) return meshError("bad_request", "Watch TTL must be positive.");
 		let held = 0;
 		for (const watch of this.#watches.values()) if (watch.peerInstanceId === from.instanceId) held++;
-		if (held >= MAX_WATCHES_PER_PEER) return meshError("busy", "Too many active watches from this instance.");
+		if (held >= MESH_MAX_WATCHES_PER_PEER) {
+			return meshError("busy", "Too many active watches from this instance.");
+		}
+		if (this.#watches.size >= MESH_MAX_ACTIVE_WATCHES) {
+			return meshError("busy", "Too many active watches on this instance; try again later.");
+		}
 
-		const watchId = Snowflake.next();
+		// 96 random bits as hex: a valid wire id (`is_msg_id`) no peer can predict.
+		const watchId = randomBytes(12).toString("hex");
 		let unsubscribe: () => void = () => {};
 		const dispose = () => {
 			clearTimeout(timer);
@@ -466,7 +474,6 @@ export class MeshFrontend {
 	}
 
 	async #onThread(from: MeshSender, thread: string): Promise<MeshResponse> {
-		if (!isValidMeshThreadId(thread)) return meshError("unknown_thread", `Unknown thread ${thread}.`);
 		const lookup = await this.threads.lookup(thread, from.instanceId);
 		if (!lookup.ok) return meshError(lookup.code, lookup.message);
 		const { record } = lookup;

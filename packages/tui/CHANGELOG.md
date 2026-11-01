@@ -140,6 +140,10 @@
 - Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
 - Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
+### Changed
+
+- The `/mesh` key phrase prompt counts the phrase with the native `meshPassphraseCheck` (Unicode NFC, trimmed, as the key is derived); `MESH_MIN_KEY_PHRASE_CHARS` and `MESH_REQUIRED_KEY_PHRASE_CHARS` were removed
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

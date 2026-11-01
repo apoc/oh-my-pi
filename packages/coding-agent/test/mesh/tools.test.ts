@@ -2,15 +2,16 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import { MeshProtocolHandler } from "../../src/internal-urls/mesh-protocol";
-import type { MeshEngine, MeshPeerView, MeshRequestOptions, MeshStatus } from "../../src/mesh/engine";
+import type { MeshPeerView } from "../../src/mesh/engine";
 import type { MeshFrontend } from "../../src/mesh/inbound";
 import { buildMeshIncomingMessage } from "../../src/mesh/bridge";
 import { MeshOutbound } from "../../src/mesh/outbound";
 import { formatMeshPeerList, resolveMeshPeer } from "../../src/mesh/peers";
 import { type MeshRuntime, setMeshRuntime } from "../../src/mesh/runtime";
-import type { MeshRequest, MeshResponse, MeshSnapshot } from "../../src/mesh/wire";
+import type { MeshSender, MeshSnapshot } from "../../src/mesh/wire";
 import { createTools, type ToolSession } from "../../src/tools";
 import { MeshSendTool, meshSendTier } from "../../src/tools/mesh-send";
+import { ScriptedMeshEngine } from "./scripted-engine";
 
 function snapshot(displayName: string, sessionName: string | null): MeshSnapshot {
 	return {
@@ -118,43 +119,6 @@ describe("mesh_send approval", () => {
 	});
 });
 
-class FakeEngine implements MeshEngine {
-	readonly instanceId = "inst-self";
-	readonly sent: { to: string; fromAgentId: string; body: MeshRequest }[] = [];
-	/** Runs before a message is acknowledged: a reply delivered here overtakes the ack. */
-	beforeAck: (msgId: string) => void = () => {};
-
-	status(): MeshStatus {
-		return { mode: "local", local: "on", remote: "off" };
-	}
-	peers(): MeshPeerView[] {
-		return PEERS;
-	}
-	onPeersChanged() {
-		return () => {};
-	}
-	onStatusChanged() {
-		return () => {};
-	}
-	setInboundHandler() {
-		return () => {};
-	}
-	async request(
-		to: string,
-		fromAgentId: string,
-		body: MeshRequest,
-		_options?: MeshRequestOptions,
-	): Promise<MeshResponse> {
-		this.sent.push({ to, fromAgentId, body });
-		const msgId = `msg-${this.sent.length}`;
-		this.beforeAck(msgId);
-		return { ok: true, data: { accepted: true, msgId, thread: "thread-1" } };
-	}
-	setSnapshot() {}
-	refresh() {}
-	setPeerFlags() {}
-}
-
 /** Session manager of the session the fake runtime serves; tools match on it. */
 const BOUND_MANAGER = { getSessionId: () => "session-bound" } as unknown as NonNullable<ToolSession["sessionManager"]>;
 
@@ -171,8 +135,19 @@ function toolSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	};
 }
 
-function installRuntime(): { engine: FakeEngine; outbound: MeshOutbound } {
-	const engine = new FakeEngine();
+const CAROL: MeshSender = { instanceId: "c0ffee", agentId: "Main", displayName: "Carol", host: "box" };
+
+/** Acknowledges like the default and has the engine hold `text` as the answer for the caller's wait. */
+function answerBeforeAck(engine: ScriptedMeshEngine, text: string): void {
+	engine.respond = request => {
+		const msgId = `msg-${engine.sent.length}`;
+		engine.answer(msgId, { op: "reply", replyTo: msgId, thread: "thread-1", text, from: CAROL });
+		return engine.defaultResponse(request);
+	};
+}
+
+function installRuntime(): { engine: ScriptedMeshEngine; outbound: MeshOutbound } {
+	const engine = new ScriptedMeshEngine(PEERS);
 	const outbound = new MeshOutbound({
 		engine,
 		main: { isDisposed: false, conversationId: "conversation-1", deliverMeshMessage: async () => "injected" },
@@ -221,13 +196,8 @@ describe("mesh_send ask", () => {
 	});
 
 	it("returns the peer's answer when it arrives while waiting", async () => {
-		const { engine, outbound } = installRuntime();
-		engine.beforeAck = msgId => {
-			outbound.deliverIncomingReply(
-				{ op: "reply", replyTo: msgId, thread: "thread-1", text: "idle, on main" },
-				{ instanceId: "c0ffee", agentId: "Main", displayName: "Carol", host: "box" },
-			);
-		};
+		const { engine } = installRuntime();
+		answerBeforeAck(engine, "idle, on main");
 		const tool = new MeshSendTool(toolSession());
 		const result = await tool.execute("call-2", { to: "c0ffee", kind: "status", message: "busy?" });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -236,10 +206,8 @@ describe("mesh_send ask", () => {
 	});
 
 	describe("auto-background", () => {
-		const CAROL = { instanceId: "c0ffee", agentId: "Main", displayName: "Carol", host: "box" };
-
 		function backgroundSetup(timeoutSec?: number) {
-			const { outbound } = installRuntime();
+			const { engine, outbound } = installRuntime();
 			const manager = new AsyncJobManager({ retentionMs: 60_000 });
 			const delivered: string[] = [];
 			manager.registerDeliverySink("Main", (_jobId, text) => {
@@ -253,18 +221,18 @@ describe("mesh_send ask", () => {
 				}),
 			);
 			const run = () => tool.execute("call-bg", { to: "carol", kind: "ask", message: "what branch?", timeoutSec });
-			return { outbound, manager, delivered, run };
+			return { engine, outbound, manager, delivered, run };
 		}
 
 		it("returns after the threshold and delivers the later answer as the job's result", async () => {
-			const { outbound, manager, delivered, run } = backgroundSetup();
+			const { engine, manager, delivered, run } = backgroundSetup();
 			const result = await run();
 			expect(result.details?.answered).toBe(false);
 			const jobId = result.details?.jobId;
 			expect(jobId).toBeDefined();
 			expect(manager.getRunningJobs({ ownerId: "Main" }).map(job => job.id)).toEqual([jobId!]);
 
-			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			engine.answer("msg-1", { op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main", from: CAROL });
 			await manager.getJob(jobId!)!.promise;
 			await manager.drainDeliveries({ timeoutMs: 1_000 });
 			expect(delivered).toHaveLength(1);
@@ -272,7 +240,7 @@ describe("mesh_send ask", () => {
 		});
 
 		it("ends an expired background wait without a delivery and routes the late answer to the asking session", async () => {
-			const { outbound, manager, delivered, run } = backgroundSetup(0.5);
+			const { engine, outbound, manager, delivered, run } = backgroundSetup(0.5);
 			const late = vi.fn(async () => "woken" as const);
 			outbound.setMain({ isDisposed: false, conversationId: "conversation-1", deliverMeshMessage: late });
 			const { details } = await run();
@@ -282,17 +250,18 @@ describe("mesh_send ask", () => {
 			await manager.drainDeliveries({ timeoutMs: 1_000 });
 			expect(delivered).toEqual([]);
 
-			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			// Nobody waits any more: the engine emits the answer as a reply event.
+			engine.late("msg-1", { op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main", from: CAROL });
 			await Bun.sleep(0);
 			expect(late).toHaveBeenCalledTimes(1);
 		});
 
 		it("answers inline when the reply lands within the threshold", async () => {
-			const { outbound, manager, run } = backgroundSetup();
+			const { engine, manager, run } = backgroundSetup();
 			const register = vi.spyOn(manager, "register");
 			const pending = run();
 			await Bun.sleep(0);
-			outbound.deliverIncomingReply({ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main" }, CAROL);
+			engine.answer("msg-1", { op: "reply", replyTo: "msg-1", thread: "thread-1", text: "on main", from: CAROL });
 			const result = await pending;
 			expect(result.details?.answered).toBe(true);
 			expect(result.details?.jobId).toBeUndefined();
@@ -390,13 +359,8 @@ describe("peer text", () => {
 		expect(listing).toContain("fixgol");
 		expect(listing).not.toMatch(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
 
-		const { engine, outbound } = installRuntime();
-		engine.beforeAck = msgId => {
-			outbound.deliverIncomingReply(
-				{ op: "reply", replyTo: msgId, thread: "thread-1", text: `on ${RLO}main\u2066` },
-				{ instanceId: "c0ffee", agentId: "Main", displayName: "Carol", host: "box" },
-			);
-		};
+		const { engine } = installRuntime();
+		answerBeforeAck(engine, `on ${RLO}main\u2066`);
 		const result = await new MeshSendTool(toolSession()).execute("call-7", {
 			to: "c0ffee",
 			kind: "status",

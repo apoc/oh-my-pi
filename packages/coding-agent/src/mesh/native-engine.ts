@@ -1,6 +1,7 @@
 /**
  * {@link MeshEngine} over the native `MeshNode` (Rust engine behind N-API): JSON at the boundary,
- * typed values and listener fan-out on this side.
+ * typed values and listener fan-out on this side. The engine validates every payload it hands over
+ * (envelopes, answers, snapshots), so this side only parses.
  */
 import {
 	type MeshConfig,
@@ -17,6 +18,7 @@ import {
 	type MeshEngineErrorCode,
 	type MeshInboundHandler,
 	type MeshInboundRequest,
+	type MeshIncomingReply,
 	type MeshMode,
 	type MeshPeerView,
 	type MeshRequestOptions,
@@ -36,6 +38,8 @@ export class NativeMeshEngine implements MeshEngine {
 	readonly #node: MeshNode;
 	readonly #peerListeners = new Set<() => void>();
 	readonly #statusListeners = new Set<(status: MeshStatus) => void>();
+	readonly #replyListeners = new Set<(ticket: string, reply: MeshIncomingReply) => void>();
+	readonly #droppedListeners = new Set<(tickets: readonly string[]) => void>();
 	#handler: MeshInboundHandler | undefined;
 	/** Parsed peer snapshots keyed by instance id; reused while the peer's JSON is unchanged. */
 	readonly #snapshots = new Map<string, { json: string; snapshot: MeshSnapshot | null }>();
@@ -115,7 +119,11 @@ export class NativeMeshEngine implements MeshEngine {
 				to,
 				fromAgentId,
 				JSON.stringify(body),
-				options?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+				{
+					timeoutMs: options?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+					ticket: options?.ticket,
+					hold: options?.hold,
+				},
 				signal,
 			);
 		} catch (error) {
@@ -129,6 +137,31 @@ export class NativeMeshEngine implements MeshEngine {
 		}
 		if (!isMeshResponse(parsed)) throw new MeshEngineError("bad_response", "Peer response has an invalid shape.");
 		return parsed;
+	}
+
+	async awaitReply(key: string, timeoutMs: number, signal?: AbortSignal): Promise<MeshIncomingReply | undefined> {
+		let json: string | null;
+		try {
+			json = await this.#node.awaitReply(key, timeoutMs, signal);
+		} catch (error) {
+			logger.warn("mesh: waiting for a reply failed", { error: toError(error).message });
+			return undefined;
+		}
+		return json === null ? undefined : (parseReply(json) ?? undefined);
+	}
+
+	forgetPending(tickets: readonly string[]): void {
+		if (tickets.length > 0) this.#node.forgetPending([...tickets]);
+	}
+
+	onReply(listener: (ticket: string, reply: MeshIncomingReply) => void): () => void {
+		this.#replyListeners.add(listener);
+		return () => this.#replyListeners.delete(listener);
+	}
+
+	onPendingDropped(listener: (tickets: readonly string[]) => void): () => void {
+		this.#droppedListeners.add(listener);
+		return () => this.#droppedListeners.delete(listener);
 	}
 
 	setSnapshot(snapshot: MeshSnapshot): void {
@@ -158,6 +191,8 @@ export class NativeMeshEngine implements MeshEngine {
 			this.#handler = undefined;
 			this.#peerListeners.clear();
 			this.#statusListeners.clear();
+			this.#replyListeners.clear();
+			this.#droppedListeners.clear();
 			this.#snapshots.clear();
 			this.#closed = this.#node.close();
 		}
@@ -175,7 +210,25 @@ export class NativeMeshEngine implements MeshEngine {
 			case "inbound":
 				void this.#onInbound(event);
 				return;
+			case "reply":
+				this.#onReply(event);
+				return;
+			case "pending_dropped": {
+				const tickets = event.tickets ?? [];
+				for (const listener of this.#droppedListeners) callListener(() => listener(tickets));
+				return;
+			}
 		}
+	}
+
+	#onReply(event: MeshEvent): void {
+		const reply = event.envelopeJson ? parseReply(event.envelopeJson) : null;
+		const ticket = event.ticket;
+		if (!ticket || !reply) {
+			logger.warn("mesh: malformed reply event");
+			return;
+		}
+		for (const listener of this.#replyListeners) callListener(() => listener(ticket, reply));
 	}
 
 	#emitStatus(status: MeshStatus): void {
@@ -252,7 +305,7 @@ export class NativeMeshEngine implements MeshEngine {
 		}
 		const cached = this.#snapshots.get(info.instanceId);
 		if (cached?.json === json) return cached.snapshot;
-		const snapshot = parseSnapshot(json, info.instanceId);
+		const snapshot = parseSnapshot(json);
 		this.#snapshots.set(info.instanceId, { json, snapshot });
 		return snapshot;
 	}
@@ -305,52 +358,28 @@ function isMeshResponse(value: unknown): value is MeshResponse {
 	return value.ok === false && typeof value.code === "string" && typeof value.message === "string";
 }
 
-function isStringOrNull(value: unknown): value is string | null {
-	return value === null || typeof value === "string";
-}
-
-function isOptionalString(value: unknown): boolean {
-	return value === undefined || typeof value === "string";
-}
-
-/** A peer's snapshot, or `null` when it is not valid JSON of the expected shape or names another instance. */
-function parseSnapshot(json: string, instanceId: string): MeshSnapshot | null {
-	let value: unknown;
+/** An answer envelope from the engine (validated against the serde wire types) as `{...body, from}`. */
+function parseReply(json: string): MeshIncomingReply | null {
+	let envelope: unknown;
 	try {
-		value = JSON.parse(json);
+		envelope = JSON.parse(json);
 	} catch {
 		return null;
 	}
-	if (!isRecord(value) || value.instanceId !== instanceId) return null;
-	const { summary, repo, agents } = value;
-	const valid =
-		typeof value.displayName === "string" &&
-		typeof value.host === "string" &&
-		typeof value.pid === "number" &&
-		typeof value.ompVersion === "string" &&
-		typeof value.protocol === "number" &&
-		isStringOrNull(value.sessionId) &&
-		isStringOrNull(value.sessionName) &&
-		(summary === null ||
-			(isRecord(summary) && typeof summary.text === "string" && typeof summary.updatedAt === "number")) &&
-		typeof value.cwd === "string" &&
-		(repo === null ||
-			(isRecord(repo) &&
-				isOptionalString(repo.remote) &&
-				isOptionalString(repo.branch) &&
-				isOptionalString(repo.head))) &&
-		isStringOrNull(value.model) &&
-		typeof value.busy === "boolean" &&
-		Array.isArray(agents) &&
-		agents.every(
-			agent =>
-				isRecord(agent) &&
-				typeof agent.id === "string" &&
-				typeof agent.kind === "string" &&
-				typeof agent.displayName === "string" &&
-				typeof agent.status === "string" &&
-				isOptionalString(agent.task),
-		) &&
-		typeof value.startedAt === "number";
-	return valid ? (value as unknown as MeshSnapshot) : null;
+	if (!isRecord(envelope) || !isRecord(envelope.body) || !isRecord(envelope.from)) return null;
+	const { body, from } = envelope as unknown as MeshEnvelope;
+	if (body.op !== "reply" && body.op !== "watch_event") return null;
+	return { ...body, from };
+}
+
+/**
+ * A peer's snapshot. The engine validated it (shape, caps, instance id of the peer it was fetched
+ * from) before storing it; `null` only if the JSON does not parse.
+ */
+function parseSnapshot(json: string): MeshSnapshot | null {
+	try {
+		return JSON.parse(json) as MeshSnapshot;
+	} catch {
+		return null;
+	}
 }

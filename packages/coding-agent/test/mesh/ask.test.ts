@@ -1,11 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { MeshEngine, MeshPeerView, MeshRequestOptions, MeshStatus } from "../../src/mesh/engine";
+import type { MeshPeerView } from "../../src/mesh/engine";
 import type { MeshFrontend } from "../../src/mesh/inbound";
 import { MeshOutbound } from "../../src/mesh/outbound";
 import { type MeshRuntime, setMeshRuntime } from "../../src/mesh/runtime";
-import type { MeshRequest, MeshResponse, MeshSender, MeshSnapshot } from "../../src/mesh/wire";
+import type { MeshSender, MeshSnapshot } from "../../src/mesh/wire";
 import type { MeshTrafficEntry } from "../../src/mesh/bridge";
 import { createTuiMeshUiHooks } from "../../src/modes/components/mesh/mesh-ui-hooks";
 import { MeshAskController } from "../../src/modes/controllers/mesh-ask-controller";
@@ -14,6 +14,7 @@ import { buildMeshPeerArgumentCompletions } from "../../src/slash-commands/built
 import { buildTuiBuiltinSlashCommands, executeBuiltinSlashCommand } from "../../src/slash-commands/builtin-registry";
 import { Settings } from "../../src/config/settings";
 import { cfgMeshEnabled } from "../../src/mesh/settings";
+import { ScriptedMeshEngine } from "./scripted-engine";
 
 function peer(instanceId: string, displayName: string, sessionName: string | null, hidden = false): MeshPeerView {
 	const snapshot: MeshSnapshot = {
@@ -50,38 +51,6 @@ const PEERS = [
 	peer("c0ffee00c0ffee00", "Carol", null),
 	peer("d00dd00dd00dd00d", "Dave", "secret", true),
 ];
-
-class FakeEngine implements MeshEngine {
-	readonly instanceId = "inst-self";
-	readonly sent: MeshRequest[] = [];
-	/** Answers each question before acknowledging it (an answer may overtake its ack). */
-	answer: ((msgId: string, body: MeshRequest) => void) | undefined;
-
-	status(): MeshStatus {
-		return { mode: "local", local: "on", remote: "off" };
-	}
-	peers(): MeshPeerView[] {
-		return PEERS;
-	}
-	onPeersChanged() {
-		return () => {};
-	}
-	onStatusChanged() {
-		return () => {};
-	}
-	setInboundHandler() {
-		return () => {};
-	}
-	async request(_to: string, _from: string, body: MeshRequest, _options?: MeshRequestOptions): Promise<MeshResponse> {
-		this.sent.push(body);
-		const msgId = `msg-${this.sent.length}`;
-		this.answer?.(msgId, body);
-		return { ok: true, data: { accepted: true, msgId, thread: "thread-1" } };
-	}
-	setSnapshot() {}
-	refresh() {}
-	setPeerFlags() {}
-}
 
 beforeAll(async () => {
 	await initTheme();
@@ -138,7 +107,7 @@ describe("/ask availability", () => {
 
 /** Renders the dialog panel shown by the controller; records what reached the transcript. */
 function harness() {
-	const engine = new FakeEngine();
+	const engine = new ScriptedMeshEngine(PEERS);
 	const cards: Component[] = [];
 	const errors: string[] = [];
 	let overlay: (Component & { handleInput?(data: string): void }) | undefined;
@@ -188,12 +157,15 @@ describe("/ask conversations", () => {
 	it("/ask <peer> <message> opens the dialog on the new thread and shows the answer there", async () => {
 		const h = harness();
 		expect(await h.controller.handleCommand("b93faeff1b87b3c5 what is ARBTR?")).toBe(true);
-		expect(h.engine.sent[0]).toEqual({ op: "message", kind: "ask", text: "what is ARBTR?" });
+		expect(h.engine.sent[0]?.body).toEqual({ op: "message", kind: "ask", text: "what is ARBTR?" });
 		expect(h.screen()).toContain("what is ARBTR?");
-		h.outbound.deliverIncomingReply(
-			{ op: "reply", replyTo: "msg-1", thread: "thread-1", text: "a fact checker" },
-			ARBITER,
-		);
+		h.engine.answer("msg-1", {
+			op: "reply",
+			replyTo: "msg-1",
+			thread: "thread-1",
+			text: "a fact checker",
+			from: ARBITER,
+		});
 		await until(() => h.screen().includes("a fact checker"));
 		expect(h.screen()).not.toContain("Waiting for the agent");
 		expect(h.cards).toHaveLength(0);
@@ -201,8 +173,12 @@ describe("/ask conversations", () => {
 
 	it("keeps an answer that overtakes its acknowledgement in the opened dialog", async () => {
 		const h = harness();
-		h.engine.answer = msgId =>
-			h.outbound.deliverIncomingReply({ op: "reply", replyTo: msgId, thread: "thread-1", text: "fast" }, ARBITER);
+		// The engine holds an answer that overtook its acknowledgement for the dialog's wait.
+		h.engine.respond = request => {
+			const msgId = `msg-${h.engine.sent.length}`;
+			h.engine.answer(msgId, { op: "reply", replyTo: msgId, thread: "thread-1", text: "fast", from: ARBITER });
+			return h.engine.defaultResponse(request);
+		};
 		expect(await h.controller.handleCommand("b93faeff1b87b3c5 quick?")).toBe(true);
 		await until(() => h.screen().includes("fast"));
 		expect(h.screen()).not.toContain("Waiting for the agent");
@@ -210,12 +186,19 @@ describe("/ask conversations", () => {
 
 	it("continues the thread on follow-up and shows the waited answer only in the dialog", async () => {
 		const h = harness();
-		h.engine.answer = (msgId, body) => {
-			if (body.op !== "message") return;
-			h.outbound.deliverIncomingReply(
-				{ op: "reply", replyTo: msgId, thread: "thread-1", text: `answer to ${body.text}` },
-				ARBITER,
-			);
+		h.engine.respond = request => {
+			const { body } = request;
+			if (body.op === "message") {
+				const msgId = `msg-${h.engine.sent.length}`;
+				h.engine.answer(msgId, {
+					op: "reply",
+					replyTo: msgId,
+					thread: "thread-1",
+					text: `answer to ${body.text}`,
+					from: ARBITER,
+				});
+			}
+			return h.engine.defaultResponse(request);
 		};
 		expect(await h.controller.handleCommand("b93faeff1b87b3c5")).toBe(true);
 		// No conversation yet: the dialog opens on a new-question composer.
@@ -227,7 +210,7 @@ describe("/ask conversations", () => {
 		h.type("second?");
 		h.overlay()?.handleInput?.("\r");
 		await until(() => h.screen().includes("answer to second?"));
-		expect(h.engine.sent[1]).toEqual({ op: "message", kind: "ask", text: "second?", thread: "thread-1" });
+		expect(h.engine.sent[1]?.body).toEqual({ op: "message", kind: "ask", text: "second?", thread: "thread-1" });
 		expect(h.screen()).not.toContain("Waiting for the agent");
 		expect(h.cards).toHaveLength(0);
 		expect(h.errors).toEqual([]);

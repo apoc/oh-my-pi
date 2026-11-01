@@ -8,6 +8,7 @@
  * newlines (except in summaries) and tabs from every string once per state pull, before anything is
  * styled, measured or sorted. Thread lists and notices are sanitized when they arrive.
  */
+import { meshPassphraseCheck } from "@oh-my-pi/pi-natives";
 import { formatAge, pluralize, stripBidiControls } from "@oh-my-pi/pi-utils";
 import type { TspPickerAction, TspPickerColumn, TspPickerGroup, TspPickerItem, TspSpan } from "@oh-my-pi/pi-wire";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
@@ -38,10 +39,6 @@ import {
 	type MeshManagerThread,
 } from "./mesh-manager-types";
 
-/** Key phrases shorter than this are guessable; the manager warns below it. */
-export const MESH_MIN_KEY_PHRASE_CHARS = 16;
-/** The engine rejects shorter key phrases (`meshDeriveKey`); mirrored here only to warn while typing. */
-export const MESH_REQUIRED_KEY_PHRASE_CHARS = 12;
 const MODE_ORDER: readonly MeshManagerMode[] = ["local", "remote", "both"];
 const CHANGE_COALESCE_MS = 100;
 const AGE_TICK_MS = 5_000;
@@ -1306,13 +1303,14 @@ const PICKER_COLUMNS: readonly TspPickerColumn[] = [
 const KEY_PROMPT_SHEET = { role: "omp.overlay.mesh", size: "md", anchor: "center", head: "Mesh key phrase" } as const;
 const COMPOSE_PROMPT_SHEET = { role: "omp.overlay.mesh", size: "md", anchor: "center", head: "Mesh message" } as const;
 
+/** Live feedback while typing, counted the way the engine derives the key (`meshPassphraseCheck`). */
 function keyPhraseWarning(prompt: KeyPrompt): string | undefined {
-	const length = (prompt.step === "enter" ? prompt.input.getValue() : prompt.first).length;
-	if (length > 0 && length < MESH_REQUIRED_KEY_PHRASE_CHARS) {
-		return `Too short: the mesh requires at least ${MESH_REQUIRED_KEY_PHRASE_CHARS} characters.`;
-	}
-	if (length > 0 && length < MESH_MIN_KEY_PHRASE_CHARS) {
-		return `Short phrases are guessable by anyone on your LAN; use ${MESH_MIN_KEY_PHRASE_CHARS}+ characters.`;
+	const phrase = prompt.step === "enter" ? prompt.input.getValue() : prompt.first;
+	if (phrase.length === 0) return undefined;
+	const check = meshPassphraseCheck(phrase);
+	if (!check.valid) return `Too short: the mesh requires at least ${check.minChars} characters.`;
+	if (check.weak) {
+		return `Short phrases are guessable by anyone on your LAN; use ${check.strongChars}+ characters.`;
 	}
 	return undefined;
 }

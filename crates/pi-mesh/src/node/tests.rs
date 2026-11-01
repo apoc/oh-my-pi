@@ -391,10 +391,10 @@ async fn local_route_preferred_inbound_roundtrip_and_blocking() {
 		.await;
 	assert_eq!(peer(&a, B).unwrap().endpoint_kind, EndpointKind::Local, "local beats static");
 
-	let ok = MeshResponse::Ok(json!({"thread": "t1", "accepted": true}));
+	let ok = MeshResponse::Ok(json!({"threads": []}));
 	let answers = responder(Arc::clone(&b), rx_b, Some(ok.clone()), 2);
 	let resp = a
-		.request(B, "Main", note(), Duration::from_secs(5))
+		.request(B, "Main", MeshRequest::Threads, Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	assert_eq!(resp, ok);
@@ -402,12 +402,12 @@ async fn local_route_preferred_inbound_roundtrip_and_blocking() {
 
 	b.set_peer_flags(A, false, true);
 	let denied = a
-		.request(B, "Main", note(), Duration::from_secs(5))
+		.request(B, "Main", MeshRequest::Threads, Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	assert_eq!(err_code(&denied), Some(MeshErrorCode::Denied));
 	b.set_peer_flags(A, false, false);
-	a.request(B, "Main", note(), Duration::from_secs(5))
+	a.request(B, "Main", MeshRequest::Threads, Duration::from_secs(5), None)
 		.await
 		.unwrap();
 
@@ -416,7 +416,9 @@ async fn local_route_preferred_inbound_roundtrip_and_blocking() {
 	let first = &seen[0].1;
 	assert_eq!((first.hop, first.from.instance_id.as_str(), first.from.lan_port), (0, A, pa));
 
-	let unknown = a.request(C, "Main", note(), Duration::from_secs(1)).await;
+	let unknown = a
+		.request(C, "Main", note(), Duration::from_secs(1), None)
+		.await;
 	assert_eq!(unknown.unwrap_err().code(), "unreachable");
 	a.close().await;
 	b.close().await;
@@ -434,7 +436,7 @@ async fn unanswered_inbound_times_out_as_internal_and_frees_its_slot() {
 	eventually("B listed", || peer(&a, B).is_some()).await;
 	let silent = responder(Arc::clone(&b), rx_b, None, 1);
 	let resp = a
-		.request(B, "Main", note(), Duration::from_secs(5))
+		.request(B, "Main", note(), Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	assert_eq!(err_code(&resp), Some(MeshErrorCode::Internal));
@@ -443,7 +445,7 @@ async fn unanswered_inbound_times_out_as_internal_and_frees_its_slot() {
 	assert!(!b.respond(&request_id, MeshResponse::Ok(json!(null))), "late respond ignored");
 
 	let snap = a
-		.request(B, "Main", MeshRequest::Snapshot, Duration::from_secs(5))
+		.request(B, "Main", MeshRequest::Snapshot, Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	assert_eq!(err_code(&snap), Some(MeshErrorCode::Unsupported), "no snapshot pushed yet");
@@ -469,14 +471,14 @@ async fn contact_without_snapshot_is_listed_after_a_later_message() {
 	let _answers = responder(Arc::clone(&a), rx_a, Some(MeshResponse::Ok(json!(null))), 2);
 
 	// B has no snapshot yet: A's fetch gets `unsupported`, B stays unlisted.
-	b.request(A, "Main", note(), Duration::from_secs(5))
+	b.request(A, "Main", note(), Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	assert!(peer(&a, B).is_none());
 
 	b.set_snapshot(&snapshot_json(B)).unwrap();
-	b.request(A, "Main", note(), Duration::from_secs(5))
+	b.request(A, "Main", note(), Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	eventually("A lists B after the next message", || {
@@ -547,4 +549,282 @@ async fn local_side_reports_instance_host_errors() {
 	assert_eq!(st.local, LocalState::Error);
 	assert!(st.error.unwrap().contains("closed"));
 	late.close().await;
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "shaped like `request`'s `track` argument")]
+fn tracked(ticket: &str, hold: bool) -> Option<Track> {
+	Some(Track { ticket: ticket.into(), hold })
+}
+
+fn ask(text: &str, thread: Option<&str>) -> MeshRequest {
+	MeshRequest::Message {
+		kind:   MessageKind::Ask,
+		text:   text.into(),
+		thread: thread.map(Into::into),
+	}
+}
+
+fn answer(reply_to: &str, text: &str) -> MeshRequest {
+	MeshRequest::Reply {
+		reply_to: reply_to.into(),
+		thread:   None,
+		text:     text.into(),
+		error:    None,
+	}
+}
+
+fn answer_text(env: &MeshEnvelope) -> &str {
+	match &env.body {
+		MeshRequest::Reply { text, .. } => text,
+		_ => "",
+	}
+}
+
+fn msg_id_of(resp: &MeshResponse) -> String {
+	match resp {
+		MeshResponse::Ok(data) => data["msgId"].as_str().unwrap().to_owned(),
+		other => panic!("not acknowledged: {other:?}"),
+	}
+}
+
+/// Next `Reply` / `PendingDropped` event on `rx` (others skipped).
+async fn next_tracking_event(rx: &mut mpsc::UnboundedReceiver<NodeEvent>) -> NodeEvent {
+	tokio::time::timeout(Duration::from_secs(5), async {
+		loop {
+			if let event @ (NodeEvent::Reply { .. } | NodeEvent::PendingDropped { .. }) =
+				rx.recv().await.expect("event channel open")
+			{
+				return event;
+			}
+		}
+	})
+	.await
+	.expect("tracking event in time")
+}
+
+/// A and B on one registry, each listing the other.
+async fn local_pair(
+	dir: &Path,
+) -> (
+	(Arc<MeshNode>, mpsc::UnboundedReceiver<NodeEvent>),
+	(Arc<MeshNode>, mpsc::UnboundedReceiver<NodeEvent>),
+) {
+	let (a, rx_a) = node(A, dir, &Arc::new(FakeMdns::default()), Opts::default());
+	let (b, rx_b) = node(B, dir, &Arc::new(FakeMdns::default()), Opts::default());
+	a.configure(cfg(MeshMode::Local, None, vec![], "a")).await;
+	b.configure(cfg(MeshMode::Local, None, vec![], "b")).await;
+	a.refresh();
+	b.refresh();
+	eventually("A and B list each other", || peer(&a, B).is_some() && peer(&b, A).is_some()).await;
+	((a, rx_a), (b, rx_b))
+}
+
+/// B's frontend: acknowledges messages (`bad` with a malformed ack; `early`
+/// after first sending the answer, so it overtakes the ack) and watches
+/// (`ttlSec` 7 with a malformed id).
+fn ack_responder(b: Arc<MeshNode>, mut rx: mpsc::UnboundedReceiver<NodeEvent>) {
+	tokio::spawn(async move {
+		while let Some(event) = rx.recv().await {
+			let NodeEvent::Inbound { request_id, envelope, .. } = event else {
+				continue;
+			};
+			let msg_id = envelope.msg_id.clone();
+			let ack = match &envelope.body {
+				MeshRequest::Message { text, .. } if text == "bad" => json!({ "accepted": true }),
+				MeshRequest::Message { text, .. } => {
+					if text == "early" {
+						let sent = b
+							.request(
+								A,
+								"Main",
+								answer(&msg_id, "early answer"),
+								Duration::from_secs(5),
+								None,
+							)
+							.await
+							.unwrap();
+						assert_eq!(err_code(&sent), None, "early answer buffered");
+					}
+					json!({ "accepted": true, "msgId": msg_id, "thread": "t1" })
+				},
+				MeshRequest::Watch { ttl_sec: 7, .. } => json!({ "watchId": "bad id" }),
+				MeshRequest::Watch { .. } => json!({ "watchId": "w1" }),
+				_ => json!(null),
+			};
+			b.respond(&request_id, MeshResponse::Ok(ack));
+		}
+	});
+}
+
+#[tokio::test]
+async fn tracked_requests_route_answers_to_waiters_held_slots_and_late_events() {
+	let dir = tempfile::tempdir().unwrap();
+	let ((a, mut rx_a), (b, rx_b)) = local_pair(dir.path()).await;
+	ack_responder(Arc::clone(&b), rx_b);
+	let timeout = Duration::from_secs(5);
+
+	// The answer overtakes the ack: buffered, claimed by the ack, held for the
+	// wait that follows.
+	let early = a
+		.request(B, "Main", ask("early", None), timeout, tracked("t-early", true))
+		.await
+		.unwrap();
+	let id = msg_id_of(&early);
+	let got = a
+		.await_reply(&id, timeout)
+		.await
+		.expect("held early answer");
+	assert_eq!((answer_text(&got), got.from.instance_id.as_str()), ("early answer", B));
+
+	// A waiter gets the answer.
+	let sent = a
+		.request(B, "Main", ask("q", None), timeout, tracked("t-wait", false))
+		.await
+		.unwrap();
+	let id = msg_id_of(&sent);
+	let wait = {
+		let a = Arc::clone(&a);
+		let id = id.clone();
+		tokio::spawn(async move { a.await_reply(&id, Duration::from_secs(5)).await })
+	};
+	eventually("waiter registered", || a.state.lock().replies.is_waiting(&id)).await;
+	b.request(A, "Main", answer(&id, "waited"), timeout, None)
+		.await
+		.unwrap();
+	assert_eq!(answer_text(&wait.await.unwrap().expect("answer")), "waited");
+
+	// Nobody waits: a late event with the ticket, for every answer.
+	for text in ["late 1", "late 2"] {
+		b.request(A, "Main", answer(&id, text), timeout, None)
+			.await
+			.unwrap();
+		let NodeEvent::Reply { ticket, envelope } = next_tracking_event(&mut rx_a).await else {
+			panic!("expected a reply event");
+		};
+		assert_eq!((ticket.as_str(), answer_text(&envelope)), ("t-wait", text));
+	}
+
+	// Watches route their event the same way.
+	let watch = MeshRequest::Watch { event: crate::protocol::MeshWatchEvent::Idle, ttl_sec: 60 };
+	let resp = a
+		.request(B, "Main", watch, timeout, tracked("t-watch", false))
+		.await
+		.unwrap();
+	assert_eq!(resp, MeshResponse::Ok(json!({ "watchId": "w1" })));
+	let event = MeshRequest::WatchEvent {
+		watch_id: "w1".into(),
+		event:    crate::protocol::MeshWatchEvent::Idle,
+		detail:   None,
+	};
+	b.request(A, "Main", event, timeout, None).await.unwrap();
+	let NodeEvent::Reply { ticket, .. } = next_tracking_event(&mut rx_a).await else {
+		panic!("expected a watch event");
+	};
+	assert_eq!(ticket, "t-watch");
+	// A watch ends with its event.
+	let NodeEvent::PendingDropped { tickets } = next_tracking_event(&mut rx_a).await else {
+		panic!("expected the watch to end");
+	};
+	assert_eq!(tickets, ["t-watch"]);
+
+	// Closing drops what is still tracked.
+	a.close().await;
+	let NodeEvent::PendingDropped { mut tickets } = next_tracking_event(&mut rx_a).await else {
+		panic!("expected pending_dropped");
+	};
+	tickets.sort();
+	assert_eq!(tickets, ["t-early", "t-wait"]);
+	b.close().await;
+}
+
+#[tokio::test]
+async fn malformed_acks_unknown_threads_and_foreign_answers_are_refused() {
+	let dir = tempfile::tempdir().unwrap();
+	let ((a, mut rx_a), (b, rx_b)) = local_pair(dir.path()).await;
+	ack_responder(Arc::clone(&b), rx_b);
+	let timeout = Duration::from_secs(5);
+
+	let bad = a
+		.request(B, "Main", ask("bad", None), timeout, tracked("t-bad", false))
+		.await
+		.unwrap();
+	assert_eq!(
+		bad,
+		MeshResponse::error(
+			MeshErrorCode::Internal,
+			"Peer acknowledged with a missing or malformed message id."
+		)
+	);
+	let watch = MeshRequest::Watch { event: crate::protocol::MeshWatchEvent::Idle, ttl_sec: 7 };
+	let bad = a
+		.request(B, "Main", watch, timeout, tracked("t-bad-watch", false))
+		.await
+		.unwrap();
+	assert_eq!(
+		bad,
+		MeshResponse::error(
+			MeshErrorCode::Internal,
+			"Peer accepted the watch with a missing or malformed watch id."
+		)
+	);
+	assert_eq!(a.state.lock().replies.len(), 0, "nothing tracked");
+
+	// Malformed thread ids never reach the frontend.
+	let unknown = a
+		.request(B, "Main", ask("q", Some("../x")), timeout, None)
+		.await
+		.unwrap();
+	assert_eq!(unknown, MeshResponse::error(MeshErrorCode::UnknownThread, "Unknown thread ../x."));
+	let thread = MeshRequest::Thread { thread: "-x".into() };
+	let unknown = a.request(B, "Main", thread, timeout, None).await.unwrap();
+	assert_eq!(unknown, MeshResponse::error(MeshErrorCode::UnknownThread, "Unknown thread -x."));
+	// Steers and notes ignore `thread`: no check, as before.
+	let steer = MeshRequest::Message {
+		kind:   MessageKind::Steer,
+		text:   "s".into(),
+		thread: Some("../x".into()),
+	};
+	let steered = a.request(B, "Main", steer, timeout, None).await.unwrap();
+	assert_eq!(err_code(&steered), None);
+
+	// A notes is acknowledged but never tracked.
+	let note_ack = a
+		.request(B, "Main", note(), timeout, tracked("t-note", false))
+		.await
+		.unwrap();
+	assert_eq!(err_code(&note_ack), None);
+	assert_eq!(a.state.lock().replies.len(), 0, "notes are not tracked");
+
+	// Answers from another instance than the one asked are refused.
+	let sent = a
+		.request(B, "Main", ask("q", None), timeout, tracked("t-q", false))
+		.await
+		.unwrap();
+	let id = msg_id_of(&sent);
+	let (c, _rx_c) = node(C, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	c.configure(cfg(MeshMode::Local, None, vec![], "c")).await;
+	c.refresh();
+	eventually("C lists A", || peer(&c, A).is_some()).await;
+	let foreign = c
+		.request(A, "Main", answer(&id, "spoof"), timeout, None)
+		.await
+		.unwrap();
+	assert_eq!(
+		foreign,
+		MeshResponse::error(
+			MeshErrorCode::BadRequest,
+			format!("No pending message {id} for this peer.")
+		)
+	);
+
+	// The frontend forgets a ticket: nothing tracks it any more.
+	a.forget_pending(&["t-q".into()]);
+	assert!(a.await_reply(&id, timeout).await.is_none(), "untracked");
+	assert_eq!(a.state.lock().replies.len(), 0);
+	a.close().await;
+	while let Ok(event) = rx_a.try_recv() {
+		assert!(!matches!(event, NodeEvent::PendingDropped { .. }), "nothing left to drop");
+	}
+	b.close().await;
+	c.close().await;
 }

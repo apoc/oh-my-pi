@@ -524,10 +524,23 @@ export declare class MeshNode {
   setPeerFlags(instanceId: string, hidden: boolean, blocked: boolean): void
   /**
    * Send `bodyJson` (a `MeshRequest`) to peer `to` as `fromAgentId`;
-   * resolves to the `MeshResponse` JSON. Rejects with a message prefixed
+   * resolves to the `MeshResponse` JSON. A `message` / `watch`
+   * acknowledgement without a valid `msgId` / `watchId` resolves to an
+   * `internal` error response. Rejects with a message prefixed
    * `unreachable:`, `timeout:`, `bad_response:` or `aborted:`.
    */
-  request(to: string, fromAgentId: string, bodyJson: string, timeoutMs: number, signal?: AbortSignal): Promise<string>
+  request(to: string, fromAgentId: string, bodyJson: string, options: MeshRequestOptions, signal?: AbortSignal): Promise<string>
+  /**
+   * Wait up to `timeoutMs` for the next answer to the tracked request `key`
+   * (`msgId` / `watchId`); resolves to the answer's envelope JSON, or
+   * `null` when untracked, out of time, aborted, replaced by a newer
+   * `awaitReply` for the same key, or dropped. A held answer that already
+   * arrived resolves at once. Answers after the wait arrive as `reply`
+   * events.
+   */
+  awaitReply(key: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null>
+  /** Stop tracking the requests of `tickets` (their waits resolve `null`). */
+  forgetPending(tickets: Array<string>): void
   /**
    * Answer an `inbound` event with `responseJson` (a `MeshResponse`). Late or
    * unknown ids are ignored.
@@ -3140,16 +3153,22 @@ export interface MeshConfig {
 export declare function meshDeriveKey(passphrase: string): Promise<string>
 
 /**
- * Engine notification. `peers`: re-read `peers()`. `status`: re-read
- * `status()`. `inbound`: answer `requestId` via `respond()` within 30 s.
+ * Engine notification.
+ *
+ * `peers`: re-read `peers()`. `status`: re-read `status()`. `inbound`:
+ * answer `requestId` via `respond()` within 30 s. `reply`: an answer
+ * (`envelopeJson`) to the tracked request of `ticket` nobody awaits.
+ * `pending_dropped`: `tickets` are no longer tracked (TTL, size cap, close).
  */
 export interface MeshEvent {
-  kind: 'peers' | 'status' | 'inbound'
+  kind: 'peers' | 'status' | 'inbound' | 'reply' | 'pending_dropped'
   requestId?: string
   envelopeJson?: string
   originKind?: 'local' | 'remote'
   /** Source IP of a remote sender (absent for local senders). */
   originAddress?: string
+  ticket?: string
+  tickets?: Array<string>
 }
 
 export interface MeshNodeOptions {
@@ -3162,6 +3181,24 @@ export interface MeshNodeOptions {
   displayName: string
   /** Machine host name sent in envelopes. */
   hostName: string
+}
+
+export declare function meshPassphraseCheck(phrase: string): MeshPassphraseCheck
+
+/**
+ * Live feedback for a mesh key passphrase, counted exactly as
+ * `meshDeriveKey` counts it (NFC, trimmed, Unicode scalar values).
+ */
+export interface MeshPassphraseCheck {
+  chars: number
+  /** `meshDeriveKey` accepts it (at least `minChars`). */
+  valid: boolean
+  /** Shorter than `strongChars`: guessable by anyone on the LAN. */
+  weak: boolean
+  /** Shortest accepted phrase. */
+  minChars: number
+  /** Length from which a phrase is no longer flagged weak. */
+  strongChars: number
 }
 
 export interface MeshPeerInfo {
@@ -3178,6 +3215,21 @@ export interface MeshPeerInfo {
   hidden: boolean
   blocked: boolean
   snapshotJson?: string
+}
+
+export interface MeshRequestOptions {
+  timeoutMs: number
+  /**
+   * Track the answers of a `message` (not a note) or `watch` under this
+   * frontend ticket once the peer acknowledged it: they resolve
+   * `awaitReply`, or arrive as `reply` events carrying the ticket.
+   */
+  ticket?: string
+  /**
+   * Keep the first answer for an `awaitReply` about to start instead of
+   * emitting it (with `ticket`).
+   */
+  hold?: boolean
 }
 
 export interface MeshStatus {
