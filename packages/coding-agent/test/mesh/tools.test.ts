@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
 import { MeshProtocolHandler } from "../../src/internal-urls/mesh-protocol";
-import type { MeshPeerView } from "../../src/mesh/engine";
+import { MeshEngineError, type MeshPeerView } from "../../src/mesh/engine";
 import type { MeshFrontend } from "../../src/mesh/inbound";
 import { buildMeshIncomingMessage } from "../../src/mesh/bridge";
 import { MeshOutbound } from "../../src/mesh/outbound";
-import { formatMeshPeerList, resolveMeshPeer } from "../../src/mesh/peers";
+import { formatMeshEndpoint, formatMeshPeerList, resolveMeshPeer, resolveMeshSendTarget } from "../../src/mesh/peers";
 import { type MeshRuntime, setMeshRuntime } from "../../src/mesh/runtime";
 import type { MeshSender, MeshSnapshot } from "../../src/mesh/wire";
 import { createTools, type ToolSession } from "../../src/tools";
@@ -109,6 +109,40 @@ describe("resolveMeshPeer", () => {
 		const result = resolveMeshPeer([peer("x1", "</mesh-reply>a"), peer("x2", "b")], "x");
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.message).not.toContain("</mesh-reply>");
+	});
+});
+
+describe("resolveMeshSendTarget", () => {
+	const CRASHED = "0123456789abcdef";
+
+	it("addresses a well-formed instance id no listed peer has directly", () => {
+		const result = resolveMeshSendTarget(PEERS, CRASHED, "fedcba9876543210");
+		expect(result.ok && result.target).toEqual({ instanceId: CRASHED, blocked: false });
+	});
+
+	it("keeps the block flag of a known peer without a snapshot", () => {
+		const unverified: MeshPeerView = { ...peer(CRASHED, "Gone", null, { blocked: true }), snapshot: null };
+		const result = resolveMeshSendTarget([...PEERS, unverified], CRASHED, "fedcba9876543210");
+		expect(result.ok && result.target.blocked).toBe(true);
+	});
+
+	it("never resolves this instance's own id, and resolves names and prefixes like resolveMeshPeer", () => {
+		expect(resolveMeshSendTarget(PEERS, CRASHED, CRASHED).ok).toBe(false);
+		const byName = resolveMeshSendTarget(PEERS, "carol", "fedcba9876543210");
+		expect(byName.ok && byName.target.instanceId).toBe("c0ffee");
+		expect(resolveMeshSendTarget(PEERS, "0123", "fedcba9876543210").ok).toBe(false);
+	});
+});
+
+describe("formatMeshEndpoint", () => {
+	it("shows a remote peer's port, bracketing IPv6 addresses", () => {
+		const remote = (address: string): MeshPeerView => ({
+			...peer("c0ffee", "Carol"),
+			endpoint: { kind: "remote", address, port: 47474, hostname: "SHARK" },
+		});
+		expect(formatMeshEndpoint(remote("127.0.0.1"))).toContain("127.0.0.1:47474");
+		expect(formatMeshEndpoint(remote("fe80::1"))).toContain("[fe80::1]:47474");
+		expect(formatMeshEndpoint(remote(""))).not.toContain(":");
 	});
 });
 
@@ -294,6 +328,29 @@ describe("mesh_send delivery checks", () => {
 		await tool.execute("call-5", { to: "carol", kind: "watch", event: "idle", timeoutSec: 0.4 });
 		await tool.execute("call-6", { to: "carol", kind: "watch", event: "idle", timeoutSec: 90.5 });
 		expect(engine.sent.map(sent => (sent.body.op === "watch" ? sent.body.ttlSec : undefined))).toEqual([1, 91]);
+	});
+
+	it("sends to an unlisted instance id and reports the engine's transport code once", async () => {
+		const { engine } = installRuntime();
+		vi.spyOn(engine, "request").mockImplementation(async to => {
+			throw new MeshEngineError("unreachable", `no reachable mesh peer ${to}`);
+		});
+		const tool = new MeshSendTool(toolSession());
+		const sent = tool.execute("call-7", { to: "0123456789abcdef", kind: "steer", message: "hi" });
+		await expect(sent).rejects.toThrow(/^0123456789abcdef unreachable: (?!unreachable)/);
+	});
+
+	it("says a steer the peer's user must still approve is waiting, not delivered", async () => {
+		const { engine } = installRuntime();
+		engine.respond = () => ({ ok: true, data: { accepted: true, msgId: "msg-1", pending: "approval" } });
+		const result = await new MeshSendTool(toolSession()).execute("call-8", {
+			to: "carol",
+			kind: "steer",
+			message: "rebase",
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("approval");
+		expect(text).not.toContain("delivered");
 	});
 });
 

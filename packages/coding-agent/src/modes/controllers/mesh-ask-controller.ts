@@ -241,8 +241,11 @@ export class MeshAskController {
 				},
 			});
 		} catch (error) {
-			const message = error instanceof MeshEngineError ? `${error.code}: ${error.message}` : toError(error).message;
-			this.ctx.showError(sanitizeErrorLine(`${peerTitle(peer)} unreachable: ${message}`));
+			const message =
+				error instanceof MeshEngineError
+					? `${error.code}: ${error.message}`
+					: `unreachable: ${toError(error).message}`;
+			this.ctx.showError(sanitizeErrorLine(`${peerTitle(peer)} ${message}`));
 			return false;
 		} finally {
 			if (conversation) conversation.sending = false;

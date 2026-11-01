@@ -252,6 +252,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#detailDirty = true;
 	#lastCopiedId: string | undefined;
 	#lastCopiedText: string | undefined;
+	/** Turns the copied record had: a follow-up asked since then retires the confirmation. */
+	#lastCopiedTurns = 0;
 	#native: BtwHistoryNativeMemo | undefined;
 	/** The last answer-pane scroll key, forwarded natively (see {@link NativeNode.scroll}). */
 	#scroll: NativeScroll | undefined;
@@ -345,7 +347,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#detailDirty = true;
 		const copied =
 			this.#lastCopiedId !== undefined ? records.find(record => record.id === this.#lastCopiedId) : undefined;
-		if (!copied || getBtwCopyText(copied) !== this.#lastCopiedText) {
+		if (!copied || !this.#isCopied(copied)) {
 			this.#lastCopiedId = undefined;
 			this.#lastCopiedText = undefined;
 		}
@@ -367,15 +369,21 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	/** Visual confirmation that `c` copied this record's answer to the clipboard. */
 	markCopied(recordId: string, text: string): void {
+		const record = this.#records.find(entry => entry.id === recordId);
 		this.#lastCopiedId = recordId;
 		this.#lastCopiedText = text;
+		this.#lastCopiedTurns = record ? 1 + (record.followUps?.length ?? 0) : 0;
 		this.#detailDirty = true;
 		this.#options.requestRender();
 	}
 
-	/** The confirmation survives only while the record still holds the copied text. */
+	/** The confirmation survives only while the record still holds the copied text and no newer turn. */
 	#isCopied(record: BtwHistoryRecord): boolean {
-		return record.id === this.#lastCopiedId && getBtwCopyText(record) === this.#lastCopiedText;
+		return (
+			record.id === this.#lastCopiedId &&
+			getBtwCopyText(record) === this.#lastCopiedText &&
+			1 + (record.followUps?.length ?? 0) === this.#lastCopiedTurns
+		);
 	}
 
 	invalidate(): void {

@@ -13,6 +13,7 @@
 //! working route stays in use meanwhile.
 
 use std::{
+	borrow::Cow,
 	collections::HashMap,
 	net::{IpAddr, SocketAddr},
 	sync::Arc,
@@ -20,7 +21,7 @@ use std::{
 };
 
 use pi_instances::InstanceEntry;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::transport::Endpoint;
 
@@ -169,6 +170,59 @@ impl Peer {
 	}
 }
 
+/// A peer that left the table, as last known: whoever still waits for its
+/// answers is told it is gone ([`PeerTable::take_departed`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Departed {
+	pub instance_id: String,
+	/// Its last validated snapshot.
+	snapshot:        Option<Arc<str>>,
+	/// Its reverse-DNS name.
+	dns_name:        Option<String>,
+	/// Only a local listing dropped it. A live peer the listing could not
+	/// check in time is dropped the same way: confirm against the registry.
+	pub unlisted:    bool,
+}
+
+/// Who a departed peer was, as its last snapshot (else reverse DNS) said.
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DepartedLabel<'a> {
+	#[serde(borrow, default)]
+	pub display_name: Option<Cow<'a, str>>,
+	#[serde(borrow, default)]
+	pub host:         Option<Cow<'a, str>>,
+}
+
+impl Departed {
+	/// Takes what it needs from a removed peer (no copies).
+	fn of(id: &str, peer: &mut Peer) -> Self {
+		Self {
+			instance_id: id.to_owned(),
+			snapshot:    peer.snapshot.take(),
+			dns_name:    peer.dns_name.take().map(|(_, name)| name),
+			unlisted:    false,
+		}
+	}
+
+	/// Its display name and host; blank values count as unknown.
+	pub fn label(&self) -> DepartedLabel<'_> {
+		let mut label: DepartedLabel<'_> = self
+			.snapshot
+			.as_deref()
+			.and_then(|json| serde_json::from_str(json).ok())
+			.unwrap_or_default();
+		let known = |v: &Option<Cow<'_, str>>| v.as_ref().is_some_and(|s| !s.trim().is_empty());
+		if !known(&label.display_name) {
+			label.display_name = None;
+		}
+		if !known(&label.host) {
+			label.host = self.dns_name.as_deref().map(Cow::Borrowed);
+		}
+		label
+	}
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Flags {
 	hidden:  bool,
@@ -196,6 +250,14 @@ pub struct PeerTable {
 	/// Survive removal so a rediscovered peer stays hidden/blocked.
 	flags:    HashMap<String, Flags>,
 	next_seq: u64,
+	/// Peers that left since the last [`Self::take_departed`]: dropped by
+	/// the local listing or a misdirected local route, or expired stale. Not
+	/// recorded: mDNS removals (TTL expiry, group change and our own
+	/// discovery stopping look alike), removals because a side of ours
+	/// stopped or its static configuration changed, a static address that
+	/// now answers with another id (`retain_static` from the static probe),
+	/// evicted mDNS candidates.
+	departed: Vec<Departed>,
 }
 
 impl PeerTable {
@@ -205,6 +267,7 @@ impl PeerTable {
 			peers:    HashMap::new(),
 			flags:    HashMap::new(),
 			next_seq: 0,
+			departed: Vec::new(),
 		}
 	}
 
@@ -246,11 +309,19 @@ impl PeerTable {
 		self.peers.get_mut(id)
 	}
 
-	/// Drops `id` when its last endpoint went away.
-	fn prune(&mut self, id: &str) {
-		if self.peers.get(id).is_some_and(|p| !p.has_endpoint()) {
-			self.peers.remove(id);
+	/// Drops `id` when its last endpoint went away; `record` it as departed.
+	fn prune(&mut self, id: &str, record: bool) {
+		if self.peers.get(id).is_some_and(|p| !p.has_endpoint())
+			&& let Some(mut peer) = self.peers.remove(id)
+			&& record
+		{
+			self.departed.push(Departed::of(id, &mut peer));
 		}
+	}
+
+	/// Peers that left since the last call.
+	pub fn take_departed(&mut self) -> Vec<Departed> {
+		std::mem::take(&mut self.departed)
 	}
 
 	fn listed(&self, id: &str) -> bool {
@@ -281,8 +352,12 @@ impl PeerTable {
 			.filter(|(id, p)| p.local.is_some() && !listed.contains_key(id.as_str()))
 			.map(|(id, _)| id.clone())
 			.collect();
+		let first_departed = self.departed.len();
 		for id in gone {
 			changed |= self.drop_local(&id).is_some();
+		}
+		for departed in &mut self.departed[first_departed..] {
+			departed.unlisted = true;
 		}
 		for (id, ep) in listed {
 			let Some(peer) = self.entry(id, Admit::Local) else {
@@ -305,7 +380,7 @@ impl PeerTable {
 	/// Forgets `id`'s local endpoint (unlisted) and returns it.
 	pub fn drop_local(&mut self, id: &str) -> Option<InstanceEntry> {
 		let local = self.peers.get_mut(id)?.local.take()?;
-		self.prune(id);
+		self.prune(id, true);
 		Some(local)
 	}
 
@@ -383,7 +458,7 @@ impl PeerTable {
 		};
 		peer.mdns_candidate = None;
 		let changed = peer.mdns.take().is_some();
-		self.prune(id);
+		self.prune(id, false);
 		changed
 	}
 
@@ -531,7 +606,8 @@ impl PeerTable {
 	/// or a newer one replaces it; [`MAX_CANDIDATES`] bounds that cost.
 	pub fn sweep(&mut self, now: Instant) -> bool {
 		let mut changed = false;
-		self.peers.retain(|_, p| {
+		let departed = &mut self.departed;
+		self.peers.retain(|id, p| {
 			let keep = p.local.is_some()
 				|| p.mdns.is_some()
 				|| p.mdns_candidate.is_some()
@@ -539,6 +615,9 @@ impl PeerTable {
 					.stale_since
 					.is_none_or(|since| now.duration_since(since) < STALE_REMOVE_AFTER);
 			changed |= !keep && p.verified();
+			if !keep {
+				departed.push(Departed::of(id, p));
+			}
 			keep
 		});
 		changed
@@ -576,7 +655,6 @@ impl PeerTable {
 		self.flags.get(id).is_some_and(|f| f.blocked)
 	}
 
-	#[cfg(test)]
 	pub fn contains(&self, id: &str) -> bool {
 		self.peers.contains_key(id)
 	}
@@ -814,6 +892,60 @@ mod tests {
 
 		assert!(t.contact_ok(l, 9));
 		assert_eq!(t.infos().iter().find(|i| i.instance_id == l).unwrap().state, PeerState::Online);
+	}
+
+	fn summary(d: &Departed) -> (&str, bool, Option<String>, Option<String>) {
+		let label = d.label();
+		(
+			d.instance_id.as_str(),
+			d.unlisted,
+			label.display_name.map(Into::into),
+			label.host.map(Into::into),
+		)
+	}
+
+	#[test]
+	fn departures_are_recorded_with_last_known_sender_info() {
+		let start = Instant::now();
+		let mut t = PeerTable::new(OWN);
+		let (l, s, r) = ("2222222222222222", "3333333333333333", "4444444444444444");
+		t.set_local_listing(&[local(l, 1), local(P, 2)], 1);
+		assert!(t.snapshot_ok(l, Arc::from(r#"{"displayName":"alice","host":"pc1","x":1}"#), 1));
+		t.static_up(P, sa("10.0.0.9:9"), snap(), 1);
+		t.set_local_listing(&[], 2);
+		let gone = t.take_departed();
+		assert_eq!(gone.iter().map(summary).collect::<Vec<_>>(), [(
+			l,
+			true,
+			Some("alice".to_owned()),
+			Some("pc1".to_owned())
+		)]);
+		assert!(t.contains(P), "still reachable remotely: not departed");
+		assert!(t.take_departed().is_empty(), "taken once");
+
+		t.static_up(s, sa("10.0.0.2:9"), Arc::from(r#"{"displayName":" ","host":""}"#), 1);
+		assert!(t.set_dns_name(s, "10.0.0.2".parse().unwrap(), "s.lan".into()));
+		for _ in 0..STALE_AFTER_FAILURES {
+			t.contact_failed(s, start);
+		}
+		t.sweep(start + STALE_REMOVE_AFTER);
+		let gone = t.take_departed();
+		assert_eq!(gone.iter().map(summary).collect::<Vec<_>>(), [(
+			s,
+			false,
+			None,
+			Some("s.lan".to_owned())
+		)]);
+
+		t.mdns_up(r, mdns("10.0.0.1:9"), 1);
+		t.promote_mdns(r, sa("10.0.0.1:9"), snap(), 1);
+		assert!(t.mdns_down(r));
+		assert!(!t.contains(r));
+		assert!(t.take_departed().is_empty(), "mDNS removals are not departures");
+		t.mdns_up(r, mdns("10.0.0.1:9"), 1);
+		t.promote_mdns(r, sa("10.0.0.1:9"), snap(), 1);
+		assert!(t.clear_remote());
+		assert!(t.take_departed().is_empty(), "our side stopping is not a departure");
 	}
 
 	#[test]

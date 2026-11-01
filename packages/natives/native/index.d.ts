@@ -515,6 +515,7 @@ export declare class MacOSFrontApp {
   keepInFront(durationMs: number): Promise<number>
 }
 export type MacosFrontApp = MacOSFrontApp
+
 /**
  * One mesh participant: local registry + LAN listener, discovery, peer
  * table, snapshot serving and request/response messaging.
@@ -3266,8 +3267,10 @@ export declare function meshDeriveKey(passphrase: string): Promise<string>
  *
  * `peers`: re-read `peers()`. `status`: re-read `status()`. `inbound`:
  * answer `requestId` via `respond()` within 30 s. `reply`: an answer
- * (`envelopeJson`) to the tracked request of `ticket` nobody awaits.
- * `pending_dropped`: `tickets` are no longer tracked (TTL, size cap, close).
+ * (`envelopeJson`) to the tracked request of `ticket` nobody awaits
+ * (including the error answer made up for a peer that left before
+ * answering). `pending_dropped`: `tickets` are no longer tracked (TTL, size
+ * cap, close, or their peer left the mesh).
  */
 export interface MeshEvent {
   kind: 'peers' | 'status' | 'inbound' | 'reply' | 'pending_dropped'

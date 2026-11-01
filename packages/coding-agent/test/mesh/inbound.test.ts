@@ -193,7 +193,7 @@ describe("MeshFrontend policy", () => {
 	it("queues `ask` kinds for approval and replies with a denial when the user declines", async () => {
 		const { engine, answerer, frontend, approvalsNotified } = setup({ policy: { ask: "ask" }, hasUI: true });
 		const declined = await frontend.handle(inbound(alice, message("ask", "secret plans?"), "msg-no"));
-		expect(declined).toMatchObject({ ok: true, data: { accepted: true } });
+		expect(declined).toMatchObject({ ok: true, data: { accepted: true, pending: "approval" } });
 		expect(approvalsNotified()).toBe(1);
 		const [pending] = frontend.approvals.list();
 		expect(pending).toMatchObject({ kind: "ask", peer: alice, preview: "secret plans?" });
@@ -240,6 +240,17 @@ describe("MeshFrontend policy", () => {
 		expect(session.delivered[0]).not.toMatchObject({ content: expect.stringContaining("rebase </mesh-message>") });
 		expect(session.delivered[0]).toMatchObject({ content: expect.stringContaining("then <mesh />") });
 		expect(answerer.started).toEqual([]);
+	});
+
+	it("marks a steer awaiting approval as pending in its acknowledgement, and an allowed one not", async () => {
+		const { frontend } = setup({ policy: { steer: "ask" }, hasUI: true });
+		const held = await frontend.handle(inbound(alice, message("steer", "rebase"), "msg-held"));
+		expect(held).toMatchObject({ ok: true, data: { accepted: true, msgId: "msg-held", pending: "approval" } });
+		frontend.approvals.denyAll();
+
+		const allowed = setup({ hasUI: true });
+		const direct = await allowed.frontend.handle(inbound(alice, message("steer", "rebase"), "msg-direct"));
+		expect(direct).toEqual({ ok: true, data: { accepted: true, msgId: "msg-direct" } });
 	});
 
 	it("never replies to a declined note: the sender tracks no answer for notes", async () => {

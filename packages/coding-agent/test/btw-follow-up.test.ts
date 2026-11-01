@@ -988,6 +988,15 @@ describe("BTW follow-up composer", () => {
 		h.panel.update([{ ...h.record, answer: "Follow-up answer", updatedAt: 3 }]);
 		expect(Bun.stripANSI(h.panel.render(120).join("\n"))).not.toContain("Copied to clipboard");
 	});
+	it("drops the copy confirmation once a follow-up starts", () => {
+		const h = composer(vi.fn(async () => true));
+		h.panel.markCopied(h.record.id, h.record.answer);
+		const followUp = { question: "And then?", answer: "", status: "running" as const, createdAt: 3, updatedAt: 3 };
+		h.panel.update([{ ...h.record, followUps: [followUp] }]);
+		const rendered = Bun.stripANSI(h.panel.render(120).join("\n"));
+		expect(rendered).not.toContain("Copied to clipboard");
+		expect(rendered).not.toContain("copy again");
+	});
 	it("treats f/c/x as draft text and lets Escape cancel only the composer", () => {
 		const followUp = vi.fn(async () => true);
 		const h = composer(followUp);

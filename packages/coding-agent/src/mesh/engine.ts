@@ -81,7 +81,7 @@ export interface MeshEngine {
 	forgetPending(tickets: readonly string[]): void;
 	/** Answers to tracked requests nobody awaits, by ticket. */
 	onReply(listener: (ticket: string, reply: MeshIncomingReply) => void): () => void;
-	/** Tickets the engine stopped tracking (TTL, size cap, close). */
+	/** Tickets the engine stopped tracking (TTL, size cap, close, or their peer left the mesh). */
 	onPendingDropped(listener: (tickets: readonly string[]) => void): () => void;
 	setSnapshot(snapshot: MeshSnapshot): void;
 	refresh(): void;

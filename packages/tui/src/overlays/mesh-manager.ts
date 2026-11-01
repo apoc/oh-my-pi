@@ -414,7 +414,8 @@ export class MeshManagerComponent implements Component {
 		if (matchesSelectCancel(data) || matchesKey(data, "enter")) this.#details = undefined;
 		else if (matchesSelectUp(data)) details.scroll = Math.max(0, details.scroll - 1);
 		else if (matchesSelectDown(data)) details.scroll++;
-		else if (!this.#handleAction(data)) return;
+		// Approvals are decided from the list only; the details view shows a peer, never a request.
+		else if (data === "a" || data === "d" || !this.#handleAction(data)) return;
 		this.#options.requestRender();
 	}
 
@@ -901,24 +902,14 @@ export class MeshManagerComponent implements Component {
 	/** Footer hints, the way out first so a narrow terminal never cuts it. */
 	#footerHints(): string[] {
 		if (this.#prompt) return ["esc cancel"];
-		if (!this.#state.enabled) return ["esc close", "e enable", "m mode", "k key phrase"];
+		if (!this.#state.enabled) return [this.#details ? "esc back" : "esc close", "e enable", "m mode", "k key phrase"];
 		const ask = this.#options.onAsk ? ["q ask"] : [];
-		if (this.#details) return ["esc back", "↑↓ scroll", "c compose", ...ask, "h hide", "b block"];
-		return [
-			"esc close",
-			"↑↓ select",
-			"enter details",
-			"a/d approve/deny",
-			"c compose",
-			...ask,
-			"h hide",
-			"b block",
-			"v show hidden",
-			"m mode",
-			"k key",
-			"r refresh",
-			"e disable",
-		];
+		const target = this.#targetPeer();
+		const flags = [target?.hidden ? "h unhide" : "h hide", target?.blocked ? "b unblock" : "b block"];
+		const showHidden = this.#showHidden ? "v hide hidden" : "v show hidden";
+		const shared = ["c compose", ...ask, ...flags, showHidden, "m mode", "k key", "r refresh", "e disable"];
+		if (this.#details) return ["esc back", "↑↓ scroll", ...shared];
+		return ["esc close", "↑↓ select", "enter details", "a/d approve/deny", ...shared];
 	}
 
 	// -- native (Tern) ---------------------------------------------------------

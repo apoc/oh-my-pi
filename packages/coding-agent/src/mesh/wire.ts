@@ -62,12 +62,14 @@ export type MeshResponse = { ok: true; data: unknown } | { ok: false; code: Mesh
 /**
  * `data` of an accepted `message`. `msgId` echoes the request envelope id: the sender's engine
  * assigns it, so the ack is the only place the sender learns which `replyTo` the answer will carry.
- * `thread` is present for thread kinds (status/ask/task).
+ * `thread` is present for thread kinds (status/ask/task); `pending: "approval"` when the recipient's
+ * user must still approve the message.
  */
 export interface MeshMessageResult {
 	accepted: true;
 	msgId: string;
 	thread?: string;
+	pending?: "approval";
 }
 
 /** `data` of an accepted `watch`. */

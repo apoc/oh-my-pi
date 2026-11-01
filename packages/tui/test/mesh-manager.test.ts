@@ -472,6 +472,25 @@ describe("mesh manager on Tern", () => {
 		}
 	});
 
+	test("a/d in details never resolve the approval the picker fell back to", () => {
+		vi.useFakeTimers();
+		try {
+			const { manager, runtime } = mount(baseState());
+			manager.handleNativeEvent({ type: "activate", key: "", item: "peer:a" });
+			// The open peer leaves the list, so the picker's selection falls back to the first row.
+			runtime.state = { ...runtime.state, peers: runtime.state.peers.filter(entry => entry.instanceId !== "a") };
+			for (const listener of runtime.listeners) listener();
+			vi.advanceTimersByTime(150);
+			expect(pickerProps(manager).selected).toBe("approval:ap1");
+			manager.handleInput("a");
+			manager.handleInput("d");
+			expect(runtime.calls).toEqual([]);
+			manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("compose picks a kind on the strip, then sends from an input card", async () => {
 		const { manager, runtime } = mount({ ...baseState(), approvals: [] });
 		act(manager, "c");
