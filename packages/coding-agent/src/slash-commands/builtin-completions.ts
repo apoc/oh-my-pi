@@ -9,6 +9,7 @@ import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { InternalUrlRouter } from "../internal-urls";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
+import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-display";
 import { encodeLocalPath, sessionLocalProtocolOptions } from "../modes/local-file-editor";
 import { createModelBrowserSource } from "../modes/model-browser-source";
 import {
@@ -444,12 +445,12 @@ export function buildMeshPeerArgumentCompletions(
 			) {
 				continue;
 			}
-			const name = replaceTabs(sanitizeText(snapshot.displayName));
+			const name = meshDisplayText(snapshot.displayName);
 			const details = [name, peer.instanceId.slice(0, 8), snapshot.busy ? "busy" : "idle"];
-			if (snapshot.repo?.branch) details.push(replaceTabs(sanitizeText(snapshot.repo.branch)));
+			if (snapshot.repo?.branch) details.push(meshDisplayText(snapshot.repo.branch));
 			matches.push({
 				value: `${peer.instanceId} `,
-				label: sessionName ? replaceTabs(sanitizeText(sessionName)) : name,
+				label: meshDisplayText(sessionName) || name,
 				description: details.join(" · "),
 			});
 		}

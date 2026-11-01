@@ -4,17 +4,8 @@
  * (`reply`, `watch_event`) with the requests that asked for them; everything in `src/mesh/` codes
  * against this interface so tests can drive it with fakes.
  */
+import type { MeshStatus } from "@oh-my-pi/pi-natives";
 import type { MeshEnvelope, MeshRequest, MeshResponse, MeshSender, MeshSnapshot, MeshWatchEvent } from "./wire";
-
-export type MeshMode = "off" | "local" | "remote" | "both";
-
-export interface MeshStatus {
-	mode: MeshMode;
-	local: "on" | "off" | "error";
-	remote: "on" | "off" | "no-key" | "error";
-	lanPort?: number;
-	error?: string;
-}
 
 export interface MeshPeerView {
 	instanceId: string;

@@ -34,7 +34,10 @@ use unix as platform;
 use windows as platform;
 
 #[cfg(unix)]
-pub use self::unix::{is_private_dir, is_same_file};
+pub use self::unix::{
+	BIND_LOCK_SUFFIX, bind_lock_options, bind_lock_path, is_private_dir, is_same_file,
+	tighten_owned_dir,
+};
 pub use self::{
 	endpoint::endpoint,
 	platform::{
@@ -79,11 +82,6 @@ impl IpcError {
 	/// Errno-style code.
 	pub const fn code(&self) -> &'static str {
 		self.code
-	}
-
-	/// Human-readable description, without the code.
-	pub fn message(&self) -> &str {
-		&self.message
 	}
 
 	/// Description without the code, by value.

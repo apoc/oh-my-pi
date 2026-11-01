@@ -66,12 +66,6 @@ pub fn is_orderly_eof(error: &io::Error) -> bool {
 	)
 }
 
-/// Security descriptor granting the pipe to the current user only.
-fn pipe_security() -> io::Result<Descriptor> {
-	let sid = current_user()?.sid_string()?;
-	Descriptor::from_sddl(&format!("D:P(A;;GA;;;{sid})"))
-}
-
 fn create_instance(security: &Descriptor, name: &str, first: bool) -> io::Result<NamedPipeServer> {
 	let mut options = ServerOptions::new();
 	options
@@ -126,8 +120,8 @@ impl Listener {
 /// Requires a Tokio runtime (the pipe registers with its reactor).
 #[allow(clippy::unused_async, reason = "async on Unix; one shared call shape")]
 pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
-	let security =
-		pipe_security().map_err(|error| IpcError::io(&error, "build pipe security descriptor"))?;
+	let security = Descriptor::for_current_user(|sid| format!("D:P(A;;GA;;;{sid})"))
+		.map_err(|error| IpcError::io(&error, "build pipe security descriptor"))?;
 	let first = create_instance(&security, endpoint, true).map_err(|error| {
 		match error.raw_os_error().map(|code| code as u32) {
 			Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY) => {
@@ -139,10 +133,8 @@ pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
 	Ok((Listener { name: endpoint.to_owned(), security, pending: Some(first) }, Bound(())))
 }
 
-/// Dial `endpoint` and verify the server process runs as our user.
-///
-/// `ERROR_PIPE_BUSY` is retried until `timeout`; that is all `timeout`
-/// bounds. Wrap the call in `tokio::time::timeout` for a full deadline.
+/// Dial `endpoint`, waiting out `ERROR_PIPE_BUSY` until `timeout`, then
+/// verify the server process runs as our user.
 pub async fn connect(endpoint: &str, timeout: Duration) -> Result<Stream, IpcError> {
 	let deadline = Instant::now() + timeout;
 	let client = loop {

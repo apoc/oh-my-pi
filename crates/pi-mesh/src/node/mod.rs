@@ -17,15 +17,14 @@ mod replies;
 mod tests;
 
 use std::{
-	borrow::Cow,
 	collections::{HashMap, HashSet},
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	sync::{Arc, Weak},
-	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+	time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
-use pi_instances::{InstanceHost, Registration};
+use pi_instances::{InstanceHost, Registration, now_ms, random_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -45,7 +44,7 @@ pub use self::{
 use crate::{
 	discovery::{DiscoveryEvent, MdnsConfig, MdnsDiscovery},
 	error::ProtocolError,
-	keys::{MeshKeys, ReplayGuard, hex, random_bytes},
+	keys::{MeshKeys, ReplayGuard},
 	net::{self, ReverseDns},
 	protocol::{
 		ANY_INSTANCE, MAX_ENVELOPE_BYTES, MeshEnvelope, MeshErrorCode, MeshRequest, MeshResponse,
@@ -94,10 +93,9 @@ pub struct NodeOptions {
 	/// Same-machine instance: its id is the node's instance id; the local side
 	/// registers the `mesh` namespace on it and lists peers in its registry
 	/// directory. Shared with other namespaces; the node never closes it.
-	pub host:         Arc<InstanceHost>,
-	pub display_name: String,
+	pub host:      Arc<InstanceHost>,
 	/// Machine host name sent in envelopes.
-	pub host_name:    String,
+	pub host_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,14 +189,12 @@ const MALFORMED_WATCH_ACK: &str = "Peer accepted the watch with a missing or mal
 const KEY_TAKEN_MESSAGE: &str = "Peer acknowledged with a message id already in use.";
 const KEY_TAKEN_WATCH: &str = "Peer accepted the watch with a watch id already in use.";
 
-/// mDNS discovery as the node uses it (seam for tests).
-pub(crate) trait MdnsStarter: Send + Sync + 'static {
-	fn start(
-		&self,
-		cfg: MdnsConfig,
-		events: mpsc::Sender<DiscoveryEvent>,
-	) -> Result<Arc<dyn MdnsHandle>, String>;
-}
+/// Starts mDNS discovery (seam for tests).
+pub(crate) type MdnsStart = Arc<
+	dyn Fn(MdnsConfig, mpsc::Sender<DiscoveryEvent>) -> Result<Arc<dyn MdnsHandle>, String>
+		+ Send
+		+ Sync,
+>;
 
 pub(crate) trait MdnsHandle: Send + Sync + 'static {
 	fn refresh(&self);
@@ -208,17 +204,12 @@ pub(crate) trait MdnsHandle: Send + Sync + 'static {
 	fn stop(&self) -> BoxFuture<()>;
 }
 
-struct RealMdns;
-
-impl MdnsStarter for RealMdns {
-	fn start(
-		&self,
-		cfg: MdnsConfig,
-		events: mpsc::Sender<DiscoveryEvent>,
-	) -> Result<Arc<dyn MdnsHandle>, String> {
-		let discovery = MdnsDiscovery::start(cfg, events).map_err(|e| e.to_string())?;
-		Ok(Arc::new(Mutex::new(Some(discovery))))
-	}
+fn start_mdns(
+	cfg: MdnsConfig,
+	events: mpsc::Sender<DiscoveryEvent>,
+) -> Result<Arc<dyn MdnsHandle>, String> {
+	let discovery = MdnsDiscovery::start(cfg, events).map_err(|e| e.to_string())?;
+	Ok(Arc::new(Mutex::new(Some(discovery))))
 }
 
 impl MdnsHandle for Mutex<Option<MdnsDiscovery>> {
@@ -247,7 +238,7 @@ impl MdnsHandle for Mutex<Option<MdnsDiscovery>> {
 
 /// Injection points and intervals (tests shorten/replace them).
 pub(crate) struct Seams {
-	pub mdns:             Arc<dyn MdnsStarter>,
+	pub mdns:             MdnsStart,
 	pub is_same_machine:  fn(IpAddr) -> bool,
 	pub rdns:             ReverseDns,
 	/// LAN listener bind address (`0.0.0.0` in production).
@@ -262,7 +253,7 @@ pub(crate) struct Seams {
 impl Default for Seams {
 	fn default() -> Self {
 		Self {
-			mdns:             Arc::new(RealMdns),
+			mdns:             Arc::new(start_mdns),
 			is_same_machine:  net::is_same_machine,
 			rdns:             ReverseDns::default(),
 			lan_bind:         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -289,9 +280,9 @@ struct State {
 	replies:        Replies,
 	client:         MeshClient,
 	local_on:       bool,
-	remote_on:      bool,
+	/// Bound LAN port while the remote side is on.
 	lan_port:       Option<u16>,
-	mdns:           Option<Arc<dyn MdnsHandle>>,
+	mdns:           Option<MdnsPart>,
 	static_specs:   Vec<String>,
 	/// Static spec -> (address that answered, instance id it reported).
 	static_learned: HashMap<String, (SocketAddr, String)>,
@@ -336,7 +327,6 @@ struct RemotePart {
 	cfg_port: u16,
 	keys:     Arc<MeshKeys>,
 	lan:      LanListener,
-	mdns:     Option<MdnsPart>,
 }
 
 #[derive(Default)]
@@ -377,18 +367,6 @@ enum Fetched {
 	Failed(TransportError),
 }
 
-fn now_ms() -> u64 {
-	SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-fn new_msg_id() -> String {
-	let mut raw = [0u8; 12];
-	random_bytes(&mut raw);
-	hex(&raw)
-}
-
 /// Classifies a snapshot response; `expected` is the id the route should
 /// serve (`None` for a `*` probe: any id but ours).
 fn classify_snapshot(
@@ -398,11 +376,10 @@ fn classify_snapshot(
 ) -> Fetched {
 	let value = match result {
 		Ok(MeshResponse::Ok(value)) => value,
-		Ok(MeshResponse::OkRaw(json)) => match serde_json::from_str(&json) {
-			Ok(value) => value,
-			Err(_) => return Fetched::Rejected,
+		// Client-side responses are parsed, never `OkRaw`.
+		Ok(MeshResponse::Err { code: MeshErrorCode::Unauthorized, .. } | MeshResponse::OkRaw(_)) => {
+			return Fetched::Rejected;
 		},
-		Ok(MeshResponse::Err { code: MeshErrorCode::Unauthorized, .. }) => return Fetched::Rejected,
 		Ok(MeshResponse::Err { .. }) => return Fetched::Alive,
 		Err(err) => return Fetched::Failed(err),
 	};
@@ -442,7 +419,7 @@ impl MeshNode {
 			seams,
 			events,
 			state: Mutex::new(State {
-				display_name:   opts.display_name,
+				display_name:   String::new(),
 				snapshot:       None,
 				status:         NodeStatus::OFF,
 				config_error:   None,
@@ -453,7 +430,6 @@ impl MeshNode {
 				replies:        Replies::default(),
 				client:         MeshClient::new(None),
 				local_on:       false,
-				remote_on:      false,
 				lan_port:       None,
 				mdns:           None,
 				static_specs:   Vec::new(),
@@ -484,7 +460,7 @@ impl MeshNode {
 	}
 
 	fn sink(&self) -> Arc<dyn InboundSink> {
-		Arc::new(NodeSink(self.me.clone()))
+		Arc::new(self.me.clone())
 	}
 
 	fn mark_peers_dirty(&self) {
@@ -528,7 +504,12 @@ impl MeshNode {
 	/// Re-query mDNS, re-list local peers, re-probe static peers and refetch
 	/// snapshots now.
 	pub fn refresh(&self) {
-		let mdns = self.state.lock().mdns.clone();
+		let mdns = self
+			.state
+			.lock()
+			.mdns
+			.as_ref()
+			.map(|m| Arc::clone(&m.handle));
 		if let Some(mdns) = mdns {
 			mdns.refresh();
 		}
@@ -536,8 +517,9 @@ impl MeshNode {
 		self.signals.wake_refresh.notify_one();
 	}
 
-	/// In-memory hide/block flags; blocked senders are denied.
-	pub fn set_peer_flags(&self, instance_id: &str, hidden: bool, blocked: bool) {
+	/// In-memory hide/block flags (`None` keeps the current value); blocked
+	/// senders are denied.
+	pub fn set_peer_flags(&self, instance_id: &str, hidden: Option<bool>, blocked: Option<bool>) {
 		if self
 			.state
 			.lock()
@@ -562,7 +544,7 @@ impl MeshNode {
 		};
 		MeshEnvelope {
 			v: PROTOCOL_VERSION,
-			msg_id: new_msg_id(),
+			msg_id: random_hex(12),
 			sent_at: now_ms(),
 			hop: 0,
 			from: MeshSender {
@@ -574,7 +556,7 @@ impl MeshNode {
 				} else {
 					self.host_name.clone()
 				},
-				lan_port: st.lan_port.filter(|_| st.remote_on),
+				lan_port: st.lan_port,
 			},
 			to: to.to_owned(),
 			body,
@@ -605,7 +587,7 @@ impl MeshNode {
 			let st = self.state.lock();
 			let endpoint = st
 				.table
-				.route(to, st.local_on, st.remote_on)
+				.route(to, st.local_on, st.lan_port.is_some())
 				.ok_or_else(|| TransportError::Unreachable(format!("no reachable mesh peer {to}")))?;
 			(endpoint, st.client.clone())
 		};
@@ -613,14 +595,12 @@ impl MeshNode {
 		let env = self.envelope(to, from_agent_id, body);
 		// Answers may overtake the acknowledgement only for tracked requests in
 		// flight.
-		let inflight = track.as_ref().and_then(|_| match expected {
-			Expected::Message { tracked: true } => {
-				Some(Inflight::Message(to.to_owned(), env.msg_id.clone()))
-			},
-			Expected::Watch { .. } => Some(Inflight::Watch(to.to_owned())),
-			_ => None,
+		let _inflight = expected.filter(|e| e.tracked && track.is_some()).map(|e| {
+			InflightGuard::new(self, match e.op {
+				ReplyOp::Reply => Inflight::Message(to.to_owned(), env.msg_id.clone()),
+				ReplyOp::WatchEvent => Inflight::Watch(to.to_owned()),
+			})
 		});
-		let _inflight = inflight.map(|inflight| InflightGuard::new(self, inflight));
 		let result = client.request(&endpoint, &env, timeout).await;
 		let ok = match &result {
 			Ok(MeshResponse::Err { code: MeshErrorCode::Unauthorized, .. }) => false,
@@ -640,46 +620,46 @@ impl MeshNode {
 		&self,
 		to: &str,
 		msg_id: &str,
-		expected: Expected,
+		expected: Option<Expected>,
 		track: Option<Track>,
 		response: MeshResponse,
 	) -> MeshResponse {
-		let data = match &response {
-			MeshResponse::Err { .. } => return response,
-			MeshResponse::Ok(value) => Cow::Borrowed(value),
-			MeshResponse::OkRaw(json) => Cow::Owned(serde_json::from_str(json).unwrap_or_default()),
+		let Some(expected) = expected else {
+			return response;
 		};
-		let tracked = match expected {
-			Expected::Other => None,
-			Expected::Message { tracked } => match parse_message_ack(&data) {
-				Some(ack) if ack.msg_id == msg_id => {
-					tracked.then_some(Ok((ack.msg_id, ReplyOp::Reply, PENDING_TTL, KEY_TAKEN_MESSAGE)))
-				},
-				_ => Some(Err(MALFORMED_MESSAGE_ACK)),
-			},
-			Expected::Watch { ttl } => Some(
-				parse_watch_ack(&data)
-					.map(|id| (id, ReplyOp::WatchEvent, ttl, KEY_TAKEN_WATCH))
-					.ok_or(MALFORMED_WATCH_ACK),
+		// Client-side responses are parsed, never `OkRaw`.
+		let MeshResponse::Ok(data) = &response else {
+			return response;
+		};
+		let (key, malformed, taken) = match expected.op {
+			ReplyOp::Reply => (
+				parse_message_ack(data)
+					.map(|ack| ack.msg_id)
+					.filter(|id| id == msg_id),
+				MALFORMED_MESSAGE_ACK,
+				KEY_TAKEN_MESSAGE,
 			),
+			ReplyOp::WatchEvent => (parse_watch_ack(data), MALFORMED_WATCH_ACK, KEY_TAKEN_WATCH),
 		};
-		// Ends the borrow of `response` (`Cow` has drop glue).
-		drop(data);
-		let (key, op, ttl, taken) = match tracked {
-			None => return response,
-			Some(Err(message)) => return MeshResponse::error(MeshErrorCode::Internal, message),
-			Some(Ok(tracked)) => tracked,
+		let Some(key) = key else {
+			return MeshResponse::error(MeshErrorCode::Internal, malformed);
 		};
-		let Some(track) = track else {
+		let Some(track) = track.filter(|_| expected.tracked) else {
 			return response;
 		};
 		let mut st = self.state.lock();
 		if st.closed {
 			return response;
 		}
-		let (fx, registered) =
-			st.replies
-				.register(key, op, to.to_owned(), track.ticket, track.hold, ttl, Instant::now());
+		let (fx, registered) = st.replies.register(
+			key,
+			expected.op,
+			to.to_owned(),
+			track.ticket,
+			track.hold,
+			expected.ttl,
+			Instant::now(),
+		);
 		self.emit(fx);
 		match registered {
 			Ok(()) => response,
@@ -844,18 +824,22 @@ impl MeshNode {
 		LocalState::On
 	}
 
+	/// Stops mDNS discovery, if running.
+	async fn stop_mdns(&self) {
+		let mdns = self.state.lock().mdns.take();
+		if let Some(mdns) = mdns {
+			mdns.handle.stop().await;
+			mdns.task.abort();
+		}
+	}
+
 	async fn stop_remote(&self, parts: &mut Parts) -> bool {
+		self.stop_mdns().await;
 		if let Some(remote) = parts.remote.take() {
-			if let Some(mdns) = remote.mdns {
-				mdns.handle.stop().await;
-				mdns.task.abort();
-			}
 			remote.lan.close().await;
 		}
 		let mut st = self.state.lock();
-		st.remote_on = false;
 		st.lan_port = None;
-		st.mdns = None;
 		st.client = MeshClient::new(None);
 		st.static_specs.clear();
 		st.static_learned.clear();
@@ -911,16 +895,10 @@ impl MeshNode {
 			{
 				Ok(lan) => {
 					let mut st = self.state.lock();
-					st.remote_on = true;
 					st.lan_port = Some(lan.port());
 					st.client = MeshClient::new(Some(Arc::clone(&keys)));
-					parts.remote = Some(RemotePart {
-						key: key.to_owned(),
-						cfg_port: cfg.lan_port,
-						keys,
-						lan,
-						mdns: None,
-					});
+					parts.remote =
+						Some(RemotePart { key: key.to_owned(), cfg_port: cfg.lan_port, keys, lan });
 				},
 				Err(err) => {
 					errors.push(format!("remote: cannot listen on {bind}: {err}"));
@@ -937,27 +915,25 @@ impl MeshNode {
 	/// Starts mDNS when missing (retry after a failure), restarts it when its
 	/// identity changed or the host's interfaces require it. True when the
 	/// visible peer list changed.
-	async fn ensure_mdns(&self, parts: &mut Parts, display_name: &str) -> bool {
-		let Some(remote) = parts.remote.as_mut() else {
+	async fn ensure_mdns(&self, parts: &Parts, display_name: &str) -> bool {
+		let Some(remote) = parts.remote.as_ref() else {
 			return false;
 		};
 		let lan_port = remote.lan.port();
 		let key: MdnsKey = (remote.keys.group_tag().to_owned(), lan_port, display_name.to_owned());
-		if remote
+		let current = self
+			.state
+			.lock()
 			.mdns
 			.as_ref()
-			.is_some_and(|m| m.key == key && !m.handle.needs_restart())
-		{
-			return false;
-		}
-		let dirty = if let Some(old) = remote.mdns.take() {
-			old.handle.stop().await;
-			old.task.abort();
-			let mut st = self.state.lock();
-			st.mdns = None;
-			st.table.clear_mdns()
-		} else {
-			false
+			.map(|m| (m.key == key, Arc::clone(&m.handle)));
+		let dirty = match current {
+			Some((same, handle)) if same && !handle.needs_restart() => return false,
+			Some(_) => {
+				self.stop_mdns().await;
+				self.state.lock().table.clear_mdns()
+			},
+			None => false,
 		};
 		let (tx, rx) = mpsc::channel(64);
 		let mdns_cfg = MdnsConfig {
@@ -970,13 +946,12 @@ impl MeshNode {
 			port:         lan_port,
 			group_tag:    key.0.clone(),
 		};
-		match self.seams.mdns.start(mdns_cfg, tx) {
+		match (self.seams.mdns)(mdns_cfg, tx) {
 			Ok(handle) => {
 				let task = tokio::spawn(mdns_event_loop(self.me.clone(), rx));
 				let mut st = self.state.lock();
-				st.mdns = Some(Arc::clone(&handle));
+				st.mdns = Some(MdnsPart { key, handle, task });
 				st.mdns_error = None;
-				remote.mdns = Some(MdnsPart { key, handle, task });
 			},
 			Err(err) => self.state.lock().mdns_error = Some(err),
 		}
@@ -985,15 +960,15 @@ impl MeshNode {
 
 	/// Refresh-loop hook: retry/restart mDNS and publish a changed status.
 	async fn maintain_mdns(&self) {
-		let mut parts = self.parts.lock().await;
+		let parts = self.parts.lock().await;
 		let display_name = {
 			let st = self.state.lock();
-			if st.closed || !st.remote_on {
+			if st.closed || st.lan_port.is_none() {
 				return;
 			}
 			st.display_name.clone()
 		};
-		let dirty = self.ensure_mdns(&mut parts, &display_name).await;
+		let dirty = self.ensure_mdns(&parts, &display_name).await;
 		drop(parts);
 		if dirty {
 			self.mark_peers_dirty();
@@ -1087,7 +1062,7 @@ impl MeshNode {
 	async fn fetch_snapshot(&self, id: &str) {
 		let endpoint = {
 			let st = self.state.lock();
-			let Some(endpoint) = st.table.route(id, st.local_on, st.remote_on) else {
+			let Some(endpoint) = st.table.route(id, st.local_on, st.lan_port.is_some()) else {
 				return;
 			};
 			endpoint
@@ -1135,9 +1110,7 @@ impl MeshNode {
 	/// id now answering there, or the previously learned id when the probe
 	/// failed (both count as handled for this refresh round).
 	async fn probe_static(&self, spec: &str) -> Option<String> {
-		if !self.state.lock().remote_on {
-			return None;
-		}
+		self.state.lock().lan_port?;
 		let fetched = match resolve_static(spec, self.seams.probe_timeout).await {
 			Some(addr) => {
 				let fetched = self
@@ -1271,7 +1244,7 @@ impl MeshNode {
 		match origin.kind {
 			OriginKind::Remote => {
 				let (Some(port), Some(from)) =
-					(env.from.lan_port.filter(|_| st.remote_on), origin.addr)
+					(env.from.lan_port.filter(|_| st.lan_port.is_some()), origin.addr)
 				else {
 					return;
 				};
@@ -1397,28 +1370,31 @@ impl MeshNode {
 	}
 }
 
-/// What the acknowledgement of an outbound request must carry.
+/// What the acknowledgement of a `message` / `watch` request must carry
+/// (`msgId` / `watchId`) and how its answers are tracked.
 #[derive(Clone, Copy)]
-enum Expected {
-	Other,
-	/// `msgId` (+ optional thread); tracked unless a note.
-	Message {
-		tracked: bool,
-	},
-	/// `watchId`; tracked for the watch's lifetime.
-	Watch {
-		ttl: Duration,
-	},
+struct Expected {
+	op:      ReplyOp,
+	/// False for a note: acknowledged, never answered.
+	tracked: bool,
+	ttl:     Duration,
 }
 
 impl Expected {
-	fn of(body: &MeshRequest) -> Self {
+	fn of(body: &MeshRequest) -> Option<Self> {
 		match body {
-			MeshRequest::Message { kind, .. } => Self::Message { tracked: *kind != MessageKind::Note },
-			MeshRequest::Watch { ttl_sec, .. } => {
-				Self::Watch { ttl: Duration::from_secs(u64::from(*ttl_sec)) }
-			},
-			_ => Self::Other,
+			MeshRequest::Message { kind, .. } => Some(Self {
+				op:      ReplyOp::Reply,
+				tracked: *kind != MessageKind::Note,
+				ttl:     PENDING_TTL,
+			}),
+			// Tracked for the watch's lifetime.
+			MeshRequest::Watch { ttl_sec, .. } => Some(Self {
+				op:      ReplyOp::WatchEvent,
+				tracked: true,
+				ttl:     Duration::from_secs(u64::from(*ttl_sec)),
+			}),
+			_ => None,
 		}
 	}
 }
@@ -1482,11 +1458,10 @@ impl Drop for MeshNode {
 	}
 }
 
-struct NodeSink(Weak<MeshNode>);
-
-impl InboundSink for NodeSink {
+/// The listeners' sink: weak, so they do not keep the node alive.
+impl InboundSink for Weak<MeshNode> {
 	fn handle(&self, envelope: MeshEnvelope, origin: Origin) -> BoxFuture<MeshResponse> {
-		let node = self.0.upgrade();
+		let node = self.upgrade();
 		Box::pin(async move {
 			match node {
 				Some(node) => node.handle_inbound(envelope, origin).await,

@@ -3,9 +3,7 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::{
-	HostError, InstanceError, InstanceHost, Probe, ProbeRequest, list, remove_entry_if, request,
-};
+use crate::{HostError, InstanceError, InstanceHost, ProbeRequest, list, remove_entry_if, request};
 
 fn ping() -> Box<RawValue> {
 	raw(&json!({ "x": 1 }))
@@ -256,7 +254,7 @@ async fn client_maps_answers_and_caps() {
 }
 
 #[tokio::test]
-async fn connection_limit_answers_busy_and_counts_as_alive() {
+async fn connection_limit_answers_busy_and_list_omits_without_pruning() {
 	let tmp = tempfile::tempdir().unwrap();
 	let dir = tmp.path();
 	let host = InstanceHost::new(dir, Some(A.into())).unwrap();
@@ -276,7 +274,7 @@ async fn connection_limit_answers_busy_and_counts_as_alive() {
 		max_response: MAX_RESPONSE,
 	};
 	let listed = list(dir, "echo", None, probe, TIMEOUT).await.unwrap();
-	assert!(matches!(listed.as_slice(), [(e, Probe::Busy)] if e.instance_id == A), "{listed:?}");
+	assert!(listed.is_empty(), "a busy host has no answer to list: {listed:?}");
 	assert!(entry_file(dir, A).exists(), "a busy host is not pruned");
 	assert_eq!(echo.calls(), 0);
 
@@ -320,9 +318,10 @@ async fn withdraw_sync_and_drop_remove_entry_socket_and_lock() {
 	// Unix unlinks the socket synchronously; a pipe disappears once the
 	// aborted accept task is dropped.
 	let after = ask(&entry, "echo.x").await;
-	assert!(matches!(after, Err(InstanceError::Unreachable { .. })), "{after:?}");
-	#[cfg(unix)]
-	assert_eq!(after.unwrap_err().io_code(), Some("ENOENT"));
+	let Err(InstanceError::Unreachable { code, .. }) = &after else {
+		panic!("{after:?}");
+	};
+	assert!(cfg!(windows) || *code == "ENOENT", "{after:?}");
 	assert!(matches!(host.register("echo", Echo::new()).await, Err(HostError::Closed)));
 
 	let dropped = InstanceHost::new(dir, Some(B.into())).unwrap();

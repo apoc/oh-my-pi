@@ -100,3 +100,8 @@ export function meshError(code: MeshErrorCode, message: string): MeshResponse {
 export function meshOk(data: unknown): MeshResponse {
 	return { ok: true, data };
 }
+
+/** Cap at an engine size limit without leaving a split surrogate pair (the engine rejects lone surrogates). */
+export function boundMeshText(value: string, max: number): string {
+	return value.slice(0, max).toWellFormed();
+}

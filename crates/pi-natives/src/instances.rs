@@ -6,11 +6,11 @@
 
 use std::{path::Path, sync::Arc};
 
-use napi::{Env, Error, Result, Status, bindgen_prelude::*};
+use napi::{Env, Result, bindgen_prelude::*};
 use napi_derive::napi;
 use parking_lot::Mutex;
 
-use crate::task;
+use crate::task::{self, invalid_arg};
 
 /// The process-wide host behind `InstanceHost.shared`.
 static SHARED: Mutex<Option<Arc<pi_instances::InstanceHost>>> = Mutex::new(None);
@@ -21,10 +21,6 @@ pub struct InstanceHostOptions {
 	pub dir:         String,
 	/// 16 lowercase ASCII letters or digits; random when omitted.
 	pub instance_id: Option<String>,
-}
-
-fn invalid_arg(err: impl std::fmt::Display) -> Error {
-	Error::new(Status::InvalidArg, err.to_string())
 }
 
 /// A same-machine instance.
@@ -75,12 +71,6 @@ impl InstanceHost {
 	#[napi(getter)]
 	pub fn instance_id(&self) -> String {
 		self.inner.instance_id().to_owned()
-	}
-
-	/// Registry directory.
-	#[napi(getter)]
-	pub fn dir(&self) -> String {
-		self.inner.dir().to_string_lossy().into_owned()
 	}
 
 	/// Withdraw the entry, stop the listener and remove the endpoint.

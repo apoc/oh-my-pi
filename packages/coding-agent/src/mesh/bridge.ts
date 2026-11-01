@@ -15,20 +15,18 @@ import { meshPeerText } from "./text";
 import type { MeshMessageKind, MeshSender, MeshWatchEvent } from "./wire";
 
 /** How the recipient's prompts name the mesh tools (`meshToolRefs`). */
-export type MeshToolRefs = Record<MeshToolName, string>;
+type MeshToolRefs = Record<MeshToolName, string>;
 
 export const MESH_INCOMING_MESSAGE_TYPE = "mesh:incoming";
-export const MESH_REPLY_MESSAGE_TYPE = "mesh:reply";
-export const MESH_WATCH_MESSAGE_TYPE = "mesh:watch";
+const MESH_REPLY_MESSAGE_TYPE = "mesh:reply";
+const MESH_WATCH_MESSAGE_TYPE = "mesh:watch";
 
-/** A session that accepts mesh messages ({@link AgentSession.deliverMeshMessage}). */
-export interface MeshDeliveryTarget {
-	readonly isDisposed: boolean;
+/** A session that accepts mesh messages ({@link deliverMeshMessage}); `AgentSession` satisfies it. */
+export interface MeshDeliveryTarget extends Pick<AgentSession, "isDisposed" | "sendCustomMessage"> {
 	/** Current conversation; changes on `/new`, context reset, resume and fork (not on a same-file reload), making older answers stale. */
 	readonly conversationId: string;
 	/** The recipient's tool context; decides how reply instructions name `mesh_send`. */
 	readonly toolSession?: Pick<ToolSession, "xdev">;
-	deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken">;
 }
 
 /** One unit of mesh traffic shown to the human. */
@@ -39,8 +37,6 @@ export interface MeshTrafficEntry {
 	thread?: string;
 	/** The reply carries an error instead of an answer. */
 	error?: boolean;
-	/** For `reply`: msgId of the message it answers, so the UI can match it to the question. */
-	replyTo?: string;
 }
 
 /** Human-facing mesh surface, implemented by the interactive TUI; absent or `hasUI: false` when headless. */
@@ -63,11 +59,11 @@ export interface MeshUiHooks {
  * on ACP clients that defer agent-initiated turns (queued for the next turn).
  */
 export async function deliverMeshMessage(
-	session: Pick<AgentSession, "isDisposed" | "sendCustomMessage">,
+	target: MeshDeliveryTarget,
 	message: CustomMessagePayload,
 ): Promise<"injected" | "woken"> {
-	if (session.isDisposed) throw new Error("Recipient session is disposed.");
-	const started = await session.sendCustomMessage(message, { deliverAs: "aside" });
+	if (target.isDisposed) throw new Error("Recipient session is disposed.");
+	const started = await target.sendCustomMessage(message, { deliverAs: "aside" });
 	return started ? "woken" : "injected";
 }
 

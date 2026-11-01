@@ -150,7 +150,7 @@ function installRuntime(): { engine: ScriptedMeshEngine; outbound: MeshOutbound 
 	const engine = new ScriptedMeshEngine(PEERS);
 	const outbound = new MeshOutbound({
 		engine,
-		main: { isDisposed: false, conversationId: "conversation-1", deliverMeshMessage: async () => "injected" },
+		main: { isDisposed: false, conversationId: "conversation-1", sendCustomMessage: async () => false },
 	});
 	const frontend = { outbound } as unknown as MeshFrontend;
 	setMeshRuntime({
@@ -241,8 +241,8 @@ describe("mesh_send ask", () => {
 
 		it("ends an expired background wait without a delivery and routes the late answer to the asking session", async () => {
 			const { engine, outbound, manager, delivered, run } = backgroundSetup(0.5);
-			const late = vi.fn(async () => "woken" as const);
-			outbound.setMain({ isDisposed: false, conversationId: "conversation-1", deliverMeshMessage: late });
+			const late = vi.fn(async () => true);
+			outbound.setMain({ isDisposed: false, conversationId: "conversation-1", sendCustomMessage: late });
 			const { details } = await run();
 			const job = manager.getJob(details!.jobId!)!;
 			await job.promise;

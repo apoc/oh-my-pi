@@ -5,8 +5,7 @@ import type { MeshPeerView } from "../../src/mesh/engine";
 import type { MeshFrontend } from "../../src/mesh/inbound";
 import { MeshOutbound } from "../../src/mesh/outbound";
 import { type MeshRuntime, setMeshRuntime } from "../../src/mesh/runtime";
-import type { MeshSender, MeshSnapshot } from "../../src/mesh/wire";
-import type { MeshTrafficEntry } from "../../src/mesh/bridge";
+import type { MeshSnapshot } from "../../src/mesh/wire";
 import { createTuiMeshUiHooks } from "../../src/modes/components/mesh/mesh-ui-hooks";
 import { MeshAskController } from "../../src/modes/controllers/mesh-ask-controller";
 import type { InteractiveModeContext } from "../../src/modes/types";
@@ -106,8 +105,8 @@ describe("/ask availability", () => {
 });
 
 /** Renders the dialog panel shown by the controller; records what reached the transcript. */
-function harness() {
-	const engine = new ScriptedMeshEngine(PEERS);
+function harness(peers: MeshPeerView[] = PEERS) {
+	const engine = new ScriptedMeshEngine(peers);
 	const cards: Component[] = [];
 	const errors: string[] = [];
 	let overlay: (Component & { handleInput?(data: string): void }) | undefined;
@@ -116,8 +115,6 @@ function harness() {
 		toolOutputExpanded: false,
 		showStatus: () => {},
 		showError: (message: string) => errors.push(message),
-		// Called only after `controller` below is initialized.
-		handleMeshAskReply: (from: MeshSender, entry: MeshTrafficEntry) => controller.handleReply(from, entry),
 		keybindings: { getKeys: () => [] },
 		dictationSpaceHold: () => undefined,
 		ui: {
@@ -134,7 +131,7 @@ function harness() {
 	const controller = new MeshAskController(ctx);
 	const outbound = new MeshOutbound({
 		engine,
-		main: { isDisposed: false, conversationId: "c1", deliverMeshMessage: async () => "injected" },
+		main: { isDisposed: false, conversationId: "c1", sendCustomMessage: async () => false },
 		ui: createTuiMeshUiHooks(ctx),
 	});
 	setMeshRuntime({ engine, frontend: { outbound } as unknown as MeshFrontend } as unknown as MeshRuntime);
@@ -214,5 +211,25 @@ describe("/ask conversations", () => {
 		expect(h.screen()).not.toContain("Waiting for the agent");
 		expect(h.cards).toHaveLength(0);
 		expect(h.errors).toEqual([]);
+	});
+
+	it("folds an answer that outlived the wait into its turn and still shows its card", async () => {
+		const h = harness();
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 slow?")).toBe(true);
+		// Escape on the running turn stops waiting; the dialog stays open.
+		h.overlay()?.handleInput?.("\x1b");
+		await until(() => h.screen().includes("Stopped waiting"));
+		h.engine.late("msg-1", { op: "reply", replyTo: "msg-1", thread: "thread-1", text: "late fact", from: ARBITER });
+		await until(() => h.screen().includes("late fact"));
+		expect(h.screen()).not.toContain("Stopped waiting");
+		expect(h.cards).toHaveLength(1);
+	});
+
+	it("refuses a blocked peer without sending and keeps the draft", async () => {
+		const h = harness([{ ...PEERS[0]!, blocked: true }]);
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 hello?")).toBe(false);
+		expect(h.engine.sent).toHaveLength(0);
+		expect(h.errors).toHaveLength(1);
+		expect(h.errors[0]).toContain("is blocked");
 	});
 });

@@ -7,7 +7,7 @@ import type { MeshEngine, MeshPeerView } from "./engine";
 import { meshPeerText } from "./text";
 import type { MeshSnapshot } from "./wire";
 
-export type MeshPeerResolution = { ok: true; peer: MeshPeerView } | { ok: false; message: string };
+type MeshPeerResolution = { ok: true; peer: MeshPeerView } | { ok: false; message: string };
 
 /** How long a freshly started engine needs before its peer list means "these are all the peers". */
 export const MESH_DISCOVERY_WINDOW_MS = 2500;

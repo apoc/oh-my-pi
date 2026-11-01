@@ -3,12 +3,12 @@
  * The TUI renders {@link MeshApprovals.list} and calls {@link MeshApprovals.resolve}; an entry
  * nobody answers is denied when its TTL elapses.
  */
-import { logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake, toError, truncate } from "@oh-my-pi/pi-utils";
 import type { MeshMessageKind, MeshSender } from "./wire";
 
-export const MESH_APPROVAL_TTL_MS = 2 * 60 * 1000;
-/** Characters of the request text shown in the approval prompt. */
-const PREVIEW_CHARS = 280;
+const MESH_APPROVAL_TTL_MS = 2 * 60 * 1000;
+/** Longest approval preview of the request text, ellipsis included. */
+const PREVIEW_CHARS = 281;
 
 export interface MeshApprovalRequest {
 	id: string;
@@ -25,14 +25,9 @@ interface PendingApproval {
 }
 
 export class MeshApprovals {
-	readonly #ttlMs: number;
 	readonly #pending = new Map<string, PendingApproval>();
 	readonly #listeners = new Set<() => void>();
 	#snapshot: readonly MeshApprovalRequest[] = [];
-
-	constructor(options?: { ttlMs?: number }) {
-		this.#ttlMs = options?.ttlMs ?? MESH_APPROVAL_TTL_MS;
-	}
 
 	/** Queue a request; resolves `true` when allowed, `false` when denied, expired or disposed. */
 	request(peer: MeshSender, kind: MeshMessageKind, text: string): Promise<boolean> {
@@ -42,10 +37,10 @@ export class MeshApprovals {
 			id,
 			peer,
 			kind,
-			preview: text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text,
-			expiresAt: Date.now() + this.#ttlMs,
+			preview: truncate(text, PREVIEW_CHARS),
+			expiresAt: Date.now() + MESH_APPROVAL_TTL_MS,
 		};
-		const timer = setTimeout(() => this.resolve(id, false), this.#ttlMs);
+		const timer = setTimeout(() => this.resolve(id, false), MESH_APPROVAL_TTL_MS);
 		timer.unref();
 		this.#pending.set(id, { request, resolve, timer });
 		this.#changed();
@@ -75,7 +70,12 @@ export class MeshApprovals {
 
 	/** Deny every pending entry (frontend detach). */
 	denyAll(): void {
-		for (const id of this.#pending.keys()) this.resolve(id, false);
+		const pending = [...this.#pending.values()];
+		if (pending.length === 0) return;
+		this.#pending.clear();
+		for (const entry of pending) clearTimeout(entry.timer);
+		this.#changed();
+		for (const entry of pending) entry.resolve(false);
 	}
 
 	#changed(): void {

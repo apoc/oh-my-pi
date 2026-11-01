@@ -2,7 +2,10 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
-import { register } from "../config/registry";
+import * as os from "node:os";
+import type { MeshConfig } from "@oh-my-pi/pi-natives";
+import { cfgCollabDisplayName } from "../collab/settings";
+import { register, type ScopeLike } from "../config/registry";
 
 const INBOUND_OPTIONS = [
 	{ value: "allow", label: "Allow", description: "Accept without asking" },
@@ -241,3 +244,26 @@ export const cfgMeshAutoBackgroundThresholdMs = register({
 	type: "number",
 	default: 10_000,
 });
+
+/** Display name peers see: `mesh.displayName`, else `collab.displayName`, else `user@host`. */
+function resolveMeshDisplayName(settings: ScopeLike): string {
+	const configured = cfgMeshDisplayName.get(settings).trim() || cfgCollabDisplayName.get(settings).trim();
+	if (configured) return configured;
+	try {
+		return `${os.userInfo().username}@${os.hostname()}`;
+	} catch {
+		return os.hostname();
+	}
+}
+
+/** Engine configuration for the current `mesh.*` settings (mesh assumed enabled). */
+export function meshConfigFromSettings(settings: ScopeLike): MeshConfig {
+	const key = cfgMeshKey.get(settings).trim();
+	return {
+		mode: cfgMeshMode.get(settings),
+		key: key || undefined,
+		lanPort: cfgMeshPort.get(settings),
+		staticPeers: [...cfgMeshPeers.get(settings)],
+		displayName: resolveMeshDisplayName(settings),
+	};
+}

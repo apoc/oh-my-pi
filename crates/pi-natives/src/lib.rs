@@ -28,7 +28,6 @@ pub mod ast;
 pub mod audio;
 pub mod block;
 pub mod clipboard;
-/// Local Collab host registry: the `collab` namespace on an `InstanceHost`.
 pub mod collab_registry;
 pub mod crash_handler;
 pub mod desktop;
@@ -47,7 +46,6 @@ pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
 pub mod html;
-/// Same-machine instance host (`pi_instances`) shared by its namespaces.
 pub mod instances;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;

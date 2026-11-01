@@ -96,6 +96,28 @@ pub fn release(bound: Bound) {
 	}
 }
 
+/// Suffix of the sidecar a binder flocks from bind to listen.
+pub const BIND_LOCK_SUFFIX: &str = ".bind.lock";
+
+/// `<socket>.bind.lock`.
+pub fn bind_lock_path(socket: &Path) -> PathBuf {
+	let mut path = socket.as_os_str().to_owned();
+	path.push(BIND_LOCK_SUFFIX);
+	path.into()
+}
+
+/// Options opening a bind lock read/write, mode 0600 when created, never
+/// through a symlink; the caller picks the create mode.
+pub fn bind_lock_options() -> OpenOptions {
+	let mut options = OpenOptions::new();
+	options
+		.read(true)
+		.write(true)
+		.mode(0o600)
+		.custom_flags(libc::O_NOFOLLOW);
+	options
+}
+
 /// Accepting side of a bound socket.
 pub struct Listener(UnixListener);
 
@@ -138,23 +160,16 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 	let display = path.display().to_string();
 	prepare_parent(&path)?;
 
-	let mut lock_path = path.clone().into_os_string();
-	lock_path.push(".bind.lock");
+	let lock_path = bind_lock_path(&path);
 	// A sweeper may unlink the lock file between our open and our flock;
 	// holding a lock on an unlinked inode excludes nobody, so retry until the
 	// locked file is the one at `lock_path`.
 	let lock = loop {
-		let lock = OpenOptions::new()
-			.read(true)
-			.write(true)
+		let lock = bind_lock_options()
 			.create(true)
 			.truncate(false)
-			.mode(0o600)
-			.custom_flags(libc::O_NOFOLLOW)
 			.open(&lock_path)
-			.map_err(|error| {
-				IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
-			})?;
+			.map_err(|error| IpcError::io(&error, &format!("open {}", lock_path.display())))?;
 		loop {
 			match lock.lock() {
 				Ok(()) => break,
@@ -162,7 +177,7 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 				Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
 			}
 		}
-		if is_same_file(&lock, Path::new(&lock_path)) {
+		if is_same_file(&lock, &lock_path) {
 			break lock;
 		}
 	};
@@ -303,17 +318,30 @@ fn ensure_private_dir(dir: &Path, euid: u32) -> Result<(), IpcError> {
 	}
 	let meta = fs::symlink_metadata(dir)
 		.map_err(|error| IpcError::io(&error, &format!("stat {}", dir.display())))?;
-	if !meta.file_type().is_dir() || meta.uid() != euid {
+	let owned = tighten_owned_dir(dir, &meta)
+		.map_err(|error| IpcError::io(&error, &format!("chmod {}", dir.display())))?;
+	if !owned {
 		return Err(IpcError::new(
 			"EACCES",
 			format!("{} is not a directory owned by uid {euid}", dir.display()),
 		));
 	}
-	if meta.mode() & 0o077 != 0 {
-		fs::set_permissions(dir, Permissions::from_mode(0o700))
-			.map_err(|error| IpcError::io(&error, &format!("chmod {}", dir.display())))?;
-	}
 	Ok(())
+}
+
+/// Make `dir` owner-only (chmod 0700) when it is a directory we own.
+///
+/// `meta` is `dir`'s `symlink_metadata`, so a link is not a directory.
+/// Returns `false`, changing nothing, when `dir` is not a directory owned by
+/// our effective uid.
+pub fn tighten_owned_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<bool> {
+	if !meta.file_type().is_dir() || meta.uid() != euid() {
+		return Ok(false);
+	}
+	if meta.mode() & 0o077 != 0 {
+		fs::set_permissions(dir, Permissions::from_mode(0o700))?;
+	}
+	Ok(true)
 }
 
 /// Whether `dir` is a real directory (not a link) owned by our effective uid
@@ -335,9 +363,6 @@ pub fn is_same_file(file: &fs::File, path: &Path) -> bool {
 }
 
 /// Dial `endpoint` and verify the server runs as our effective uid.
-///
-/// `timeout` is unused here (it bounds Windows busy retries only); wrap the
-/// call in `tokio::time::timeout` for a full deadline.
 pub async fn connect(endpoint: &str, _timeout: Duration) -> Result<Stream, IpcError> {
 	let stream = UnixStream::connect(endpoint)
 		.await

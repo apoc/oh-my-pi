@@ -342,8 +342,6 @@ export declare class InstanceHost {
    */
   static shared(dir: string): InstanceHost
   get instanceId(): string
-  /** Registry directory. */
-  get dir(): string
   /**
    * Withdraw the entry, stop the listener and remove the endpoint.
    * Idempotent.
@@ -547,13 +545,14 @@ export declare class MeshNode {
   peers(): Array<MeshPeerInfo>
   /** Re-list local peers, query mDNS and refresh snapshots now. */
   refresh(): void
-  setPeerFlags(instanceId: string, hidden: boolean, blocked: boolean): void
+  /** Set the in-memory hide/block flags; an omitted flag keeps its value. */
+  setPeerFlags(instanceId: string, hidden?: boolean | undefined | null, blocked?: boolean | undefined | null): void
   /**
    * Send `bodyJson` (a `MeshRequest`) to peer `to` as `fromAgentId`;
    * resolves to the `MeshResponse` JSON. A `message` / `watch`
    * acknowledgement without a valid `msgId` / `watchId` resolves to an
-   * `internal` error response. Rejects with a message prefixed
-   * `unreachable:`, `timeout:`, `bad_response:` or `aborted:`.
+   * `internal` error response. Rejects with a JS error whose `code` is
+   * `unreachable`, `timeout`, `bad_response` or `aborted`.
    */
   request(to: string, fromAgentId: string, bodyJson: string, options: MeshRequestOptions, signal?: AbortSignal): Promise<string>
   /**
@@ -569,7 +568,9 @@ export declare class MeshNode {
   forgetPending(tickets: Array<string>): void
   /**
    * Answer an `inbound` event with `responseJson` (a `MeshResponse`). Late or
-   * unknown ids are ignored.
+   * unknown ids are ignored. A response the protocol rejects is replaced by
+   * a `too_large` (size caps) or `internal` error answer, so the peer is not
+   * left waiting, and the rejection is still thrown.
    */
   respond(requestId: string, responseJson: string): void
   /**
@@ -3286,7 +3287,6 @@ export interface MeshNodeOptions {
    * the node leaves the host open.
    */
   host: InstanceHost
-  displayName: string
   /** Machine host name sent in envelopes. */
   hostName: string
 }
@@ -3341,7 +3341,7 @@ export interface MeshRequestOptions {
 }
 
 export interface MeshStatus {
-  mode: string
+  mode: 'off' | 'local' | 'remote' | 'both'
   local: 'on' | 'off' | 'error'
   remote: 'on' | 'off' | 'no-key' | 'error'
   lanPort?: number

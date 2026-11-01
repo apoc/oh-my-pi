@@ -38,7 +38,7 @@ export const SUMMARY_MIN_INTERVAL_MS = 2 * 60_000;
 /** Model turns (completed assistant replies) before the first summary: earlier ones say too little. */
 export const SUMMARY_MIN_TURNS = 3;
 /** Hard cap on the published summary. */
-export const MAX_SUMMARY_CHARS = 400;
+const MAX_SUMMARY_CHARS = 400;
 
 /** Inputs to {@link shouldRegenerateSummary}; timestamps in epoch ms. */
 export interface SummaryTriggerState {
@@ -70,7 +70,7 @@ export function shouldRegenerateSummary(
 	return now - state.lastAttemptAt >= minIntervalMs;
 }
 
-export interface MeshSummaryGeneratorOptions {
+interface MeshSummaryGeneratorOptions {
 	/** Spacing between attempts; defaults to {@link SUMMARY_MIN_INTERVAL_MS}. */
 	minIntervalMs?: number;
 	/** Model turns before the first summary; defaults to {@link SUMMARY_MIN_TURNS}. */

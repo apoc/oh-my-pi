@@ -12,10 +12,11 @@ import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEventListener } from "../session/agent-session-events";
 import type { SessionManager } from "../session/session-manager";
+import { Semaphore } from "../task/parallel";
 import { MeshApprovals } from "./approvals";
-import { buildMeshIncomingMessage, type MeshDeliveryTarget, type MeshUiHooks } from "./bridge";
+import { buildMeshIncomingMessage, deliverMeshMessage, type MeshDeliveryTarget, type MeshUiHooks } from "./bridge";
 import type { MeshEngine, MeshInboundRequest } from "./engine";
-import { MeshOutbound } from "./outbound";
+import type { MeshOutbound } from "./outbound";
 import {
 	cfgMeshInboundAsk,
 	cfgMeshInboundNote,
@@ -28,8 +29,8 @@ import {
 import { type MeshThreadRecord, MeshThreadStore } from "./threads";
 import { meshToolRefs } from "./tool-refs";
 import {
+	boundMeshText,
 	MAX_TEXT_CHARS,
-	MAX_WATCH_TTL_SEC,
 	type MeshEnvelope,
 	type MeshMessageKind,
 	type MeshRequest,
@@ -84,59 +85,20 @@ export interface MeshAnswerer {
 }
 
 /** Live settings the frontend reads per request. */
-export interface MeshInboundSettings {
+interface MeshInboundSettings {
 	policy(kind: MeshMessageKind): MeshInboundPolicy;
 	maxConcurrentAsks(): number;
 	threadTtlMs(): number;
 }
 
-export interface MeshFrontendDeps {
+interface MeshFrontendDeps {
 	engine: MeshEngine;
 	session: MeshFrontendSession;
 	settings: MeshInboundSettings;
 	answerer: MeshAnswerer;
 	ui?: MeshUiHooks;
-	/** Sender side shared across frontend rebinds (host-owned); the frontend creates and owns one when absent. */
-	outbound?: MeshOutbound;
-	/** Approval TTL override (tests). */
-	approvalTtlMs?: number;
-}
-
-/** FIFO concurrency gate whose limit follows a live setting. */
-class ConcurrencyGate {
-	readonly #limit: () => number;
-	readonly #waiters: (() => void)[] = [];
-	#running = 0;
-
-	constructor(limit: () => number) {
-		this.#limit = limit;
-	}
-
-	async run<T>(work: () => Promise<T>): Promise<T> {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#waiters.push(resolve);
-		// Arrivals and releases both re-read the live limit; admission stays FIFO, so a newcomer never
-		// overtakes queued work, and a raised limit admits the queue before it.
-		this.#admit();
-		await promise;
-		try {
-			return await work();
-		} finally {
-			this.#running--;
-			this.#admit();
-		}
-	}
-
-	#admit(): void {
-		while (this.#waiters.length > 0 && this.#running < this.#capacity()) {
-			this.#running++;
-			this.#waiters.shift()!();
-		}
-	}
-
-	#capacity(): number {
-		return Math.max(1, this.#limit());
-	}
+	/** Sender side shared across frontend rebinds (host-owned). */
+	outbound: MeshOutbound;
 }
 
 interface ActiveWatch {
@@ -147,14 +109,14 @@ interface ActiveWatch {
 export class MeshFrontend {
 	readonly approvals: MeshApprovals;
 	readonly outbound: MeshOutbound;
-	readonly #ownsOutbound: boolean;
 	readonly threads: MeshThreadStore;
 	readonly #engine: MeshEngine;
 	readonly #session: MeshFrontendSession;
 	readonly #settings: MeshInboundSettings;
 	readonly #answerer: MeshAnswerer;
 	readonly #ui: MeshUiHooks | undefined;
-	readonly #gate: ConcurrencyGate;
+	/** Ask/task responders running at once; resized to the live setting on every arrival and release. */
+	readonly #gate = new Semaphore(1);
 	readonly #watches = new Map<string, ActiveWatch>();
 	readonly #abort = new AbortController();
 	#detachHandler: (() => void) | undefined;
@@ -165,10 +127,8 @@ export class MeshFrontend {
 		this.#settings = deps.settings;
 		this.#answerer = deps.answerer;
 		this.#ui = deps.ui;
-		this.#gate = new ConcurrencyGate(() => deps.settings.maxConcurrentAsks());
-		this.approvals = new MeshApprovals({ ttlMs: deps.approvalTtlMs });
-		this.#ownsOutbound = deps.outbound === undefined;
-		this.outbound = deps.outbound ?? new MeshOutbound({ engine: deps.engine, main: deps.session, ui: deps.ui });
+		this.approvals = new MeshApprovals();
+		this.outbound = deps.outbound;
 		this.outbound.setMain(deps.session);
 		const sessionManager = deps.session.sessionManager;
 		this.threads = new MeshThreadStore(
@@ -191,7 +151,7 @@ export class MeshFrontend {
 		session: AgentSession;
 		settings: ScopeLike;
 		answerer: MeshAnswerer;
-		outbound?: MeshOutbound;
+		outbound: MeshOutbound;
 		ui?: MeshUiHooks;
 	}): MeshFrontend {
 		const { settings } = options;
@@ -218,7 +178,6 @@ export class MeshFrontend {
 		this.approvals.denyAll();
 		for (const watch of this.#watches.values()) watch.dispose();
 		this.threads.dispose();
-		if (this.#ownsOutbound) this.outbound.dispose();
 	}
 
 	/** Answer one inbound request (the engine's inbound handler). */
@@ -229,17 +188,16 @@ export class MeshFrontend {
 			switch (body.op) {
 				case "message":
 					return await this.#onMessage(envelope, body);
-				case "reply":
-				case "watch_event":
-					return meshError("unsupported", "Answers are routed by the engine.");
 				case "watch":
 					return this.#onWatch(envelope.from, body.event, body.ttlSec);
 				case "threads":
 					return await this.#onThreads(envelope.from);
 				case "thread":
 					return await this.#onThread(envelope.from, body.thread);
+				case "reply":
+				case "watch_event":
 				case "snapshot":
-					return meshError("unsupported", "Snapshots are served by the engine.");
+					return meshError("unsupported", `The engine serves ${body.op} requests.`);
 			}
 		} catch (error) {
 			logger.warn("mesh: inbound request failed", { op: body.op, error: toError(error).message });
@@ -319,7 +277,8 @@ export class MeshFrontend {
 			return;
 		}
 		try {
-			await this.#session.deliverMeshMessage(
+			await deliverMeshMessage(
+				this.#session,
 				buildMeshIncomingMessage({ from, msgId, text, toolRefs: meshToolRefs(this.#session.toolSession ?? {}) }),
 			);
 		} catch (error) {
@@ -346,7 +305,16 @@ export class MeshFrontend {
 			}
 			const answer = () =>
 				this.threads.isLive(record) ? this.#answer(record, turnIndex) : this.#replyExpired(record, msgId);
-			await (record.kind === "status" ? answer() : this.#gate.run(answer));
+			if (record.kind === "status") return answer();
+			// Arrivals and releases re-read the live cap (min 1: the semaphore reads 0 as unlimited).
+			this.#gate.resize(Math.max(1, this.#settings.maxConcurrentAsks()));
+			await this.#gate.acquire();
+			try {
+				await answer();
+			} finally {
+				this.#gate.resize(Math.max(1, this.#settings.maxConcurrentAsks()));
+				this.#gate.release();
+			}
 		});
 	}
 
@@ -373,7 +341,6 @@ export class MeshFrontend {
 			await this.#sendReply(record.peer, msgId, threadId, { error: message });
 			return;
 		}
-		if (result.responder) this.outbound.blockSender(result.responder.forkAgentId);
 		this.threads.setResponder(threadId, result.responder ?? {});
 		this.threads.updateTurn(threadId, turnIndex, { status: "complete", answer: result.text });
 		await this.#sendReply(record.peer, msgId, threadId, { text: result.text });
@@ -387,8 +354,8 @@ export class MeshFrontend {
 		answer: { text: string } | { error: string },
 	): Promise<void> {
 		// The engine rejects oversized text; a cut answer beats none.
-		const error = "error" in answer ? answer.error.slice(0, MAX_TEXT_CHARS) : undefined;
-		const text = "text" in answer ? answer.text.slice(0, MAX_TEXT_CHARS) : "";
+		const error = "error" in answer ? boundMeshText(answer.error, MAX_TEXT_CHARS) : undefined;
+		const text = "text" in answer ? boundMeshText(answer.text, MAX_TEXT_CHARS) : "";
 		try {
 			const response = await this.#engine.request(to.instanceId, MAIN_AGENT_ID, {
 				op: "reply",
@@ -414,7 +381,6 @@ export class MeshFrontend {
 	}
 
 	#onWatch(from: MeshSender, event: MeshWatchEvent, ttlSec: number): MeshResponse {
-		if (!Number.isFinite(ttlSec) || ttlSec <= 0) return meshError("bad_request", "Watch TTL must be positive.");
 		let held = 0;
 		for (const watch of this.#watches.values()) if (watch.peerInstanceId === from.instanceId) held++;
 		if (held >= MESH_MAX_WATCHES_PER_PEER) {
@@ -442,7 +408,7 @@ export class MeshFrontend {
 				})
 				.catch(error => logger.warn("mesh: watch event send failed", { error: toError(error).message }));
 		};
-		const timer = setTimeout(dispose, Math.min(ttlSec, MAX_WATCH_TTL_SEC) * 1000);
+		const timer = setTimeout(dispose, ttlSec * 1000);
 		timer.unref();
 		this.#watches.set(watchId, { peerInstanceId: from.instanceId, dispose });
 		if (event === "idle") {

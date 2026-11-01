@@ -169,7 +169,7 @@ impl Peer {
 	}
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Flags {
 	hidden:  bool,
 	blocked: bool,
@@ -560,10 +560,15 @@ impl PeerTable {
 		peer.verified()
 	}
 
-	pub fn set_flags(&mut self, id: &str, hidden: bool, blocked: bool) -> bool {
+	/// `None` keeps the current value.
+	pub fn set_flags(&mut self, id: &str, hidden: Option<bool>, blocked: Option<bool>) -> bool {
 		let flags = self.flags.entry(id.to_owned()).or_default();
-		let changed = flags.hidden != hidden || flags.blocked != blocked;
-		*flags = Flags { hidden, blocked };
+		let next = Flags {
+			hidden:  hidden.unwrap_or(flags.hidden),
+			blocked: blocked.unwrap_or(flags.blocked),
+		};
+		let changed = *flags != next;
+		*flags = next;
 		changed && self.listed(id)
 	}
 
@@ -872,10 +877,13 @@ mod tests {
 	#[test]
 	fn flags_survive_rediscovery_and_dns_name_tracks_remote_ip() {
 		let mut t = PeerTable::new(OWN);
-		assert!(!t.set_flags(P, true, true), "unknown peer: nothing visible changed");
+		assert!(!t.set_flags(P, Some(true), Some(true)), "unknown peer: nothing visible changed");
 		t.static_up(P, sa("10.0.0.1:9"), snap(), 1);
 		assert!(t.is_blocked(P));
 		assert!(t.infos()[0].hidden);
+		assert!(t.set_flags(P, None, Some(false)));
+		assert!(!t.is_blocked(P));
+		assert!(t.infos()[0].hidden, "None keeps hidden");
 
 		assert_eq!(t.remote_ip(P), Some("10.0.0.1".parse().unwrap()));
 		assert!(!t.set_dns_name(P, "10.9.9.9".parse().unwrap(), "x".into()), "stale lookup ignored");

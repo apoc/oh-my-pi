@@ -31,7 +31,7 @@ export const MESH_PEERS_NOTICE_TYPE = "mesh:peers";
 const MAX_DESCRIBED_PEERS = 12;
 
 /** One {@link MESH_PEERS_NOTICE_TYPE} notice: peers announced as present (raw display names) and gone (ids). */
-export interface MeshPeersNoticeDetails {
+interface MeshPeersNoticeDetails {
 	added: { id: string; name: string }[];
 	removed: string[];
 }
@@ -40,7 +40,7 @@ export interface MeshPeersNoticeDetails {
  * Where the notice goes: `prompt` (with a user prompt) or `work` (mid-run after a tool batch,
  * where the model reads it before its next call).
  */
-export type MeshPeersNoticeBoundary = "prompt" | "work";
+type MeshPeersNoticeBoundary = "prompt" | "work";
 
 /** Announced peers still present (id → display name); `undefined` when the context holds no notice yet. */
 function knownMeshPeers(session: AgentSession): Map<string, string> | undefined {

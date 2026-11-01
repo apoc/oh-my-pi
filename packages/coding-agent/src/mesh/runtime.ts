@@ -12,7 +12,7 @@ export interface MeshRuntime {
 	readonly engine: MeshEngine;
 	/** The top-level session the mesh is bound to; mesh tools are offered only there. */
 	readonly session: AgentSession;
-	/** Inbound routing; owns the approvals queue, outbound sender and thread store. */
+	/** Inbound routing; owns the approvals queue and thread store, exposes the host-owned outbound sender. */
 	readonly frontend: MeshFrontend;
 	readonly summary: MeshSummaryGenerator;
 	/** This instance as peers see it (instance id, display name, host). */

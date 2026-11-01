@@ -106,7 +106,8 @@ const DEFAULT_TEXTS: BtwHistoryPanelTexts = {
 	stop: "Stop answer",
 	listLabel: "History",
 };
-interface BtwHistoryPanelOptions {
+
+export interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
 	onClose: () => void;
 	onCopy: (record: BtwHistoryRecord) => void;

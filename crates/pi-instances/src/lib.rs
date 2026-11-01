@@ -50,12 +50,12 @@ mod tests;
 pub use self::{
 	client::{InstanceError, request},
 	dir::{DirError, assert_private_dir, ensure_private_dir},
-	entry::{InstanceEntry, is_instance_id, is_namespace},
+	entry::{InstanceEntry, is_instance_id, is_namespace, now_ms, random_hex},
 	host::{
 		Handler, HandlerReply, HostError, InstanceHost, RESERVED_CODES, Registration, RequestCtx,
 		with_deadline,
 	},
-	list::{Probe, ProbeRequest, list, list_alive, remove_entry_if},
+	list::{ProbeRequest, list, list_alive, remove_entry_if},
 };
 
 /// Entry file and wire protocol version.

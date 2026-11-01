@@ -18,7 +18,7 @@ use std::{
 };
 
 use napi::{
-	Env, Error, JsError, Result, Status,
+	Env, Error, Result, Status,
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
@@ -30,7 +30,10 @@ use pi_instances::{
 };
 use tokio::sync::oneshot;
 
-use crate::{instances::InstanceHost, task};
+use crate::{
+	instances::InstanceHost,
+	task::{self, coded, invalid_arg},
+};
 
 /// `code` of a rejection caused by the registry directory (insecure,
 /// unreadable) rather than by a host.
@@ -131,14 +134,6 @@ fn whole(value: f64) -> Option<u64> {
 		.then_some(value as u64)
 }
 
-fn parse_access(access: &str) -> Option<CollabAccess> {
-	match access {
-		"view" => Some(CollabAccess::View),
-		"control" => Some(CollabAccess::Control),
-		_ => None,
-	}
-}
-
 impl CollabHostSnapshot {
 	/// `None` when a field is out of range (the host answers
 	/// `snapshot_unavailable`, as for any malformed snapshot).
@@ -158,7 +153,7 @@ impl CollabHostSnapshot {
 			relay_connected: self.relay_connected,
 			input_required:  self.input_required,
 			busy:            self.busy,
-			access:          parse_access(&self.access)?,
+			access:          self.access.parse().ok()?,
 		})
 	}
 
@@ -354,11 +349,6 @@ fn timeout(options: &CollabLookupOptions) -> Duration {
 		.map_or(collab::DEFAULT_QUERY_TIMEOUT, |ms| Duration::from_millis(u64::from(ms)))
 }
 
-/// JS `Error` whose `code` is `code`.
-fn coded(env: Env, code: &str, message: String) -> Error {
-	Error::from(JsError::from(Error::new(code, message)).into_unknown(env))
-}
-
 fn resolve_error(env: Env, error: ResolveError) -> Error {
 	match error {
 		ResolveError::Dir(error) => coded(env, REGISTRY_DIR_CODE, error.to_string()),
@@ -409,8 +399,9 @@ pub fn resolve_collab_host_link(
 	access: String,
 	options: CollabLookupOptions,
 ) -> Result<PromiseRaw<'_, CollabResolvedLink>> {
-	let access = parse_access(&access)
-		.ok_or_else(|| Error::new(Status::InvalidArg, format!("invalid collab access: {access}")))?;
+	let access = access
+		.parse::<CollabAccess>()
+		.map_err(|()| invalid_arg(format!("invalid collab access: {access}")))?;
 	let timeout = timeout(&options);
 	env.spawn_future_with_callback(
 		async move {

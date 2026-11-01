@@ -119,20 +119,20 @@ pub trait InboundSink: Send + Sync + 'static {
 /// Client-side delivery failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransportError {
-	#[error("unreachable: {0}")]
+	#[error("{0}")]
 	Unreachable(String),
 	/// The endpoint answers for another instance (stale discovery entry or
 	/// reused port).
-	#[error("unreachable: mesh endpoint now serves another instance")]
+	#[error("mesh endpoint now serves another instance")]
 	Misdirected,
-	#[error("timeout: mesh peer did not answer in time")]
+	#[error("mesh peer did not answer in time")]
 	Timeout,
-	#[error("bad_response: {0}")]
+	#[error("{0}")]
 	BadResponse(String),
 }
 
 impl TransportError {
-	/// Stable code for the N-API rejection prefix.
+	/// Stable code for the N-API rejection's `code`.
 	pub const fn code(&self) -> &'static str {
 		match self {
 			Self::Unreachable(_) | Self::Misdirected => "unreachable",

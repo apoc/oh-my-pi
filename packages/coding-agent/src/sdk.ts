@@ -5397,11 +5397,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
 			// Mesh tools are offered only to the session the mesh runtime is bound to: follow
-			// installs, removals and rebinds (ACP moves it to the newest session).
+			// installs, removals and rebinds (ACP moves it to the newest session). The prompt
+			// reads mesh state only through the tool set, so refresh it only when that changes.
 			if (taskDepth === 0) {
 				session.addDisposer(
 					onMeshRuntimeChanged(() => {
-						if (!session.isDisposed) void reconcileGatedTools();
+						if (!session.isDisposed) void reconcileGatedTools({ refreshPrompt: false });
 					}),
 				);
 			}

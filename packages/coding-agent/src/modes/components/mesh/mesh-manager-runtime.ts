@@ -11,7 +11,8 @@ import type {
 	MeshManagerThread,
 	MeshSendOutcome,
 } from "@oh-my-pi/pi-tui/overlays/mesh-manager-types";
-import { countMeshPeers, meshComposeRefusal, meshModeHasSide } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
+import { countMeshPeers, meshComposeRefusal, meshModeHasSide } from "@oh-my-pi/pi-tui/overlays/mesh-display";
+import { meshDeriveKey } from "@oh-my-pi/pi-natives";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 import type { ScopeLike } from "../../../config/registry";
 import type { MeshPeerView } from "../../../mesh/engine";
@@ -21,16 +22,6 @@ import { getMeshRuntime, type MeshRuntime, onMeshRuntimeChanged } from "../../..
 import { cfgMeshEnabled, cfgMeshKey, cfgMeshMode } from "../../../mesh/settings";
 import type { MeshApprovalRequest } from "../../../mesh/approvals";
 import type { MeshThreadRecord } from "../../../mesh/threads";
-
-/** Derives the base64url group key from a key phrase (native `meshDeriveKey`). */
-export type MeshKeyDeriver = (phrase: string) => Promise<string>;
-
-let keyDeriver: MeshKeyDeriver | undefined;
-
-/** Installs the key derivation the `/mesh` key prompt uses; host wiring only. */
-export function setMeshKeyDeriver(deriver: MeshKeyDeriver | undefined): void {
-	keyDeriver = deriver;
-}
 
 /** Peers that served a snapshot, as the manager shows them; peers without one are unverified or transient. */
 export function meshPeerViews(peers: readonly MeshPeerView[]): MeshManagerPeer[] {
@@ -156,9 +147,7 @@ export function createMeshManagerRuntime(settings: ScopeLike): MeshManagerRuntim
 			cfgMeshMode.set(settings, mode);
 		},
 		async setKeyPhrase(phrase) {
-			if (!keyDeriver) throw new Error("key derivation is unavailable (the native mesh engine is not loaded)");
-			const key = await keyDeriver(phrase);
-			cfgMeshKey.set(settings, key);
+			cfgMeshKey.set(settings, await meshDeriveKey(phrase));
 		},
 		setPeerFlags(instanceId, flags) {
 			getMeshRuntime()?.engine.setPeerFlags(instanceId, flags);
@@ -171,25 +160,27 @@ export function createMeshManagerRuntime(settings: ScopeLike): MeshManagerRuntim
 		},
 		async listThreads(peerInstanceId) {
 			const runtime = getMeshRuntime();
-			if (!runtime) return [];
-			const records = await runtime.frontend.threads.list(peerInstanceId);
-			return records.map(threadToView).sort((a, b) => b.updatedAt - a.updatedAt);
+			// The store lists newest first, as the manager shows them.
+			return runtime ? (await runtime.frontend.threads.list(peerInstanceId)).map(threadToView) : [];
 		},
 		async send(peerInstanceId: string, kind: MeshComposeKind, text: string): Promise<MeshSendOutcome> {
 			const runtime = getMeshRuntime();
 			if (!runtime) return { ok: false, message: "the mesh engine is not running" };
 			const peer = meshPeerViews(runtime.engine.peers()).find(view => view.instanceId === peerInstanceId);
 			if (!peer) return { ok: false, message: "the peer is no longer available" };
-			const refusal = meshComposeRefusal(peer, kind);
-			if (refusal) return { ok: false, message: refusal };
 			try {
 				const result = await runtime.frontend.outbound.send({
-					to: peerInstanceId,
+					to: peer,
 					fromAgentId: MESH_USER_AGENT_ID,
 					kind,
 					text,
 				});
-				return result.ok ? { ok: true, thread: result.thread } : { ok: false, message: result.message };
+				if (result.ok) return { ok: true, thread: result.thread };
+				// The manager names the block in its own terms (its `b` key, or a note).
+				return {
+					ok: false,
+					message: (result.code === "blocked" && meshComposeRefusal(peer, kind)) || result.message,
+				};
 			} catch (error) {
 				return { ok: false, message: toError(error).message };
 			}

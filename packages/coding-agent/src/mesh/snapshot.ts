@@ -12,7 +12,7 @@ import { isCurrentSessionRosterRef, sessionFileBelongsToRoot } from "../registry
 import type { AgentSession } from "../session/agent-session";
 import type { MeshEngine } from "./engine";
 import type { MeshSummaryGenerator, MeshSummaryState } from "./summary";
-import { MAX_FIELD_CHARS, MESH_PROTOCOL_VERSION, type MeshSnapshot } from "./wire";
+import { boundMeshText, MAX_FIELD_CHARS, MESH_PROTOCOL_VERSION, type MeshSnapshot } from "./wire";
 
 /** Budget for all repository reads; a slow or hung VCS yields `repo: null`. */
 const REPO_TIMEOUT_MS = 1500;
@@ -32,7 +32,7 @@ export interface MeshIdentity {
 
 type MeshRepoInfo = NonNullable<MeshSnapshot["repo"]>;
 
-export async function buildMeshSnapshot(
+async function buildMeshSnapshot(
 	session: AgentSession,
 	ident: MeshIdentity,
 	summary: MeshSummaryState | null,
@@ -162,7 +162,6 @@ async function readRepoInfo(cwd: string): Promise<MeshRepoInfo | null> {
 	}
 }
 
-/** Cap at the wire field limit without leaving a split surrogate pair (the engine rejects lone surrogates). */
 function bound(value: string): string {
-	return value.slice(0, MAX_FIELD_CHARS).toWellFormed();
+	return boundMeshText(value, MAX_FIELD_CHARS);
 }

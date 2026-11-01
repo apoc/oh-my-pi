@@ -20,6 +20,8 @@ import { ScriptedMeshEngine } from "./scripted-engine";
 
 const alice: MeshSender = { instanceId: "inst-alice", agentId: "Main", displayName: "Alice", host: "box-a" };
 const bob: MeshSender = { instanceId: "inst-bob", agentId: "Main", displayName: "Bob", host: "box-b" };
+/** Bob as a resolved, unblocked peer: the recipient `MeshOutbound` sends to. */
+const bobPeer = { instanceId: bob.instanceId, blocked: false };
 
 class FakeSession implements MeshFrontendSession {
 	isDisposed = false;
@@ -36,9 +38,9 @@ class FakeSession implements MeshFrontendSession {
 		getArtifactsDir: () => null,
 	};
 
-	async deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken"> {
+	async sendCustomMessage(message: CustomMessagePayload): Promise<boolean> {
 		this.delivered.push(message);
-		return "injected";
+		return false;
 	}
 	subscribeRunState(listener: (state: "running" | "idle") => void): () => void {
 		this.runStateListeners.add(listener);
@@ -94,7 +96,10 @@ async function settle(): Promise<void> {
 
 const frontends: MeshFrontend[] = [];
 afterEach(() => {
-	for (const frontend of frontends.splice(0)) frontend.detach();
+	for (const frontend of frontends.splice(0)) {
+		frontend.detach();
+		frontend.outbound.dispose();
+	}
 });
 
 function setup(options: {
@@ -116,6 +121,20 @@ function setup(options: {
 		note: "allow",
 		...options.policy,
 	};
+	const ui: MeshUiHooks | undefined =
+		options.hasUI === undefined
+			? undefined
+			: {
+					hasUI: options.hasUI,
+					showIncoming: (from, entry) => {
+						if (entry.kind === "note") notes.push(entry.text);
+						shown.push({ direction: "in", peer: from.instanceId, entry });
+					},
+					showOutgoing: (to, entry) => shown.push({ direction: "out", peer: to.instanceId, entry }),
+					notifyApproval: () => {
+						approvalsNotified++;
+					},
+				};
 	const frontend = new MeshFrontend({
 		engine,
 		session,
@@ -128,20 +147,8 @@ function setup(options: {
 			},
 			threadTtlMs: () => 60 * 60 * 1000,
 		},
-		ui:
-			options.hasUI === undefined
-				? undefined
-				: {
-						hasUI: options.hasUI,
-						showIncoming: (from, entry) => {
-							if (entry.kind === "note") notes.push(entry.text);
-							shown.push({ direction: "in", peer: from.instanceId, entry });
-						},
-						showOutgoing: (to, entry) => shown.push({ direction: "out", peer: to.instanceId, entry }),
-						notifyApproval: () => {
-							approvalsNotified++;
-						},
-					},
+		ui,
+		outbound: new MeshOutbound({ engine, main: session, ui }),
 	});
 	frontends.push(frontend);
 	return { engine, session, answerer, frontend, notes, shown, approvalsNotified: () => approvalsNotified };
@@ -385,9 +392,9 @@ describe("MeshOutbound late replies", () => {
 		isDisposed = false;
 		conversationId = "conversation-1";
 		readonly delivered: CustomMessagePayload[] = [];
-		async deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken"> {
+		async sendCustomMessage(message: CustomMessagePayload): Promise<boolean> {
 			this.delivered.push(message);
-			return "injected";
+			return false;
 		}
 	}
 
@@ -407,17 +414,17 @@ describe("MeshOutbound late replies", () => {
 	});
 
 	async function ask(outbound: MeshOutbound, fromAgentId = "Main", kind: MeshMessageKind = "ask"): Promise<string> {
-		const sent = await outbound.send({ to: bob.instanceId, fromAgentId, kind, text: "q" });
+		const sent = await outbound.send({ to: bobPeer, fromAgentId, kind, text: "q" });
 		if (!sent.ok) throw new Error(sent.message);
 		return sent.msgId;
 	}
 
 	it("tracks every send but notes under a fresh ticket, holding answers only for a coming wait", async () => {
 		const { outbound, engine } = outboundSetup();
-		await outbound.send({ to: bob.instanceId, fromAgentId: "Main", kind: "ask", text: "q", awaitReply: true });
-		await outbound.send({ to: bob.instanceId, fromAgentId: "Main", kind: "steer", text: "q" });
-		await outbound.watch({ to: bob.instanceId, fromAgentId: "Main", event: "idle", ttlSec: 60 });
-		await outbound.send({ to: bob.instanceId, fromAgentId: "Main", kind: "note", text: "q" });
+		await outbound.send({ to: bobPeer, fromAgentId: "Main", kind: "ask", text: "q", awaitReply: true });
+		await outbound.send({ to: bobPeer, fromAgentId: "Main", kind: "steer", text: "q" });
+		await outbound.watch({ to: bobPeer, fromAgentId: "Main", event: "idle", ttlSec: 60 });
+		await outbound.send({ to: bobPeer, fromAgentId: "Main", kind: "note", text: "q" });
 		const [held, steer, watch, note] = engine.options;
 		expect(held).toMatchObject({ ticket: expect.any(String), hold: true });
 		expect(steer).toMatchObject({ ticket: expect.any(String), hold: false });
@@ -557,14 +564,14 @@ describe("MeshOutbound late replies", () => {
 		main.conversationId = "conversation-2";
 		engine.late(msgId, reply(msgId));
 		await settle();
-		expect(shown).toEqual([{ kind: "reply", text: "done", thread: "t1", replyTo: msgId, error: false }]);
+		expect(shown).toEqual([{ kind: "reply", text: "done", thread: "t1", error: false }]);
 		expect(main.delivered).toEqual([]);
 	});
 
 	it("delivers a watch event nobody awaits as a hidden mesh:watch message", async () => {
 		const { outbound, main, engine } = outboundSetup();
 		engine.respond = () => ({ ok: true, data: { watchId: "w1" } });
-		const watch = await outbound.watch({ to: bob.instanceId, fromAgentId: "Main", event: "idle", ttlSec: 60 });
+		const watch = await outbound.watch({ to: bobPeer, fromAgentId: "Main", event: "idle", ttlSec: 60 });
 		if (!watch.ok) throw new Error(watch.message);
 		engine.late("w1", { op: "watch_event", watchId: "w1", event: "idle", from: bob });
 		await settle();
@@ -626,20 +633,8 @@ describe("MeshOutbound late replies", () => {
 			message: "Peer acknowledged with a missing or malformed message id.",
 		};
 		engine.respond = () => refusal;
-		expect(await outbound.send({ to: bob.instanceId, fromAgentId: "Main", kind: "ask", text: "q" })).toEqual(refusal);
+		expect(await outbound.send({ to: bobPeer, fromAgentId: "Main", kind: "ask", text: "q" })).toEqual(refusal);
 		outbound.dispose();
 		expect(engine.forgotten).toEqual([]);
-	});
-
-	it("refuses sends from blocked responders", async () => {
-		const { outbound, engine } = outboundSetup();
-		outbound.blockSender("MeshAsk");
-		expect(await outbound.send({ to: bob.instanceId, fromAgentId: "MeshAsk", kind: "ask", text: "q" })).toMatchObject(
-			{
-				ok: false,
-				code: "denied",
-			},
-		);
-		expect(engine.sent).toEqual([]);
 	});
 });

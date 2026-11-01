@@ -64,14 +64,10 @@ pub fn assert_private_dir(dir: &Path) -> Result<bool, DirError> {
 	}
 	#[cfg(unix)]
 	{
-		use std::os::unix::fs::{MetadataExt, PermissionsExt};
-		// SAFETY: geteuid has no preconditions.
-		if meta.uid() != unsafe { libc::geteuid() } {
+		let owned = pi_ipc::tighten_owned_dir(dir, &meta)
+			.map_err(|error| DirError::Io(dir.to_owned(), error))?;
+		if !owned {
 			return Err(DirError::Insecure(dir.to_owned(), "owned by another user"));
-		}
-		if meta.mode() & 0o077 != 0 {
-			std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-				.map_err(|error| DirError::Io(dir.to_owned(), error))?;
 		}
 	}
 	#[cfg(windows)]

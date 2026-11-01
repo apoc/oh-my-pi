@@ -2,9 +2,9 @@
 //!
 //! The engine (discovery, transports, peer table, inbound checks) lives in
 //! `pi_mesh::node`; this module converts its types to JS objects, bridges its
-//! event channel to a weak threadsafe callback, and maps request failures to
-//! code-prefixed rejections (`unreachable:`, `timeout:`, `bad_response:`,
-//! `aborted:`).
+//! event channel to a weak threadsafe callback, and rejects failed requests
+//! with a JS error whose `code` is `unreachable`, `timeout`, `bad_response`
+//! or `aborted`.
 
 use std::{sync::Arc, time::Duration};
 
@@ -18,13 +18,17 @@ use parking_lot::Mutex;
 use pi_mesh::{
 	keys::{MIN_PASSPHRASE_CHARS, STRONG_PASSPHRASE_CHARS, check_passphrase, derive_mesh_key},
 	node::{self, MeshMode, NodeConfig, NodeEvent, NodeOptions, NodeStatus, PeerInfo, Track},
-	protocol::{MeshRequest, parse_response},
+	protocol::{MeshErrorCode, MeshRequest, MeshResponse, parse_response},
 	transport::OriginKind,
 };
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{instances::InstanceHost, task};
+use crate::{
+	instances::InstanceHost,
+	prof::profile_region,
+	task::{self, coded, invalid_arg},
+};
 
 /// Weak: an idle mesh never keeps the event loop alive (the callback itself
 /// is still strongly referenced until `close`).
@@ -77,10 +81,9 @@ pub struct MeshNodeOptions<'env> {
 	/// Same-machine instance: supplies the node's instance id and registry
 	/// directory; the local side serves the `mesh` namespace on it. Closing
 	/// the node leaves the host open.
-	pub host:         ClassInstance<'env, InstanceHost>,
-	pub display_name: String,
+	pub host:      ClassInstance<'env, InstanceHost>,
 	/// Machine host name sent in envelopes.
-	pub host_name:    String,
+	pub host_name: String,
 }
 
 #[napi(object)]
@@ -110,6 +113,7 @@ pub struct MeshRequestOptions {
 
 #[napi(object)]
 pub struct MeshStatus {
+	#[napi(ts_type = "'off' | 'local' | 'remote' | 'both'")]
 	pub mode:     String,
 	#[napi(ts_type = "'on' | 'off' | 'error'")]
 	pub local:    String,
@@ -248,11 +252,7 @@ fn to_js_event(event: NodeEvent) -> MeshEvent {
 
 fn parse_mode(mode: &str) -> Result<MeshMode> {
 	serde_json::from_value(serde_json::Value::String(mode.to_owned()))
-		.map_err(|_| Error::new(Status::InvalidArg, format!("invalid mesh mode: {mode}")))
-}
-
-fn invalid_arg(err: impl std::fmt::Display) -> Error {
-	Error::new(Status::InvalidArg, err.to_string())
+		.map_err(|_| invalid_arg(format!("invalid mesh mode: {mode}")))
 }
 
 /// Delivers engine events to JS; stopped after the node closed, once the
@@ -290,11 +290,8 @@ impl MeshNode {
 			.weak::<true>()
 			.build()?;
 		let (tx, mut rx) = mpsc::unbounded_channel();
-		let options = NodeOptions {
-			host:         Arc::clone(opts.host.inner()),
-			display_name: opts.display_name,
-			host_name:    opts.host_name,
-		};
+		let options =
+			NodeOptions { host: Arc::clone(opts.host.inner()), host_name: opts.host_name };
 		let node = within_runtime_if_available(|| node::MeshNode::new(options, tx));
 		let (stop, mut stopped) = oneshot::channel::<()>();
 		let task = spawn(async move {
@@ -366,16 +363,17 @@ impl MeshNode {
 		within_runtime_if_available(|| self.node.refresh());
 	}
 
+	/// Set the in-memory hide/block flags; an omitted flag keeps its value.
 	#[napi]
-	pub fn set_peer_flags(&self, instance_id: String, hidden: bool, blocked: bool) {
+	pub fn set_peer_flags(&self, instance_id: String, hidden: Option<bool>, blocked: Option<bool>) {
 		self.node.set_peer_flags(&instance_id, hidden, blocked);
 	}
 
 	/// Send `bodyJson` (a `MeshRequest`) to peer `to` as `fromAgentId`;
 	/// resolves to the `MeshResponse` JSON. A `message` / `watch`
 	/// acknowledgement without a valid `msgId` / `watchId` resolves to an
-	/// `internal` error response. Rejects with a message prefixed
-	/// `unreachable:`, `timeout:`, `bad_response:` or `aborted:`.
+	/// `internal` error response. Rejects with a JS error whose `code` is
+	/// `unreachable`, `timeout`, `bad_response` or `aborted`.
 	#[napi(ts_return_type = "Promise<string>")]
 	pub fn request<'env>(
 		&self,
@@ -389,24 +387,32 @@ impl MeshNode {
 		let body: MeshRequest = serde_json::from_str(&body_json).map_err(invalid_arg)?;
 		let cancel = task::cancellation_token(signal);
 		let node = Arc::clone(&self.node);
-		task::future(env, "mesh_request", async move {
-			let track = options
-				.ticket
-				.map(|ticket| Track { ticket, hold: options.hold.unwrap_or(false) });
-			let timeout = Duration::from_millis(u64::from(options.timeout_ms));
-			let work = node.request(&to, &from_agent_id, body, timeout, track);
-			let outcome = match &cancel {
-				Some(cancel) => tokio::select! {
-					biased;
-					() = cancel.cancelled() => return Err(Error::from_reason("aborted: mesh request aborted")),
-					outcome = work => outcome,
-				},
-				None => work.await,
-			};
-			let response = outcome.map_err(|err| Error::from_reason(err.to_string()))?;
-			serde_json::to_string(&response)
-				.map_err(|err| Error::from_reason(format!("bad_response: {err}")))
-		})
+		env.spawn_future_with_callback(
+			async move {
+				let _guard = profile_region("mesh_request");
+				let track = options
+					.ticket
+					.map(|ticket| Track { ticket, hold: options.hold.unwrap_or(false) });
+				let timeout = Duration::from_millis(u64::from(options.timeout_ms));
+				let work = node.request(&to, &from_agent_id, body, timeout, track);
+				let outcome = match &cancel {
+					Some(cancel) => tokio::select! {
+						biased;
+						() = cancel.cancelled() => return Ok(Err(("aborted", "mesh request aborted".to_owned()))),
+						outcome = work => outcome,
+					},
+					None => work.await,
+				};
+				Ok(outcome
+					.map_err(|err| (err.code(), err.to_string()))
+					.and_then(|response| {
+						serde_json::to_string(&response).map_err(|err| ("bad_response", err.to_string()))
+					}))
+			},
+			|env, outcome: std::result::Result<String, (&'static str, String)>| {
+				outcome.map_err(|(code, message)| coded(*env, code, message))
+			},
+		)
 	}
 
 	/// Wait up to `timeoutMs` for the next answer to the tracked request `key`
@@ -446,12 +452,29 @@ impl MeshNode {
 	}
 
 	/// Answer an `inbound` event with `responseJson` (a `MeshResponse`). Late or
-	/// unknown ids are ignored.
+	/// unknown ids are ignored. A response the protocol rejects is replaced by
+	/// a `too_large` (size caps) or `internal` error answer, so the peer is not
+	/// left waiting, and the rejection is still thrown.
 	#[napi]
 	pub fn respond(&self, request_id: String, response_json: String) -> Result<()> {
-		let response = parse_response(response_json.as_bytes()).map_err(invalid_arg)?;
-		self.node.respond(&request_id, response);
-		Ok(())
+		match parse_response(response_json.as_bytes()) {
+			Ok(response) => {
+				self.node.respond(&request_id, response);
+				Ok(())
+			},
+			Err(err) => {
+				let fallback = if err.code == MeshErrorCode::TooLarge {
+					MeshResponse::error(
+						MeshErrorCode::TooLarge,
+						"Response exceeds the mesh size limits.",
+					)
+				} else {
+					MeshResponse::error(MeshErrorCode::Internal, "Response could not be sent.")
+				};
+				self.node.respond(&request_id, fallback);
+				Err(invalid_arg(err))
+			},
+		}
 	}
 
 	/// Withdraw from the mesh and stop all background work. Required before
