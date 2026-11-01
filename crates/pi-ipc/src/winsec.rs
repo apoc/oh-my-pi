@@ -1,11 +1,11 @@
-//! Windows security helpers, shared with `pi-natives`' IPC pipes.
+//! Windows security helpers for named pipes and owner-only directories.
 //!
 //! The user of a process token, and security descriptors granting only the
-//! current user: the registry directory (owner and protected inherited DACL)
-//! and the local transport's named pipe.
+//! current user: for this crate's IPC pipes, `pi-mesh`'s registry directory
+//! (owner and protected inherited DACL) and its local transport's named pipe.
 
 use std::{
-	io, iter,
+	fs, io, iter,
 	os::windows::{
 		ffi::OsStrExt,
 		io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
@@ -163,16 +163,31 @@ impl Drop for Descriptor {
 	}
 }
 
-/// Descriptor for the local transport's pipe: current user only.
-pub(crate) fn pipe_descriptor() -> io::Result<Descriptor> {
+/// Pipe descriptor: owner and DACL granting only the current user. Used by
+/// `pi-mesh`'s local transport pipe (removed in Phase C).
+pub fn pipe_descriptor() -> io::Result<Descriptor> {
 	Descriptor::current_user_only(false)
 }
 
-/// Make the current user `dir`'s owner and replace its DACL with a protected
-/// one granting only the current user full control, inherited by files and
-/// subdirectories. Fails when we may not (another owner who did not grant us
-/// `WRITE_OWNER`/`WRITE_DAC`), which callers treat as an insecure directory.
-pub(crate) fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
+/// Make the current user `dir`'s owner, with a protected owner-only DACL.
+///
+/// The DACL grants only the current user full control, inherited by files and
+/// subdirectories. `dir` must be a real directory: a non-directory or a
+/// name-surrogate reparse point (symlink, junction) is refused with
+/// `InvalidInput` before anything changes; other reparse points such as
+/// cloud-file placeholders are accepted. Also fails when we may not (another
+/// owner who did not grant us `WRITE_OWNER`/`WRITE_DAC`); callers treat any
+/// failure as an insecure directory.
+pub fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
+	// std reports exactly the name-surrogate reparse tags as symlinks
+	// (`IsReparseTagNameSurrogate`), junctions included.
+	let file_type = fs::symlink_metadata(dir)?.file_type();
+	if file_type.is_symlink() || !file_type.is_dir() {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!("{} is not a real directory", dir.display()),
+		));
+	}
 	let descriptor = Descriptor::current_user_only(true)?;
 	let (mut present, mut defaulted) = (0, 0);
 	let mut dacl: *mut ACL = ptr::null_mut();
@@ -209,5 +224,117 @@ pub(crate) fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
 		Ok(())
 	} else {
 		Err(io::Error::from_raw_os_error(status as i32))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{ffi::c_void, fs, io, iter, os::windows::ffi::OsStrExt, process::Command, ptr};
+
+	use windows_sys::Win32::{
+		Foundation::ERROR_SUCCESS,
+		Security::{
+			ACCESS_ALLOWED_ACE, ACL,
+			Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+			DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
+			OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+		},
+	};
+
+	use super::{Descriptor, current_user, restrict_dir_to_current_user};
+
+	/// `FILE_ALL_ACCESS`, the `FA` right the SDDL grants.
+	const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
+	/// `ACCESS_ALLOWED_ACE_TYPE` (in `System_SystemServices`, a feature this
+	/// crate does not otherwise need).
+	const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+	#[test]
+	fn restricts_a_plain_directory() {
+		let dir = tempfile::tempdir().unwrap();
+		restrict_dir_to_current_user(dir.path()).unwrap();
+
+		let path: Vec<u16> = dir
+			.path()
+			.as_os_str()
+			.encode_wide()
+			.chain(iter::once(0))
+			.collect();
+		let mut owner: PSID = ptr::null_mut();
+		let mut dacl: *mut ACL = ptr::null_mut();
+		let mut raw = ptr::null_mut();
+		// SAFETY: `path` is NUL-terminated; outputs are valid pointers and point
+		// into `raw`, which `Descriptor` frees on drop.
+		let status = unsafe {
+			GetNamedSecurityInfoW(
+				path.as_ptr(),
+				SE_FILE_OBJECT,
+				OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+				&raw mut owner,
+				ptr::null_mut(),
+				&raw mut dacl,
+				ptr::null_mut(),
+				&raw mut raw,
+			)
+		};
+		assert_eq!(status, ERROR_SUCCESS);
+		let descriptor = Descriptor(raw);
+		let me = current_user().unwrap();
+
+		// SAFETY: both SIDs are live (`descriptor`, `me`).
+		assert_ne!(unsafe { EqualSid(owner, me.sid()) }, 0, "owner is not the current user");
+
+		let (mut control, mut revision) = (0u16, 0u32);
+		// SAFETY: `descriptor.0` is a valid descriptor; outputs are valid.
+		let ok =
+			unsafe { GetSecurityDescriptorControl(descriptor.0, &raw mut control, &raw mut revision) };
+		assert_ne!(ok, 0);
+		assert_ne!(control & SE_DACL_PROTECTED, 0, "DACL is not protected");
+
+		assert!(!dacl.is_null(), "no DACL");
+		// SAFETY: `dacl` points into `descriptor`.
+		assert_eq!(unsafe { (*dacl).AceCount }, 1, "DACL must hold exactly one ACE");
+		let mut ace: *mut c_void = ptr::null_mut();
+		// SAFETY: index 0 exists; `ace` is a valid out pointer.
+		assert_ne!(unsafe { GetAce(dacl, 0, &raw mut ace) }, 0);
+		let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+		// SAFETY: `ace` points at ACE 0 inside `descriptor`; its type is checked
+		// before the allowed-ACE layout is relied on for the SID.
+		unsafe {
+			assert_eq!((*ace).Header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+			assert_eq!((*ace).Mask, FILE_ALL_ACCESS);
+			let sid: PSID = (&raw mut (*ace).SidStart).cast();
+			assert_ne!(EqualSid(sid, me.sid()), 0, "ACE does not grant the current user");
+		}
+	}
+
+	#[test]
+	fn refuses_a_file() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("file");
+		fs::write(&file, b"").unwrap();
+		let error = restrict_dir_to_current_user(&file).unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+	}
+
+	#[test]
+	fn refuses_a_junction() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target");
+		let junction = dir.path().join("junction");
+		fs::create_dir(&target).unwrap();
+		// Junctions need no privilege, unlike directory symlinks.
+		let status = Command::new("cmd")
+			.arg("/C")
+			.arg("mklink")
+			.arg("/J")
+			.arg(&junction)
+			.arg(&target)
+			.output()
+			.unwrap()
+			.status;
+		assert!(status.success(), "mklink /J failed");
+		let error = restrict_dir_to_current_user(&junction).unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 	}
 }

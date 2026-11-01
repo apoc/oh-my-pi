@@ -281,6 +281,7 @@ mod platform {
 mod platform {
 	use std::{io, net::SocketAddr, os::windows::io::AsRawHandle, path::Path, time::Duration};
 
+	use pi_ipc::winsec::{Descriptor, pipe_descriptor};
 	use tokio::net::windows::named_pipe::{
 		ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
 	};
@@ -290,10 +291,7 @@ mod platform {
 	};
 
 	use super::{Acceptor, ConnectError};
-	use crate::{
-		keys::{hex, random_bytes},
-		winsec::{Descriptor, pipe_descriptor},
-	};
+	use crate::keys::{hex, random_bytes};
 
 	pub type Stream = NamedPipeClient;
 

@@ -6417,6 +6417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-ipc"
+version = "18.14.2"
+dependencies = [
+ "libc",
+ "memchr",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "pi-iso"
 version = "18.20.0"
 dependencies = [
@@ -6438,6 +6450,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "parking_lot",
+ "pi-ipc",
  "ring",
  "serde",
  "serde_json",
@@ -6500,6 +6513,7 @@ dependencies = [
  "pi-builtins",
  "pi-diff",
  "pi-edit",
+ "pi-ipc",
  "pi-iso",
  "pi-mesh",
  "pi-predict",
