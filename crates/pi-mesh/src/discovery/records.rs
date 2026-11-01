@@ -24,7 +24,8 @@ pub struct MdnsPeer {
 	pub port:         u16,
 	/// mDNS host name without the trailing dot, e.g. `box.local`.
 	pub hostname:     String,
-	/// Every advertised IPv4 address, sorted.
+	/// Every advertised IPv4 address (the LAN listener binds `0.0.0.0`),
+	/// sorted, deduplicated.
 	pub addresses:    Vec<IpAddr>,
 	/// The address to dial (see [`pick_address`]); one of `addresses`.
 	pub address:      IpAddr,
@@ -84,29 +85,22 @@ pub struct Resolved<'a> {
 	pub addresses: &'a [IpAddr],
 }
 
-/// Validated record of another instance; group/own-id filtering is the
-/// tracker's job. Unknown TXT keys are ignored.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerRecord {
-	pub instance_id:  String,
-	pub display_name: String,
-	pub group_tag:    String,
-	pub port:         u16,
-	pub hostname:     String,
-	/// IPv4 only (the LAN listener binds `0.0.0.0`), sorted, deduplicated.
-	pub addresses:    Vec<IpAddr>,
-}
-
 fn txt_str<'a>(r: &Resolved<'a>, key: &str) -> Option<&'a str> {
 	std::str::from_utf8((r.txt)(key)??).ok()
 }
 
-/// Parses a resolved service.
+/// Parses a resolved service of another instance and picks its address
+/// (`previous` / `ifaces`: see [`pick_address`]); group/own-id filtering is
+/// the tracker's job. Unknown TXT keys are ignored.
 ///
 /// Rejects other protocol versions, malformed ids, ids that differ from the
 /// DNS-SD instance label (no claiming another instance's id), port 0 and
-/// services without an IPv4 address.
-pub fn parse_resolved(r: &Resolved<'_>) -> Option<PeerRecord> {
+/// services without a usable IPv4 address.
+pub fn parse_resolved(
+	r: &Resolved<'_>,
+	previous: Option<IpAddr>,
+	ifaces: &[InterfaceAddr],
+) -> Option<MdnsPeer> {
 	if txt_str(r, "v")? != TXT_VERSION {
 		return None;
 	}
@@ -134,16 +128,15 @@ pub fn parse_resolved(r: &Resolved<'_>) -> Option<PeerRecord> {
 		.collect();
 	addresses.sort_unstable();
 	addresses.dedup();
-	if addresses.is_empty() {
-		return None;
-	}
-	Some(PeerRecord {
+	let address = pick_address(&addresses, previous, ifaces)?;
+	Some(MdnsPeer {
 		instance_id: instance_id.to_owned(),
 		display_name,
 		group_tag: group_tag.to_owned(),
 		port: r.port,
 		hostname: r.host.trim_end_matches('.').to_owned(),
 		addresses,
+		address,
 	})
 }
 
@@ -220,27 +213,15 @@ impl PeerTracker {
 		ifaces: &[InterfaceAddr],
 	) -> Option<DiscoveryEvent> {
 		let key = r.fullname.to_ascii_lowercase();
-		let record = parse_resolved(r).filter(|rec| {
-			rec.group_tag == self.group_tag && !rec.instance_id.eq_ignore_ascii_case(&self.own_id)
-		});
 		let previous = self.peers.get(&key);
-		let picked = record.and_then(|rec| {
-			pick_address(&rec.addresses, previous.map(|p| p.address), ifaces).map(|a| (rec, a))
+		let parsed = parse_resolved(r, previous.map(|p| p.address), ifaces).filter(|peer| {
+			peer.group_tag == self.group_tag && !peer.instance_id.eq_ignore_ascii_case(&self.own_id)
 		});
-		let Some((rec, address)) = picked else {
+		let Some(peer) = parsed else {
 			return self
 				.peers
 				.remove(&key)
 				.map(|gone| DiscoveryEvent::PeerDown { instance_id: gone.instance_id });
-		};
-		let peer = MdnsPeer {
-			instance_id: rec.instance_id,
-			display_name: rec.display_name,
-			group_tag: rec.group_tag,
-			port: rec.port,
-			hostname: rec.hostname,
-			addresses: rec.addresses,
-			address,
 		};
 		if previous == Some(&peer) {
 			return None;
@@ -373,7 +354,7 @@ mod tests {
 			}),
 		];
 		for (what, svc) in cases {
-			assert_eq!(svc.with(parse_resolved), None, "{what}");
+			assert_eq!(svc.with(|r| parse_resolved(r, None, &[])), None, "{what}");
 		}
 	}
 
@@ -389,7 +370,7 @@ mod tests {
 			"192.168.0.50".parse().unwrap(),
 			"192.168.0.60".parse().unwrap(),
 		];
-		let rec = svc.with(parse_resolved).unwrap();
+		let rec = svc.with(|r| parse_resolved(r, None, &[])).unwrap();
 		assert_eq!(rec.display_name.len(), MAX_DISPLAY_NAME_BYTES);
 		assert_eq!(rec.hostname, "box.local");
 		assert_eq!(rec.addresses, vec![
@@ -398,7 +379,7 @@ mod tests {
 		]);
 		let unnamed = Svc::new(PEER, TAG)
 			.set("n", None)
-			.with(parse_resolved)
+			.with(|r| parse_resolved(r, None, &[]))
 			.unwrap();
 		assert_eq!(unnamed.display_name, PEER);
 	}

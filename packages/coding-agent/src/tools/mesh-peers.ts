@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, toError } from "@oh-my-pi/pi-utils";
+import { logger, prompt, toError, truncate } from "@oh-my-pi/pi-utils";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { MeshEngine, MeshPeerView } from "../mesh/engine";
 import { formatMeshPeer, formatMeshPeerList, visibleMeshPeers } from "../mesh/peers";
@@ -104,9 +104,7 @@ export class MeshPeersTool implements AgentTool<typeof meshPeersSchema, MeshPeer
 		const now = Date.now();
 		const blocks = ranked.map(({ peer, score, match }, index) => {
 			const text = meshMatchText(peer, match)?.replace(/\s+/g, " ").trim();
-			const quote = text
-				? `: ${meshPeerText(text.length > REASON_CHARS ? `${text.slice(0, REASON_CHARS)}…` : text)}`
-				: "";
+			const quote = text ? `: ${meshPeerText(truncate(text, REASON_CHARS))}` : "";
 			const reason = match === "none" ? "no field connects it to the need" : `matches ${match}${quote}`;
 			return `${index + 1}. score ${score.toFixed(2)} — ${reason}\n${formatMeshPeer(peer, now)}`;
 		});

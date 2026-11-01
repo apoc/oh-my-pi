@@ -6,14 +6,14 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { MeshEngineError, type MeshIncomingReply } from "../mesh/engine";
-import type { MeshOutbound } from "../mesh/outbound";
+import { MESH_SEND_MAX_TIMEOUT_SEC, type MeshOutbound, type MeshRefusal } from "../mesh/outbound";
 import { meshPeerLabel, resolveMeshPeer } from "../mesh/peers";
 import { cfgMeshAutoBackgroundEnabled, cfgMeshAutoBackgroundThresholdMs } from "../mesh/settings";
-import { MAX_TEXT_CHARS, MAX_WATCH_TTL_SEC, type MeshErrorCode } from "../mesh/wire";
+import { MAX_TEXT_CHARS, MAX_WATCH_TTL_SEC } from "../mesh/wire";
 import meshSendDescription from "../prompts/tools/mesh-send.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isMeshToolSession, meshToolRefs, requireMeshRuntime } from "../mesh/tool-refs";
@@ -21,9 +21,8 @@ import { meshPeerText } from "../mesh/text";
 import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
 
-/** Default and maximum wait for a status/ask/task answer. */
+/** Default wait for a status/ask/task answer. */
 export const MESH_SEND_DEFAULT_TIMEOUT_SEC = 300;
-export const MESH_SEND_MAX_TIMEOUT_SEC = 1800;
 
 export type MeshSendKind = "status" | "ask" | "task" | "steer" | "note" | "watch" | "reply";
 
@@ -72,9 +71,11 @@ interface PendingAnswer {
 	timeoutSec: number;
 }
 
-/** Refusal by the peer; its message is peer text. */
-function refused(peer: string, code: MeshErrorCode, message: string): ToolError {
-	return new ToolError(`${peer} refused: ${code}: ${meshPeerText(message)}`);
+/** Refusal by the peer (its message is peer text), or ours for a blocked peer. */
+function refused(peer: string, { code, message }: MeshRefusal): ToolError {
+	return new ToolError(
+		code === "blocked" ? `${peer} is blocked: ${message}` : `${peer} refused: ${code}: ${meshPeerText(message)}`,
+	);
 }
 
 function argumentError(kind: MeshSendKind, problem: string): ToolError {
@@ -128,16 +129,11 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 
 		const resolution = resolveMeshPeer(engine.peers(), params.to);
 		if (!resolution.ok) throw new ToolError(resolution.message);
-		const peer = resolution.peer;
-		const to = peer.instanceId;
-		const label = meshPeerLabel(peer);
-		// The engine drops everything a blocked peer sends, answers and watch events included.
-		if (peer.blocked && kind !== "note") {
-			throw new ToolError(`${label} is blocked: it cannot answer. Unblock it in /mesh first.`);
-		}
+		const to = resolution.peer;
+		const label = meshPeerLabel(to);
 		const fromAgentId = this.#session.getAgentId?.() ?? MAIN_AGENT_ID;
 		const outbound = frontend.outbound;
-		const details: MeshSendDetails = { kind, to };
+		const details: MeshSendDetails = { kind, to: to.instanceId };
 
 		try {
 			switch (kind) {
@@ -148,7 +144,7 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 						Math.min(Math.ceil(params.timeoutSec ?? MAX_WATCH_TTL_SEC), MAX_WATCH_TTL_SEC),
 					);
 					const result = await outbound.watch({ to, fromAgentId, event: params.event!, ttlSec, signal });
-					if (!result.ok) throw refused(label, result.code, result.message);
+					if (!result.ok) throw refused(label, result);
 					details.watchId = result.watchId;
 					return done(
 						`Watching ${label} for ${params.event} (watch ${meshPeerText(result.watchId)}, up to ${ttlSec}s). The event will arrive later as a message.`,
@@ -157,13 +153,13 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 				}
 				case "reply": {
 					const response = await outbound.reply({ to, fromAgentId, replyTo: params.replyTo!, text, signal });
-					if (!response.ok) throw refused(label, response.code, response.message);
+					if (!response.ok) throw refused(label, response);
 					return done(`Reply to ${params.replyTo} delivered to ${label}.`, details);
 				}
 				case "steer":
 				case "note": {
 					const result = await outbound.send({ to, fromAgentId, kind, text, signal });
-					if (!result.ok) throw refused(label, result.code, result.message);
+					if (!result.ok) throw refused(label, result);
 					details.msgId = result.msgId;
 					const msgId = meshPeerText(result.msgId);
 					return done(
@@ -189,7 +185,7 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 						awaitReply: true,
 						signal,
 					});
-					if (!result.ok) throw refused(label, result.code, result.message);
+					if (!result.ok) throw refused(label, result);
 					details.msgId = result.msgId;
 					details.thread = result.thread;
 					const pending: PendingAnswer = {
@@ -311,6 +307,5 @@ function backgroundText(pending: PendingAnswer, jobId: string, steered: boolean)
 
 /** Job-row label: kind, peer, and the first line of the question. */
 function jobLabel(pending: PendingAnswer): string {
-	const label = `${pending.kind} → ${pending.label}: ${pending.text.trim().split("\n", 1)[0] ?? ""}`;
-	return label.length > 120 ? `${label.slice(0, 117)}...` : label;
+	return truncate(`${pending.kind} → ${pending.label}: ${pending.text.trim().split("\n", 1)[0] ?? ""}`, 120, "...");
 }

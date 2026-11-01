@@ -18,13 +18,10 @@
 //! envelope validation, header mismatch, and the replay guard keyed by
 //! sender + msgId (`unauthorized`).
 
-use std::{
-	net::SocketAddr,
-	sync::Arc,
-	time::{SystemTime, UNIX_EPOCH},
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use parking_lot::Mutex;
+use pi_instances::now_ms;
 
 use super::{
 	Conn, InboundSink, Origin, OriginKind, REQUEST_READ_TIMEOUT, STATUS_MISDIRECTED, STATUS_OK,
@@ -53,12 +50,6 @@ pub(super) struct Server {
 	pub keys:        Arc<MeshKeys>,
 	pub guard:       Arc<Mutex<ReplayGuard>>,
 	pub sink:        Arc<dyn InboundSink>,
-}
-
-fn now_ms() -> u64 {
-	SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn request_aad(header: &[u8]) -> Vec<u8> {

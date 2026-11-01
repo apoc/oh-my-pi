@@ -17,14 +17,12 @@ export function presentMeshCard(
 }
 
 export function createTuiMeshUiHooks(
-	ctx: Pick<InteractiveModeContext, "present" | "showStatus" | "toolOutputExpanded" | "handleMeshAskReply">,
+	ctx: Pick<InteractiveModeContext, "present" | "showStatus" | "toolOutputExpanded">,
 ): MeshUiHooks {
 	return {
 		hasUI: true,
 		showIncoming(from, entry) {
 			presentMeshCard(ctx, { direction: "incoming", peer: from, ...entry });
-			// Answers to the user's `/ask` questions also complete their conversation.
-			if (entry.kind === "reply") ctx.handleMeshAskReply(from, entry);
 		},
 		showOutgoing(to, entry) {
 			presentMeshCard(ctx, { direction: "outgoing", peer: to, ...entry });

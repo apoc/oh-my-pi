@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-	InstanceError, InstanceHost, Probe, ProbeRequest, STALE_TMP_AGE,
+	InstanceError, InstanceHost, ProbeRequest, STALE_TMP_AGE,
 	client::ConnectFailure,
 	list,
 	list::{Verdict, connect_verdict, exchange_verdict},
@@ -24,10 +24,7 @@ async fn listed_ids(dir: &Path, capability: &str, exclude: Option<&str>) -> Vec<
 		.await
 		.unwrap()
 		.into_iter()
-		.map(|(entry, probe)| {
-			assert!(matches!(probe, Probe::Body(_)), "{probe:?}");
-			entry.instance_id
-		})
+		.map(|(entry, _)| entry.instance_id)
 		.collect()
 }
 

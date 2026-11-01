@@ -13,7 +13,7 @@
 //! listing reports `stale_generation` rather than a verdict about its
 //! predecessor. URLs and room secrets never touch the disk.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, str::FromStr, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -24,7 +24,7 @@ use crate::{
 	dir::DirError,
 	entry::InstanceEntry,
 	host::{Handler, HandlerReply, RequestCtx, with_deadline},
-	list::{Probe, ProbeRequest, list},
+	list::{ProbeRequest, list},
 };
 
 /// Namespace (capability) served by Collab hosts.
@@ -61,6 +61,19 @@ impl CollabAccess {
 impl fmt::Display for CollabAccess {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str(self.as_str())
+	}
+}
+
+impl FromStr for CollabAccess {
+	type Err = ();
+
+	/// The inverse of [`Self::as_str`].
+	fn from_str(access: &str) -> Result<Self, ()> {
+		match access {
+			"view" => Ok(Self::View),
+			"control" => Ok(Self::Control),
+			_ => Err(()),
+		}
 	}
 }
 
@@ -334,10 +347,7 @@ async fn live_hosts(
 	let mut live: Vec<_> = list(dir, NAMESPACE, None, probe, timeout)
 		.await?
 		.into_iter()
-		.filter_map(|(entry, probe)| {
-			let Probe::Body(body) = probe else {
-				return None;
-			};
+		.filter_map(|(entry, body)| {
 			let mut snapshot = serde_json::from_str::<CollabHostSnapshot>(body.get()).ok()?;
 			if snapshot.generation == 0 {
 				return None;

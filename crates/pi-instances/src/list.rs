@@ -48,15 +48,6 @@ use crate::{
 	},
 };
 
-/// A live entry's answer to the caller's probe request.
-#[derive(Debug)]
-pub enum Probe {
-	Body(Box<RawValue>),
-	/// The host is at its connection limit (or, on Windows, every pipe
-	/// instance stayed busy): alive, no answer.
-	Busy,
-}
-
 /// The request [`list`] sends to an entry serving the capability.
 #[derive(Debug)]
 pub struct ProbeRequest {
@@ -70,6 +61,9 @@ pub struct ProbeRequest {
 /// Live entries serving `capability` (other than `exclude`) with their
 /// answer to `probe(entry)`.
 ///
+/// A busy entry (at its connection limit, or on Windows every pipe instance
+/// busy) is alive without an answer: omitted, never pruned.
+///
 /// Sorted oldest first (`createdAt`, then id). Prunes and sweeps as described
 /// in the module docs. A missing directory lists empty; an insecure one is an
 /// error.
@@ -79,7 +73,7 @@ pub async fn list<F>(
 	exclude: Option<&str>,
 	probe: F,
 	timeout: Duration,
-) -> Result<Vec<(InstanceEntry, Probe)>, DirError>
+) -> Result<Vec<(InstanceEntry, Box<RawValue>)>, DirError>
 where
 	F: Fn(&InstanceEntry) -> ProbeRequest + Sync,
 {
@@ -87,8 +81,7 @@ where
 	Ok(found
 		.into_iter()
 		.filter_map(|(entry, verdict)| match verdict {
-			Verdict::Body(body) => Some((entry, Probe::Body(body))),
-			Verdict::Busy => Some((entry, Probe::Busy)),
+			Verdict::Body(body) => Some((entry, body)),
 			_ => None,
 		})
 		.collect())
@@ -352,7 +345,7 @@ fn scan(dir: &Path, dir_text: &str, exclude: Option<&str>) -> Result<Vec<Instanc
 		}
 		#[cfg(unix)]
 		{
-			let socket = name.strip_suffix(".bind.lock").unwrap_or(name);
+			let socket = name.strip_suffix(pi_ipc::BIND_LOCK_SUFFIX).unwrap_or(name);
 			if let Some(stem) = socket.strip_suffix(".sock") {
 				if is_endpoint_stem(stem) {
 					endpoints.push((dir.join(socket), pi_ipc::endpoint(dir_text, stem)));
@@ -430,23 +423,15 @@ fn is_stale(meta: &std::fs::Metadata) -> bool {
 /// may have just created it and not locked it yet.
 #[cfg(unix)]
 pub(crate) fn sweep_endpoint(socket: &Path) {
-	use std::{
-		fs::{File, OpenOptions},
-		os::unix::fs::{FileTypeExt, OpenOptionsExt},
-	};
+	use std::os::unix::fs::FileTypeExt;
 
 	if !socket.parent().is_some_and(pi_ipc::is_private_dir) {
 		return;
 	}
-	let mut lock_path = socket.as_os_str().to_owned();
-	lock_path.push(".bind.lock");
-	let open = |create: bool| -> io::Result<File> {
-		OpenOptions::new()
-			.read(true)
-			.write(true)
+	let lock_path = pi_ipc::bind_lock_path(socket);
+	let open = |create: bool| {
+		pi_ipc::bind_lock_options()
 			.create_new(create)
-			.mode(0o600)
-			.custom_flags(libc::O_NOFOLLOW)
 			.open(&lock_path)
 	};
 	let (lock, created) = match open(true) {
@@ -457,7 +442,7 @@ pub(crate) fn sweep_endpoint(socket: &Path) {
 		},
 		Err(_) => return,
 	};
-	if lock.try_lock().is_err() || !pi_ipc::is_same_file(&lock, Path::new(&lock_path)) {
+	if lock.try_lock().is_err() || !pi_ipc::is_same_file(&lock, &lock_path) {
 		// A binder holds it (or opened the file we just created), or it was
 		// unlinked or replaced since we opened it: not ours to judge.
 		return;

@@ -244,7 +244,7 @@ impl MeshKeys {
 }
 
 /// Lowercase hex of `bytes`.
-pub(crate) fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
 	const DIGITS: &[u8; 16] = b"0123456789abcdef";
 	let mut out = String::with_capacity(bytes.len() * 2);
 	for &b in bytes {
@@ -252,16 +252,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 		out.push(DIGITS[(b & 0x0f) as usize] as char);
 	}
 	out
-}
-
-/// Fill `buf` from the OS random source.
-///
-/// # Panics
-/// When the OS random source fails.
-pub(crate) fn random_bytes(buf: &mut [u8]) {
-	SystemRandom::new()
-		.fill(buf)
-		.expect("OS random source unavailable");
 }
 
 type Digest = [u8; 32];

@@ -49,7 +49,7 @@ impl ProcessUser {
 	}
 
 	/// The user's SID in string form (`S-1-5-21-…`).
-	pub fn sid_string(&self) -> io::Result<String> {
+	fn sid_string(&self) -> io::Result<String> {
 		let mut text: PWSTR = ptr::null_mut();
 		// SAFETY: `self.sid()` is valid while `self` lives; `text` is a valid out
 		// pointer.
@@ -124,7 +124,7 @@ unsafe impl Sync for Descriptor {}
 
 impl Descriptor {
 	/// Parse `sddl` (e.g. `D:P(A;;GA;;;S-1-5-21-…)`).
-	pub fn from_sddl(sddl: &str) -> io::Result<Self> {
+	fn from_sddl(sddl: &str) -> io::Result<Self> {
 		let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
 		let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
 		// SAFETY: `wide` is NUL-terminated; `descriptor` is a valid out pointer.
@@ -142,11 +142,10 @@ impl Descriptor {
 		Ok(Self(descriptor))
 	}
 
-	/// Owner: the current user. DACL: protected, full control for the current
-	/// user only, inherited by files and subdirectories.
-	fn current_user_only() -> io::Result<Self> {
+	/// Parse the SDDL `sddl` builds from the current user's SID string.
+	pub fn for_current_user(sddl: impl FnOnce(&str) -> String) -> io::Result<Self> {
 		let sid = current_user()?.sid_string()?;
-		Self::from_sddl(&format!("O:{sid}D:P(A;OICI;FA;;;{sid})"))
+		Self::from_sddl(&sddl(&sid))
 	}
 
 	/// `SECURITY_ATTRIBUTES` pointing at this descriptor; valid while `self`
@@ -186,7 +185,9 @@ pub fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
 			format!("{} is not a real directory", dir.display()),
 		));
 	}
-	let descriptor = Descriptor::current_user_only()?;
+	// Owner: the current user. DACL: protected, full control for the current
+	// user only, inherited by files and subdirectories.
+	let descriptor = Descriptor::for_current_user(|sid| format!("O:{sid}D:P(A;OICI;FA;;;{sid})"))?;
 	let (mut present, mut defaulted) = (0, 0);
 	let mut dacl: *mut ACL = ptr::null_mut();
 	// SAFETY: `descriptor` is a valid self-relative descriptor; outputs are

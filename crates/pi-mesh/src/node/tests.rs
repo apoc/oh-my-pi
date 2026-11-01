@@ -51,7 +51,7 @@ impl MdnsHandle for FakeHandle {
 	}
 }
 
-impl MdnsStarter for FakeMdns {
+impl FakeMdns {
 	fn start(
 		&self,
 		cfg: MdnsConfig,
@@ -61,9 +61,7 @@ impl MdnsStarter for FakeMdns {
 		*self.tx.lock() = Some(events);
 		Ok(Arc::new(FakeHandle(Arc::clone(&self.stops))))
 	}
-}
 
-impl FakeMdns {
 	async fn emit(&self, event: DiscoveryEvent) {
 		let tx = self.tx.lock().clone().expect("mdns started");
 		tx.send(event).await.unwrap();
@@ -97,8 +95,9 @@ fn node_on(
 	opts: Opts,
 ) -> (Arc<MeshNode>, mpsc::UnboundedReceiver<NodeEvent>) {
 	let (tx, rx) = mpsc::unbounded_channel();
+	let fake = Arc::clone(mdns);
 	let seams = Seams {
-		mdns:             Arc::clone(mdns) as Arc<dyn MdnsStarter>,
+		mdns:             Arc::new(move |cfg, events| fake.start(cfg, events)),
 		is_same_machine:  opts.same_machine,
 		rdns:             ReverseDns::with_resolver(ReverseDnsConfig::default(), Arc::new(|_| None)),
 		lan_bind:         IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -107,9 +106,7 @@ fn node_on(
 		respond_timeout:  opts.respond_timeout,
 		probe_timeout:    Duration::from_secs(2),
 	};
-	let id = host.instance_id().to_owned();
-	let opts =
-		NodeOptions { host, display_name: format!("node {id}"), host_name: "testhost".into() };
+	let opts = NodeOptions { host, host_name: "testhost".into() };
 	(MeshNode::with_seams(opts, tx, seams), rx)
 }
 
@@ -400,13 +397,13 @@ async fn local_route_preferred_inbound_roundtrip_and_blocking() {
 	assert_eq!(resp, ok);
 	eventually("B learned A from the inbound contact", || peer(&b, A).is_some()).await;
 
-	b.set_peer_flags(A, false, true);
+	b.set_peer_flags(A, None, Some(true));
 	let denied = a
 		.request(B, "Main", MeshRequest::Threads, Duration::from_secs(5), None)
 		.await
 		.unwrap();
 	assert_eq!(err_code(&denied), Some(MeshErrorCode::Denied));
-	b.set_peer_flags(A, false, false);
+	b.set_peer_flags(A, None, Some(false));
 	a.request(B, "Main", MeshRequest::Threads, Duration::from_secs(5), None)
 		.await
 		.unwrap();

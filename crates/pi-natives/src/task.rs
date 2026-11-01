@@ -93,6 +93,16 @@ pub fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> 
 	})
 }
 
+/// JS `Error` whose `code` is `code`.
+pub fn coded(env: Env, code: &str, message: String) -> Error {
+	Error::from(napi::JsError::from(Error::new(code, message)).into_unknown(env))
+}
+
+/// `InvalidArg` error carrying `err`'s message.
+pub fn invalid_arg(err: impl std::fmt::Display) -> Error {
+	Error::new(Status::InvalidArg, err.to_string())
+}
+
 impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {

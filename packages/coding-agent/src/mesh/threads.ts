@@ -9,20 +9,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { writeFileAtomically } from "../utils/atomic-file";
 import { MESH_THREADS_DIRNAME } from "./paths";
 import type { MeshErrorCode, MeshSender, MeshThreadKind } from "./wire";
 
-export type MeshTurnStatus = "queued" | "running" | "complete" | "error" | "interrupted";
+type MeshTurnStatus = "queued" | "running" | "complete" | "error" | "interrupted";
 
-export interface MeshThreadPeer {
-	instanceId: string;
-	agentId: string;
-	displayName: string;
-	host: string;
-}
-
-export interface MeshThreadTurn {
+interface MeshThreadTurn {
 	/** Envelope id of the question; the answer's `replyTo`. */
 	msgId: string;
 	question: string;
@@ -37,7 +31,7 @@ export interface MeshThreadRecord {
 	threadId: string;
 	kind: MeshThreadKind;
 	/** The asking peer; only its instance may read or continue the thread. */
-	peer: MeshThreadPeer;
+	peer: MeshSender;
 	mainSessionId: string;
 	/** Responder subagent kept alive for follow-ups (ask/task). */
 	forkAgentId?: string;
@@ -48,7 +42,7 @@ export interface MeshThreadRecord {
 	updatedAt: number;
 }
 
-export type MeshThreadLookup =
+type MeshThreadLookup =
 	| { ok: true; record: MeshThreadRecord }
 	| { ok: false; code: Extract<MeshErrorCode, "unknown_thread" | "thread_expired">; message: string };
 
@@ -139,7 +133,7 @@ export class MeshThreadStore {
 	readonly #ttlMs: () => number;
 	readonly #records = new Map<string, MeshThreadRecord>();
 	/** Expired thread id -> asking instance id. */
-	readonly #expired = new Map<string, string>();
+	readonly #expired = new LRUCache<string, string>({ max: MAX_EXPIRED_IDS });
 	readonly #revisions = new Map<string, string>();
 	readonly #turnQueues = new Map<string, Promise<void>>();
 	readonly #unsubscribe: () => void;
@@ -169,7 +163,7 @@ export class MeshThreadStore {
 			if (!this.#isStale(record)) return { ok: true, record };
 			this.#expire(record, true);
 		}
-		if (this.#expired.get(threadId) === askerInstanceId) {
+		if (this.#expired.peek(threadId) === askerInstanceId) {
 			return { ok: false, code: "thread_expired", message: `Thread ${threadId} expired.` };
 		}
 		return { ok: false, code: "unknown_thread", message: `Unknown thread ${threadId}.` };
@@ -296,10 +290,6 @@ export class MeshThreadStore {
 		this.#records.delete(record.threadId);
 		this.#revisions.delete(record.threadId);
 		this.#expired.set(record.threadId, record.peer.instanceId);
-		if (this.#expired.size > MAX_EXPIRED_IDS) {
-			const oldest = this.#expired.keys().next().value;
-			if (oldest !== undefined) this.#expired.delete(oldest);
-		}
 		const directory = this.#directory;
 		if (!removeFile || directory === undefined) return;
 		const filePath = path.join(directory, recordFileName(record.threadId));

@@ -39,8 +39,8 @@ async function pair(): Promise<[NativeMeshEngine, NativeMeshEngine]> {
 	const hostB = new InstanceHost({ dir: registryDir.path() });
 	cleanups.push(() => hostA.close());
 	cleanups.push(() => hostB.close());
-	const a = new NativeMeshEngine({ host: hostA, displayName: "alice", hostName: "box" });
-	const b = new NativeMeshEngine({ host: hostB, displayName: "bob", hostName: "box" });
+	const a = new NativeMeshEngine({ host: hostA, hostName: "box" });
+	const b = new NativeMeshEngine({ host: hostB, hostName: "box" });
 	expect(a.instanceId).toBe(hostA.instanceId);
 	cleanups.push(() => a.close());
 	cleanups.push(() => b.close());

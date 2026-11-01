@@ -5,10 +5,8 @@
  * mode never start a host.
  */
 import * as os from "node:os";
-import type { MeshConfig } from "@oh-my-pi/pi-natives";
 import { logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { cfgCollabDisplayName } from "../collab/settings";
-import type { ScopeLike } from "../config/registry";
 import { sharedInstanceHost } from "../instances";
 import type { AgentSession } from "../session/agent-session";
 import type { MeshUiHooks } from "./bridge";
@@ -17,7 +15,15 @@ import { NativeMeshEngine } from "./native-engine";
 import { MeshOutbound } from "./outbound";
 import { MeshResponder } from "./responder";
 import { getMeshRuntime, type MeshRuntime, setMeshRuntime } from "./runtime";
-import { cfgMeshDisplayName, cfgMeshEnabled, cfgMeshKey, cfgMeshMode, cfgMeshPeers, cfgMeshPort } from "./settings";
+import {
+	cfgMeshDisplayName,
+	cfgMeshEnabled,
+	cfgMeshKey,
+	cfgMeshMode,
+	cfgMeshPeers,
+	cfgMeshPort,
+	meshConfigFromSettings,
+} from "./settings";
 import { type MeshIdentity, MeshSnapshotPublisher } from "./snapshot";
 import { MeshSummaryGenerator } from "./summary";
 
@@ -49,29 +55,6 @@ interface SessionBinding {
 	readonly runtime: MeshRuntime;
 	readonly detachSummary: () => void;
 	stopPublisher: () => void;
-}
-
-/** Display name peers see: `mesh.displayName`, else `collab.displayName`, else `user@host`. */
-export function resolveMeshDisplayName(settings: ScopeLike): string {
-	const configured = cfgMeshDisplayName.get(settings).trim() || cfgCollabDisplayName.get(settings).trim();
-	if (configured) return configured;
-	try {
-		return `${os.userInfo().username}@${os.hostname()}`;
-	} catch {
-		return os.hostname();
-	}
-}
-
-/** Engine configuration for the current `mesh.*` settings (mesh assumed enabled). */
-export function meshConfigFromSettings(settings: ScopeLike): MeshConfig {
-	const key = cfgMeshKey.get(settings).trim();
-	return {
-		mode: cfgMeshMode.get(settings),
-		key: key || undefined,
-		lanPort: cfgMeshPort.get(settings),
-		staticPeers: [...cfgMeshPeers.get(settings)],
-		displayName: resolveMeshDisplayName(settings),
-	};
 }
 
 export function startMeshHost(options: MeshHostOptions): MeshHostHandle {
@@ -182,7 +165,7 @@ class MeshHost implements MeshHostHandle {
 		// The previous engine (if any) is fully closed before a new one starts: ops are serialized. Every
 		// engine serves the process's shared instance host, so the instance id stays the same across
 		// restarts (peers key threads and replies on it).
-		const engine = new NativeMeshEngine({ host: sharedInstanceHost(), displayName, hostName: host });
+		const engine = new NativeMeshEngine({ host: sharedInstanceHost(), hostName: host });
 		const running: RunningMesh = {
 			engine,
 			identity: { instanceId: engine.instanceId, displayName, host, startedAt: Date.now() },

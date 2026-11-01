@@ -123,14 +123,15 @@ pub(crate) fn dir_str(dir: &Path) -> Option<&str> {
 	dir.to_str()
 }
 
-pub(crate) fn now_ms() -> u64 {
+/// Milliseconds since the Unix epoch (0 before it).
+pub fn now_ms() -> u64 {
 	SystemTime::now()
 		.duration_since(UNIX_EPOCH)
 		.map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// `bytes` random bytes from the OS, lowercase hex.
-pub(crate) fn random_hex(bytes: usize) -> String {
+pub fn random_hex(bytes: usize) -> String {
 	const DIGITS: &[u8; 16] = b"0123456789abcdef";
 	let mut raw = vec![0u8; bytes];
 	SystemRandom::new()

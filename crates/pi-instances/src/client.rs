@@ -47,16 +47,6 @@ pub enum InstanceError {
 	BadResponse(String),
 }
 
-impl InstanceError {
-	/// Errno-style code of an [`InstanceError::Unreachable`].
-	pub const fn io_code(&self) -> Option<&'static str> {
-		match self {
-			Self::Unreachable { code, .. } => Some(code),
-			_ => None,
-		}
-	}
-}
-
 /// Why connecting to an entry's endpoint failed.
 pub(crate) enum ConnectFailure {
 	/// Every pipe instance stayed busy (Windows): the endpoint is alive.

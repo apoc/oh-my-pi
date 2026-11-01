@@ -9,7 +9,8 @@
  * `<peer>` resolves like `mesh_send`'s `to`. Thread views are fetched from the peer, which only
  * shows threads this instance asked. Only the top-level session the mesh serves can read `mesh://`.
  */
-import { isRecord, sanitizeText, stripBidiControls, toError } from "@oh-my-pi/pi-utils";
+import { isRecord, toError } from "@oh-my-pi/pi-utils";
+import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-display";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { MeshPeerView } from "../mesh/engine";
 import {
@@ -120,12 +121,11 @@ export class MeshProtocolHandler implements ProtocolHandler {
 				context.sessionId === runtime.session.sessionManager.getSessionId();
 		if (!allowed) return [];
 		const engine = runtime.engine;
-		// Peer names reach the terminal: strip control sequences and bidi controls, keep each on one line.
-		const oneLine = (value: string) => sanitizeText(stripBidiControls(value)).replace(/\s+/g, " ").trim();
+		// Peer names reach the terminal: one sanitized line each.
 		return visibleMeshPeers(engine).map(peer => ({
 			value: peer.instanceId,
-			label: oneLine(peer.snapshot?.displayName ?? peer.instanceId),
-			description: peer.snapshot?.sessionName ? oneLine(peer.snapshot.sessionName) : undefined,
+			label: meshDisplayText(peer.snapshot?.displayName ?? peer.instanceId),
+			description: peer.snapshot?.sessionName ? meshDisplayText(peer.snapshot.sessionName) : undefined,
 		}));
 	}
 

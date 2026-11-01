@@ -9,10 +9,12 @@
  * styled, measured or sorted. Thread lists and notices are sanitized when they arrive.
  */
 import { meshPassphraseCheck } from "@oh-my-pi/pi-natives";
-import { formatAge, pluralize, stripBidiControls } from "@oh-my-pi/pi-utils";
+import { formatAge, pluralize } from "@oh-my-pi/pi-utils";
 import type { TspPickerAction, TspPickerColumn, TspPickerGroup, TspPickerItem, TspSpan } from "@oh-my-pi/pi-wire";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { Input } from "../components/input";
+import { clampScrollOffset } from "../components/scroll-viewport";
+import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
 import { matchesKey } from "../keys";
 import { parseSgrMouse } from "../mouse";
@@ -26,7 +28,13 @@ import { theme } from "../theme";
 import type { ThemeColor } from "../theme/schema";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
-import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
+import {
+	meshComposeRefusal,
+	meshDisplayBlock,
+	meshDisplayText,
+	meshModeHasSide,
+	meshSenderLabel,
+} from "./mesh-display";
 import {
 	MESH_COMPOSE_KINDS,
 	type MeshComposeKind,
@@ -53,16 +61,6 @@ const APPROVAL_AGENT_CELLS = 24;
 // ═══════════════════════════════════════════════════════════════════════════
 // Pure row model
 // ═══════════════════════════════════════════════════════════════════════════
-
-/** A peer-supplied string as one safe display line; empty when missing. Bidi controls go first so no whitespace they framed survives. */
-export function meshDisplayText(text: string | null | undefined): string {
-	return typeof text === "string" && text.length > 0 ? sanitizeDisplayLine(stripBidiControls(text)) : "";
-}
-
-/** A peer-supplied multi-line text (summary, note, reply), safe to render; empty when missing. */
-export function meshDisplayBlock(text: string | null | undefined): string {
-	return typeof text === "string" && text.length > 0 ? sanitizeDisplayText(stripBidiControls(text)).trim() : "";
-}
 
 /**
  * Packs key hints into at most `maxLines` rows of `width` cells, joined by ` · `; when they do not
@@ -138,11 +136,6 @@ export function sanitizeMeshManagerState(state: MeshManagerState): MeshManagerSt
 	};
 }
 
-/** Whether `mode` reaches peers of the `local` / `remote` side. */
-export function meshModeHasSide(mode: MeshManagerMode, side: "local" | "remote"): boolean {
-	return mode === "both" || mode === side;
-}
-
 /** Online before stale, visible before hidden, then by display name and instance id. */
 export function compareMeshPeers(a: MeshManagerPeer, b: MeshManagerPeer): number {
 	if (a.state !== b.state) return a.state === "online" ? -1 : 1;
@@ -196,29 +189,6 @@ export function meshManagerItems(sections: readonly MeshManagerSection[]): MeshM
 	return sections.flatMap(section => (section.enabled ? section.items : []));
 }
 
-/** Counts for the status line: visible, unblocked, online peers per side. */
-export function countMeshPeers(peers: readonly MeshManagerPeer[]): { local: number; remote: number } {
-	let local = 0;
-	let remote = 0;
-	for (const peer of peers) {
-		if (peer.hidden || peer.blocked || peer.state !== "online") continue;
-		if (peer.endpointKind === "local") local++;
-		else remote++;
-	}
-	return { local, remote };
-}
-
-/** Why `kind` cannot be sent to `peer`, or undefined when it can: a blocked peer's answers never arrive. */
-export function meshComposeRefusal(peer: MeshManagerPeer, kind: MeshComposeKind): string | undefined {
-	if (!peer.blocked || kind === "note") return undefined;
-	return `${peer.displayName} is blocked, so its answer could never arrive. Unblock it (b) or send a note.`;
-}
-
-/** `name@host`, or `name` alone when it already ends with `@host` (default display names are `user@host`). */
-export function meshSenderLabel(name: string, host: string): string {
-	return host && !name.endsWith(`@${host}`) ? `${name}@${host}` : name;
-}
-
 function ageLabel(timestamp: number, now: number): string {
 	const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
 	return seconds < 60 ? (seconds < 5 ? "now" : `${seconds}s ago`) : formatAge(seconds);
@@ -261,6 +231,15 @@ type NoticeTone = "success" | "warning" | "error" | "muted";
 interface Notice {
 	tone: NoticeTone;
 	text: string;
+}
+
+/** A peer's or approval's preview: the text details page and Tern's picker preview both draw it. */
+interface MeshDoc {
+	title: string;
+	/** Label, plain value, and the themed text-page value where it differs. */
+	facts: [label: string, value: string | undefined, styled?: string][];
+	/** A string body is peer text (wrapped, never markdown); otherwise one span line per row, styled `dim`/`error` only. */
+	sections: { id: string; head: string; body: string | TspSpan[][] }[];
 }
 
 export class MeshManagerComponent implements Component {
@@ -401,18 +380,18 @@ export class MeshManagerComponent implements Component {
 			this.#handleDetailsInput(this.#details, data);
 			return;
 		}
-		if (matchesKey(data, "escape")) {
+		if (matchesSelectCancel(data)) {
 			this.#close();
 			return;
 		}
-		if (matchesKey(data, "up")) this.#move(-1);
-		else if (matchesKey(data, "down")) this.#move(1);
+		if (matchesSelectUp(data)) this.#move(-1);
+		else if (matchesSelectDown(data)) this.#move(1);
 		else if (matchesKey(data, "enter")) this.#openDetails();
 		else if (!this.#handleAction(data)) return;
 		this.#options.requestRender();
 	}
 
-	/** Actions shared by the list and the details view; false when `data` is none. */
+	/** Actions shared by the list, the details view and the picker buttons (whose ids are these keys); false when `data` is none. */
 	#handleAction(data: string): boolean {
 		if (data === "e") this.#toggleEnabled();
 		else if (data === "m") this.#cycleMode();
@@ -432,16 +411,16 @@ export class MeshManagerComponent implements Component {
 	}
 
 	#handleDetailsInput(details: { peerId: string; scroll: number }, data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "enter")) this.#details = undefined;
-		else if (matchesKey(data, "up")) details.scroll = Math.max(0, details.scroll - 1);
-		else if (matchesKey(data, "down")) details.scroll++;
+		if (matchesSelectCancel(data) || matchesKey(data, "enter")) this.#details = undefined;
+		else if (matchesSelectUp(data)) details.scroll = Math.max(0, details.scroll - 1);
+		else if (matchesSelectDown(data)) details.scroll++;
 		else if (!this.#handleAction(data)) return;
 		this.#options.requestRender();
 	}
 
 	#handlePromptInput(prompt: Prompt, data: string): void {
 		if (prompt.kind === "compose-kind") {
-			if (matchesKey(data, "escape")) this.#prompt = undefined;
+			if (matchesSelectCancel(data)) this.#prompt = undefined;
 			else if (matchesKey(data, "left")) prompt.index = Math.max(0, prompt.index - 1);
 			else if (matchesKey(data, "right")) prompt.index = Math.min(MESH_COMPOSE_KINDS.length - 1, prompt.index + 1);
 			else if (matchesKey(data, "enter")) this.#openComposeText(prompt.peerId, MESH_COMPOSE_KINDS[prompt.index]!);
@@ -677,6 +656,77 @@ export class MeshManagerComponent implements Component {
 		this.#options.requestRender();
 	}
 
+	// -- preview model -----------------------------------------------------------
+
+	/**
+	 * A peer's preview. `now` marks the text page: ages ride inline (Tern clocks "Seen" in a column)
+	 * and the tags sit beside the name instead of in a fact.
+	 */
+	#peerDoc(peer: MeshManagerPeer, now?: number): MeshDoc {
+		const busy = peer.busy ? "busy" : "idle";
+		const seen = now === undefined ? "" : ` · seen ${ageLabel(peer.lastSeen, now)}`;
+		const agents = peer.agents.map(agent => {
+			const name = agent.displayName || agent.id;
+			// The kind only adds information when the name does not already say it (`main main`).
+			const kind = agent.kind && agent.kind.toLowerCase() !== name.toLowerCase() ? ` [${agent.kind}]` : "";
+			// Registry lifecycle (alive/finished), not whether the agent is working right now.
+			return compact([
+				span(name),
+				kind ? span(kind, "dim") : undefined,
+				agent.status ? span(` · lifecycle ${agent.status}`, "dim") : undefined,
+				agent.task ? span(` — ${agent.task}`) : undefined,
+			]);
+		});
+		// Threads load when the details view opens; the plain preview only points there.
+		const threads = this.#details && this.#threads?.peerId === peer.instanceId ? this.#threads : undefined;
+		let threadLines: TspSpan[][];
+		if (!this.#details) threadLines = [[span("Open Details to list the threads this peer opened here.", "dim")]];
+		else if (!threads?.list) threadLines = [[span("loading…", "dim")]];
+		else if (threads.error) threadLines = [[span(threads.error, "error")]];
+		else if (threads.list.length === 0) threadLines = [[span("none", "dim")]];
+		else {
+			threadLines = threads.list.map(thread => {
+				const age = now === undefined ? "" : ` · ${ageLabel(thread.updatedAt, now)}`;
+				const meta = `${thread.kind} · ${thread.turns} ${pluralize("turn", thread.turns)} · ${thread.status}${age}`;
+				return compact([
+					span(thread.threadId, "mono"),
+					span(` ${meta}`, "dim"),
+					thread.lastQuestion ? span(` — ${thread.lastQuestion}`) : undefined,
+				]);
+			});
+		}
+		return {
+			title: meshSenderLabel(peer.displayName, peer.host),
+			facts: [
+				["Instance", meshDisplayText(peer.instanceId)],
+				[
+					"Endpoint",
+					`${peer.endpoint} (${peer.source})`,
+					`${peer.endpoint} ${theme.fg("dim", `(${peer.source})`)}`,
+				],
+				["State", `${busy} · ${peer.state}${seen}`, `${busyLabel(peer.busy)} · ${peer.state}${seen}`],
+				["Tags", now === undefined ? peerTagNames(peer).join(", ") : undefined],
+				["Session", peer.sessionName],
+				["Cwd", peer.cwd ? shortenPath(peer.cwd) : undefined],
+				["Branch", peer.branch],
+				["Model", peer.model],
+			],
+			sections: [
+				{ id: "summary", head: "Summary", body: peer.summary ?? [[span("none yet", "dim")]] },
+				{
+					id: "agents",
+					head: `Agents (${peer.agents.length})`,
+					body: agents.length > 0 ? agents : [[span("none reported", "dim")]],
+				},
+				{
+					id: "threads",
+					head: threads?.list ? `Threads from this peer (${threads.list.length})` : "Threads from this peer",
+					body: threadLines,
+				},
+			],
+		};
+	}
+
 	// -- render ----------------------------------------------------------------
 
 	render(width: number): readonly string[] {
@@ -776,7 +826,7 @@ export class MeshManagerComponent implements Component {
 		// Keep the selected item's rows on screen.
 		if (selEnd - this.#listScroll > height) this.#listScroll = selEnd - height;
 		if (selStart < this.#listScroll) this.#listScroll = selStart;
-		this.#listScroll = Math.max(0, Math.min(this.#listScroll, Math.max(0, lines.length - height)));
+		this.#listScroll = clampScrollOffset(this.#listScroll, lines.length, height);
 		return lines.slice(this.#listScroll, this.#listScroll + height);
 	}
 
@@ -784,51 +834,25 @@ export class MeshManagerComponent implements Component {
 		const details = this.#details!;
 		const peer = this.#peer(details.peerId);
 		if (!peer) return [theme.fg("warning", "This peer is gone."), theme.fg("dim", "Esc to go back")];
-		const label = (name: string) => theme.fg("muted", name.padEnd(10));
-		const lines: string[] = [];
-		lines.push(`${theme.bold(meshSenderLabel(peer.displayName, peer.host))}${peerTags(peer)}`);
-		lines.push(`${label("instance")}${meshDisplayText(peer.instanceId)}`);
-		lines.push(`${label("endpoint")}${peer.endpoint} ${theme.fg("dim", `(${peer.source})`)}`);
-		lines.push(`${label("state")}${busyLabel(peer.busy)} · ${peer.state} · seen ${ageLabel(peer.lastSeen, now)}`);
-		if (peer.sessionName) lines.push(`${label("session")}${peer.sessionName}`);
-		if (peer.cwd) lines.push(`${label("cwd")}${shortenPath(peer.cwd)}`);
-		if (peer.branch) lines.push(`${label("branch")}${peer.branch}`);
-		if (peer.model) lines.push(`${label("model")}${peer.model}`);
-		lines.push("");
-		lines.push(theme.bold("Summary"));
-		if (peer.summary) {
-			for (const paragraph of peer.summary.split("\n")) {
-				for (const wrapped of wrapTextWithAnsi(paragraph, Math.max(1, inner - 2))) lines.push(`  ${wrapped}`);
+		const doc = this.#peerDoc(peer, now);
+		const lines = [`${theme.bold(doc.title)}${peerTags(peer)}`];
+		for (const [label, value, styled] of doc.facts) {
+			if (value) lines.push(`${theme.fg("muted", label.toLowerCase().padEnd(10))}${styled ?? value}`);
+		}
+		for (const section of doc.sections) {
+			lines.push("", theme.bold(section.head));
+			if (typeof section.body !== "string") {
+				for (const spans of section.body) {
+					lines.push(`  ${spans.map(({ t, s }) => (s === "dim" || s === "error" ? theme.fg(s, t) : t)).join("")}`);
+				}
+				continue;
 			}
-		} else {
-			lines.push(theme.fg("dim", "  none yet"));
-		}
-		lines.push("");
-		lines.push(theme.bold(`Agents (${peer.agents.length})`));
-		if (peer.agents.length === 0) lines.push(theme.fg("dim", "  none reported"));
-		for (const agent of peer.agents) {
-			const name = agent.displayName || agent.id;
-			// The kind only adds information when the name does not already say it (`main main`).
-			const kind = agent.kind && agent.kind.toLowerCase() !== name.toLowerCase() ? ` [${agent.kind}]` : "";
-			// Registry lifecycle (alive/finished), not whether the agent is working right now.
-			const lifecycle = agent.status ? theme.fg("dim", ` · lifecycle ${agent.status}`) : "";
-			lines.push(`  ${name}${theme.fg("dim", kind)}${lifecycle}${agent.task ? ` — ${agent.task}` : ""}`);
-		}
-		lines.push("");
-		const threads = this.#threads?.peerId === peer.instanceId ? this.#threads : undefined;
-		lines.push(theme.bold(`Threads from this peer${threads?.list ? ` (${threads.list.length})` : ""}`));
-		if (!threads?.list) lines.push(theme.fg("dim", "  loading…"));
-		else if (threads.error) lines.push(theme.fg("error", `  ${threads.error}`));
-		else if (threads.list.length === 0) lines.push(theme.fg("dim", "  none"));
-		else {
-			for (const thread of threads.list) {
-				lines.push(
-					`  ${thread.threadId} ${theme.fg("dim", `${thread.kind} · ${thread.turns} turn${thread.turns === 1 ? "" : "s"} · ${thread.status} · ${ageLabel(thread.updatedAt, now)}`)}${thread.lastQuestion ? ` — ${thread.lastQuestion}` : ""}`,
-				);
+			for (const paragraph of section.body.split("\n")) {
+				for (const wrapped of wrapTextWithAnsi(paragraph, Math.max(1, inner - 2))) lines.push(`  ${wrapped}`);
 			}
 		}
 		const truncated = lines.map(line => truncateToWidth(line, inner));
-		details.scroll = Math.max(0, Math.min(details.scroll, Math.max(0, truncated.length - height)));
+		details.scroll = clampScrollOffset(details.scroll, truncated.length, height);
 		return truncated.slice(details.scroll, details.scroll + height);
 	}
 
@@ -1107,7 +1131,7 @@ export class MeshManagerComponent implements Component {
 
 	#pickerActions(selected: MeshManagerItem | undefined): TspPickerAction[] {
 		const details = this.#details;
-		const target = details ? this.#peer(details.peerId) : selected?.kind === "peer" ? selected.peer : undefined;
+		const target = this.#targetPeer();
 		const noPeer = target ? undefined : "Select a peer";
 		const lead: TspPickerAction[] = details
 			? []
@@ -1157,83 +1181,21 @@ export class MeshManagerComponent implements Component {
 	/** The details peer, else the selected row's peer or approval; keys are fixed names, never peer text. */
 	#describePreview(selected: MeshManagerItem | undefined): NativeChild[] {
 		const details = this.#details;
-		if (details) {
-			const peer = this.#peer(details.peerId);
-			return peer ? this.#describePeer(peer) : [text([span("This peer is gone.", "warning")])];
-		}
-		if (selected?.kind === "peer") return this.#describePeer(selected.peer);
-		if (selected?.kind === "approval") return describeApproval(selected.approval);
-		return [];
-	}
-
-	#describePeer(peer: MeshManagerPeer): NativeChild[] {
-		const facts = kv([
-			["Instance", peer.instanceId],
-			["Endpoint", `${peer.endpoint} (${peer.source})`],
-			["State", `${peer.busy ? "busy" : "idle"} · ${peer.state}`],
-			["Tags", peerTagNames(peer).join(", ")],
-			["Session", peer.sessionName],
-			["Cwd", peer.cwd ? shortenPath(peer.cwd) : undefined],
-			["Branch", peer.branch],
-			["Model", peer.model],
-		]);
-		const agents = peer.agents.map((agent, index) => {
-			const name = agent.displayName || agent.id;
-			const kind = agent.kind && agent.kind.toLowerCase() !== name.toLowerCase() ? ` [${agent.kind}]` : "";
-			const spans = compact([
-				span(name),
-				kind ? span(kind, "dim") : undefined,
-				agent.status ? span(` · lifecycle ${agent.status}`, "dim") : undefined,
-				agent.task ? span(` — ${agent.task}`) : undefined,
-			]);
-			return node("text", { spans }, undefined, String(index));
+		const peer = details ? this.#peer(details.peerId) : selected?.kind === "peer" ? selected.peer : undefined;
+		if (peer) return describeDoc(this.#peerDoc(peer));
+		if (details) return [text([span("This peer is gone.", "warning")])];
+		if (selected?.kind !== "approval") return [];
+		const { approval } = selected;
+		return describeDoc({
+			title: `${approval.kind} request`,
+			facts: [
+				["Instance", approval.fromInstanceId],
+				["From", approvalSender(approval)],
+				["Agent", truncateToWidth(approval.fromAgent, APPROVAL_AGENT_CELLS)],
+				["Expires", `in ${remainingLabel(approval.expiresAt, Date.now())}`],
+			],
+			sections: [{ id: "request", head: "Request", body: approval.preview }],
 		});
-		// Peer text is plain `text`, never `md`: a peer must not get clickable links into this terminal.
-		return compact<NativeChild>([
-			node(
-				"text",
-				{ text: meshSenderLabel(peer.displayName, peer.host), role: "omp.picker.title" },
-				undefined,
-				"title",
-			),
-			facts ? keyed(facts, "facts") : undefined,
-			node(
-				"section",
-				{ head: "Summary" },
-				[peer.summary ? text(peer.summary) : text([span("none yet", "dim")])],
-				"summary",
-			),
-			node(
-				"section",
-				{ head: `Agents (${peer.agents.length})` },
-				agents.length > 0 ? agents : [text([span("none reported", "dim")])],
-				"agents",
-			),
-			this.#describeThreads(peer),
-		]);
-	}
-
-	/** Threads load when the details view opens; the plain preview only points there. */
-	#describeThreads(peer: MeshManagerPeer): NativeNode {
-		const threads = this.#details && this.#threads?.peerId === peer.instanceId ? this.#threads : undefined;
-		let body: NativeChild[];
-		if (!this.#details) body = [text([span("Open Details to list the threads this peer opened here.", "dim")])];
-		else if (!threads?.list) body = [text([span("loading…", "dim")])];
-		else if (threads.error) body = [text([span(threads.error, "error")])];
-		else if (threads.list.length === 0) body = [text([span("none", "dim")])];
-		else {
-			body = threads.list.map((thread, index) => {
-				const turns = `${thread.turns} ${pluralize("turn", thread.turns)}`;
-				const spans = compact([
-					span(thread.threadId, "mono"),
-					span(` ${thread.kind} · ${turns} · ${thread.status}`, "dim"),
-					thread.lastQuestion ? span(` — ${thread.lastQuestion}`) : undefined,
-				]);
-				return node("text", { spans }, undefined, String(index));
-			});
-		}
-		const head = threads?.list ? `Threads from this peer (${threads.list.length})` : "Threads from this peer";
-		return node("section", { head }, body, "threads");
 	}
 
 	#describePrompt(prompt: KeyPrompt | ComposeTextPrompt): NativeNode {
@@ -1315,6 +1277,22 @@ function keyPhraseWarning(prompt: KeyPrompt): string | undefined {
 	return undefined;
 }
 
+/** A preview as picker nodes. Peer text is plain `text`, never `md`: a peer must not get clickable links into this terminal. */
+function describeDoc(doc: MeshDoc): NativeChild[] {
+	const facts = kv(doc.facts.map(([label, value]) => [label, value] as const));
+	return compact<NativeChild>([
+		node("text", { text: doc.title, role: "omp.picker.title" }, undefined, "title"),
+		facts ? keyed(facts, "facts") : undefined,
+		...doc.sections.map(({ id, head, body }) => {
+			const lines =
+				typeof body === "string"
+					? [text(body)]
+					: body.map((spans, index) => node("text", { spans }, undefined, String(index)));
+			return node("section", { head }, lines, id);
+		}),
+	]);
+}
+
 /** The claimed sender, capped so it can never crowd the unspoofable instance id and expiry off a row. */
 function approvalSender(approval: MeshManagerApproval): string {
 	return truncateToWidth(meshSenderLabel(approval.fromName, approval.fromHost), APPROVAL_FROM_CELLS);
@@ -1360,20 +1338,6 @@ function peerPickerItem(item: Extract<MeshManagerItem, { kind: "peer" }>, now: n
 			seen: Math.max(0, now - peer.lastSeen),
 		},
 	};
-}
-
-function describeApproval(approval: MeshManagerApproval): NativeChild[] {
-	const facts = kv([
-		["Instance", approval.fromInstanceId],
-		["From", approvalSender(approval)],
-		["Agent", truncateToWidth(approval.fromAgent, APPROVAL_AGENT_CELLS)],
-		["Expires", `in ${remainingLabel(approval.expiresAt, Date.now())}`],
-	]);
-	return compact<NativeChild>([
-		node("text", { text: `${approval.kind} request`, role: "omp.picker.title" }, undefined, "title"),
-		facts ? keyed(facts, "facts") : undefined,
-		node("section", { head: "Request" }, [text(approval.preview)], "request"),
-	]);
 }
 
 const COMPOSE_KIND_HINT: Record<MeshComposeKind, string> = {

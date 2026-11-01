@@ -11,7 +11,7 @@ import { cfgMeshEnabled } from "./settings";
 
 export type MeshToolName = "mesh_peers" | "mesh_send";
 
-export type MeshToolSession = Pick<ToolSession, "settings" | "taskDepth" | "sessionManager">;
+type MeshToolSession = Pick<ToolSession, "settings" | "taskDepth" | "sessionManager">;
 
 /**
  * The mesh surfaces belong to the top-level session the running mesh runtime is bound to, while

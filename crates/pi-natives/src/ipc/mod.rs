@@ -1,17 +1,16 @@
 //! Native local IPC: Unix domain sockets and Windows named pipes behind one
 //! N-API surface.
 //!
-//! The transport, peer security, single-instance bind, stale-endpoint
-//! takeover and line framing live in `pi_ipc`; this module wraps them as
-//! `IpcServer` / `IpcConnection`. Lifecycle policy (spawn, auth, idle exit)
-//! stays in TypeScript. Every failure surfaces as a JS `Error` whose `code` is
-//! an errno-style string (`ENOENT`, `EADDRINUSE`, …).
+//! The native layer owns transport, peer security, single-instance bind,
+//! stale-endpoint takeover and line framing; lifecycle policy (spawn, auth,
+//! idle exit) stays in TypeScript. Every failure surfaces as a JS `Error`
+//! whose `code` is an errno-style string (`ENOENT`, `EADDRINUSE`, …).
 
 use std::{sync::Arc, time::Duration};
 
 use memchr::memchr;
 use napi::{
-	Env, Error, JsError, JsString, JsTypeError, Result,
+	Env, Error, JsString, JsTypeError, Result,
 	bindgen_prelude::{Either, Function, PromiseRaw, Uint8Array},
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
@@ -21,7 +20,7 @@ use pi_ipc::IpcError;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::js;
+use crate::{js, task::coded};
 
 mod conn;
 mod cork;
@@ -36,7 +35,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u32 = 3000;
 /// JS `Error` whose `code` property is `error`'s code.
 fn into_js(error: IpcError, env: &Env) -> Error {
 	let code = error.code();
-	Error::from(JsError::from(Error::new(code, error.into_message())).into_unknown(*env))
+	coded(*env, code, error.into_message())
 }
 
 /// JS `TypeError` with `code`, for argument misuse.

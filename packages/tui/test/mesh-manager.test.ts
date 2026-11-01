@@ -6,15 +6,13 @@
  * approval selection, compose strip, masked key phrase, rows fallback without pickers).
  */
 import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { countMeshPeers, meshComposeRefusal, meshSenderLabel } from "../src/overlays/mesh-display";
 import {
 	buildMeshManagerSections,
 	compareMeshPeers,
-	countMeshPeers,
 	fitMeshHints,
 	MeshManagerComponent,
-	meshComposeRefusal,
 	meshManagerItems,
-	meshSenderLabel,
 	sanitizeMeshManagerState,
 } from "../src/overlays/mesh-manager";
 import type {

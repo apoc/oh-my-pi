@@ -9,9 +9,9 @@ import {
 	MeshNode,
 	type MeshNodeOptions,
 	type MeshPeerInfo,
-	type MeshStatus as NativeMeshStatus,
+	type MeshStatus,
 } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, toError } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import {
 	type MeshEngine,
 	MeshEngineError,
@@ -19,20 +19,21 @@ import {
 	type MeshInboundHandler,
 	type MeshInboundRequest,
 	type MeshIncomingReply,
-	type MeshMode,
 	type MeshPeerView,
 	type MeshRequestOptions,
-	type MeshStatus,
 } from "./engine";
 import { type MeshEnvelope, type MeshRequest, type MeshResponse, type MeshSnapshot, meshError } from "./wire";
 
 /** Request deadline when the caller sets none. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
-const ENGINE_ERROR_PREFIX = /^(unreachable|timeout|aborted|bad_response):\s*/;
-/** Engine rejection of a response over a protocol size cap (`mesh … exceeds <limit>`). */
-const SIZE_CAP_ERROR = /\bexceeds\b/;
-const MESH_MODES: readonly MeshMode[] = ["off", "local", "remote", "both"];
+/** `code` of the engine's request rejections. */
+const ENGINE_ERROR_CODES: Record<MeshEngineErrorCode, true> = {
+	unreachable: true,
+	timeout: true,
+	aborted: true,
+	bad_response: true,
+};
 
 export class NativeMeshEngine implements MeshEngine {
 	readonly #node: MeshNode;
@@ -74,7 +75,7 @@ export class NativeMeshEngine implements MeshEngine {
 	}
 
 	status(): MeshStatus {
-		const status = toStatus(this.#node.status());
+		const status = this.#node.status();
 		return this.#configureError ? { ...status, error: this.#configureError } : status;
 	}
 
@@ -129,14 +130,8 @@ export class NativeMeshEngine implements MeshEngine {
 		} catch (error) {
 			throw toEngineError(error, signal);
 		}
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(raw);
-		} catch (error) {
-			throw new MeshEngineError("bad_response", "Peer response is not valid JSON.", { cause: error });
-		}
-		if (!isMeshResponse(parsed)) throw new MeshEngineError("bad_response", "Peer response has an invalid shape.");
-		return parsed;
+		// The engine serialized a validated `MeshResponse`.
+		return JSON.parse(raw) as MeshResponse;
 	}
 
 	async awaitReply(key: string, timeoutMs: number, signal?: AbortSignal): Promise<MeshIncomingReply | undefined> {
@@ -147,7 +142,7 @@ export class NativeMeshEngine implements MeshEngine {
 			logger.warn("mesh: waiting for a reply failed", { error: toError(error).message });
 			return undefined;
 		}
-		return json === null ? undefined : (parseReply(json) ?? undefined);
+		return json === null ? undefined : parseReply(json);
 	}
 
 	forgetPending(tickets: readonly string[]): void {
@@ -177,12 +172,7 @@ export class NativeMeshEngine implements MeshEngine {
 	}
 
 	setPeerFlags(instanceId: string, flags: { hidden?: boolean; blocked?: boolean }): void {
-		const current = this.#node.peers().find(peer => peer.instanceId === instanceId);
-		this.#node.setPeerFlags(
-			instanceId,
-			flags.hidden ?? current?.hidden ?? false,
-			flags.blocked ?? current?.blocked ?? false,
-		);
+		this.#node.setPeerFlags(instanceId, flags.hidden, flags.blocked);
 	}
 
 	/** Withdraw from the mesh; idempotent. Listeners and the inbound handler are dropped. */
@@ -222,12 +212,14 @@ export class NativeMeshEngine implements MeshEngine {
 	}
 
 	#onReply(event: MeshEvent): void {
-		const reply = event.envelopeJson ? parseReply(event.envelopeJson) : null;
+		const json = event.envelopeJson;
 		const ticket = event.ticket;
-		if (!ticket || !reply) {
+		// The engine always sets the ticket; the envelope is absent only if it failed to serialize.
+		if (!ticket || !json) {
 			logger.warn("mesh: malformed reply event");
 			return;
 		}
+		const reply = parseReply(json);
 		for (const listener of this.#replyListeners) callListener(() => listener(ticket, reply));
 	}
 
@@ -257,21 +249,17 @@ export class NativeMeshEngine implements MeshEngine {
 			}
 		}
 		if (this.#closed) return;
+		let json: string | undefined;
 		try {
-			this.#node.respond(requestId, JSON.stringify(response));
+			json = JSON.stringify(response);
 		} catch (error) {
-			const message = toError(error).message;
-			logger.warn("mesh: responding to inbound request failed", { error: message });
-			// Tell the peer now instead of letting it time out. The engine's size-cap rejections
-			// read "… exceeds <limit>"; anything else is our own malformed response.
-			const fallback = SIZE_CAP_ERROR.test(message)
-				? meshError("too_large", "Response exceeds the mesh size limits.")
-				: meshError("internal", "Response could not be sent.");
-			try {
-				this.#node.respond(requestId, JSON.stringify(fallback));
-			} catch {
-				// The engine already dropped the request (late or closed); nothing more to send.
-			}
+			logger.warn("mesh: inbound response is not serializable", { error: toError(error).message });
+		}
+		try {
+			// A response the protocol rejects is answered by the engine with `too_large` / `internal`.
+			this.#node.respond(requestId, json ?? JSON.stringify(meshError("internal", "Response could not be sent.")));
+		} catch (error) {
+			logger.warn("mesh: responding to inbound request failed", { error: toError(error).message });
 		}
 	}
 
@@ -319,57 +307,31 @@ function callListener(run: () => void): void {
 	}
 }
 
-function toStatus(status: NativeMeshStatus): MeshStatus {
-	const mode = MESH_MODES.find(candidate => candidate === status.mode) ?? "off";
-	return { ...status, mode };
-}
-
 function toEngineError(error: unknown, signal: AbortSignal | undefined): MeshEngineError {
-	const err = toError(error);
-	const match = ENGINE_ERROR_PREFIX.exec(err.message);
-	if (match) {
-		const code = match[1] as MeshEngineErrorCode;
-		return new MeshEngineError(code, err.message.slice(match[0].length) || code, { cause: err });
+	const err = toError(error) as Error & { code?: unknown };
+	if (typeof err.code === "string" && Object.hasOwn(ENGINE_ERROR_CODES, err.code)) {
+		const code = err.code as MeshEngineErrorCode;
+		return new MeshEngineError(code, err.message || code, { cause: err });
 	}
 	if (signal?.aborted) return new MeshEngineError("aborted", "Request aborted.", { cause: err });
 	return new MeshEngineError("unreachable", err.message, { cause: err });
 }
 
+/** `null` when the engine could not serialize the envelope (`envelopeJson` absent). */
 function parseInbound(requestId: string, event: MeshEvent): MeshInboundRequest | null {
 	if (!event.envelopeJson) return null;
-	let envelope: unknown;
-	try {
-		envelope = JSON.parse(event.envelopeJson);
-	} catch {
-		return null;
-	}
-	if (!isRecord(envelope) || !isRecord(envelope.body) || !isRecord(envelope.from)) return null;
 	return {
 		requestId,
 		// The engine validated the envelope against the serde wire types before raising the event.
-		envelope: envelope as unknown as MeshEnvelope,
+		envelope: JSON.parse(event.envelopeJson) as MeshEnvelope,
 		origin: { kind: event.originKind ?? "local", address: event.originAddress },
 	};
 }
 
-function isMeshResponse(value: unknown): value is MeshResponse {
-	if (!isRecord(value)) return false;
-	if (value.ok === true) return "data" in value;
-	return value.ok === false && typeof value.code === "string" && typeof value.message === "string";
-}
-
-/** An answer envelope from the engine (validated against the serde wire types) as `{...body, from}`. */
-function parseReply(json: string): MeshIncomingReply | null {
-	let envelope: unknown;
-	try {
-		envelope = JSON.parse(json);
-	} catch {
-		return null;
-	}
-	if (!isRecord(envelope) || !isRecord(envelope.body) || !isRecord(envelope.from)) return null;
-	const { body, from } = envelope as unknown as MeshEnvelope;
-	if (body.op !== "reply" && body.op !== "watch_event") return null;
-	return { ...body, from };
+/** An answer envelope (`reply` / `watch_event`, validated by the engine) as `{...body, from}`. */
+function parseReply(json: string): MeshIncomingReply {
+	const { body, from } = JSON.parse(json) as MeshEnvelope;
+	return { ...body, from } as MeshIncomingReply;
 }
 
 /**

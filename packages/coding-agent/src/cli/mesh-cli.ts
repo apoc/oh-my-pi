@@ -6,16 +6,15 @@ import * as os from "node:os";
 import { meshDeriveKey, meshPassphraseCheck } from "@oh-my-pi/pi-natives";
 import { formatAge } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
+import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-display";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { Settings } from "../config/settings";
 import { sharedInstanceHost } from "../instances";
 import type { MeshPeerView } from "../mesh/engine";
-import { meshConfigFromSettings, resolveMeshDisplayName } from "../mesh/host";
 import { NativeMeshEngine } from "../mesh/native-engine";
 import { formatMeshEndpoint, MESH_DISCOVERY_WINDOW_MS } from "../mesh/peers";
-import { cfgMeshEnabled, cfgMeshKey } from "../mesh/settings";
+import { cfgMeshEnabled, cfgMeshKey, meshConfigFromSettings } from "../mesh/settings";
 
 /** Summary line cap when stdout is not a terminal. */
 const SUMMARY_LINE_CHARS = 200;
@@ -54,11 +53,7 @@ export async function runMeshSetKeyCommand(): Promise<void> {
 export async function runMeshListCommand(args: MeshListCommandArgs): Promise<void> {
 	const settings = await Settings.init();
 	const config = meshConfigFromSettings(settings);
-	const engine = new NativeMeshEngine({
-		host: sharedInstanceHost(),
-		displayName: resolveMeshDisplayName(settings),
-		hostName: os.hostname(),
-	});
+	const engine = new NativeMeshEngine({ host: sharedInstanceHost(), hostName: os.hostname() });
 	let peers: MeshPeerView[];
 	try {
 		// Discovery needs no stable inbound port; a fixed `mesh.port` is held by a running instance.

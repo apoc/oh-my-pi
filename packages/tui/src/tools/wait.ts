@@ -694,16 +694,16 @@ function bodyLines(
 }
 
 /**
- * Display-only transcript card for live agent traffic: `irc:incoming` DMs
+ * Display-only transcript card for live IRC traffic: `irc:incoming` DMs
  * delivered to this session, `irc:autoreply` side-channel replies sent on
- * this session's behalf, `irc:relay` observations of agent↔agent traffic,
- * and `mesh-*` traffic with other omp instances. Shares the tool renderer's
- * glyph + quote-border conventions so cards and peer-message output look
- * identical in the transcript. `tags` lead the dim meta after the title.
+ * this session's behalf, and `irc:relay` observations of agent↔agent
+ * traffic. Shares the tool renderer's glyph + quote-border conventions so
+ * cards and peer-message output look identical in the transcript. Other
+ * traffic (mesh) reuses the card with its own `title`, `role` and leading `tags`.
  */
 export function createIrcMessageCard(
 	card: {
-		kind: "incoming" | "autoreply" | "relay" | "workpool" | "mesh-incoming" | "mesh-outgoing";
+		kind: "incoming" | "autoreply" | "relay" | "workpool";
 		from?: string;
 		to?: string;
 		body?: string;
@@ -711,25 +711,23 @@ export function createIrcMessageCard(
 		timestamp?: number;
 		pool?: string;
 		mode?: string;
+		title?: string;
+		role?: string;
 		tags?: readonly string[];
 	},
 	getExpanded: () => boolean,
 	uiTheme: Theme,
 ): Component {
 	const from = card.from?.trim() || "?";
-	const to = card.to?.trim() || "?";
 	const title =
-		card.kind === "incoming"
+		card.title ??
+		(card.kind === "incoming"
 			? `IRC ${uiTheme.nav.back} ${from}`
 			: card.kind === "autoreply"
-				? `IRC ${uiTheme.nav.selected} ${to}`
+				? `IRC ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 				: card.kind === "workpool"
-					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${to}`
-					: card.kind === "mesh-incoming"
-						? `MESH ${uiTheme.nav.back} ${from}`
-						: card.kind === "mesh-outgoing"
-							? `MESH ${uiTheme.nav.selected} ${to}`
-							: `IRC ${from} ${uiTheme.nav.selected} ${to}`;
+					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
+					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`);
 	const body = card.body ?? "";
 	const meta: string[] = [...(card.tags ?? [])];
 	if (card.kind === "autoreply") meta.push("auto");
@@ -752,7 +750,7 @@ export function createIrcMessageCard(
 	// Terminal-local collapse replaces `getExpanded`; the node never changes after creation.
 	const described = cardNode(
 		{
-			role: card.kind.startsWith("mesh-") ? `omp.mesh.${card.kind.slice(5)}` : `omp.irc.${card.kind}`,
+			role: card.role ?? `omp.irc.${card.kind}`,
 			tone: "info",
 			head: [
 				span(plainText(title), "toolTitle strong"),

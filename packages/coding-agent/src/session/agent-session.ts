@@ -189,7 +189,6 @@ import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
-import { deliverMeshMessage } from "../mesh/bridge";
 import { takeMeshPeersNotice } from "../mesh/peer-notice";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
@@ -13064,14 +13063,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		// The sender's context is active here; the delivery is the recipient's work.
 		return this.#inLogContext(() => this.#irc.deliver(msg));
-	}
-
-	/**
-	 * Delivers a mesh message: a non-interrupting aside while streaming, an agent-initiated turn when
-	 * idle. Resolves after queueing, or after the woken turn settles.
-	 */
-	deliverMeshMessage(message: CustomMessagePayload): Promise<"injected" | "woken"> {
-		return deliverMeshMessage(this, message);
 	}
 
 	/** Tool context the SDK built for this session (eval cells, host services like mesh responders). */

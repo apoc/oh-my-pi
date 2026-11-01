@@ -34,12 +34,6 @@ function getMeshResponderAgent(): AgentDefinition {
 	return meshResponderAgent;
 }
 
-function assertNoMeshTools(agent: AgentDefinition): void {
-	if (agent.tools?.some(tool => tool.startsWith("mesh_"))) {
-		throw new Error(`Mesh responder agent "${agent.name}" must not carry mesh tools.`);
-	}
-}
-
 const MESH_ASK_RESTRICTIONS: HostRestrictions = { "fetch.enabled": false, "web_search.enabled": false };
 
 /** The child's answer; failure details (local paths, salvage hints) stay in the local log. */
@@ -188,7 +182,6 @@ export class MeshResponder implements MeshAnswerer {
 		signal: AbortSignal,
 		forkSourceFile?: string,
 	): Promise<SingleResult> {
-		assertNoMeshTools(agent);
 		const toolSession = this.#session.toolSession;
 		if (!toolSession) throw new MeshPeerError("This instance cannot run mesh responders.");
 		const artifactsDir = this.#responderDir(record.threadId);

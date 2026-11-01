@@ -14,7 +14,7 @@ import {
 import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { BtwHistoryPanel, type BtwHistoryPanelOptions } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
@@ -45,6 +45,53 @@ interface BtwRequest {
 	 * prompt instruction, the highlighted block, and the inject key always agree.
 	 */
 	injectEnabled: boolean;
+}
+
+/** Panel options a side-conversation sheet supplies; the rest come from the interactive context. */
+type BtwSheetOptions = Omit<
+	BtwHistoryPanelOptions,
+	"spaceHoldKeys" | "spaceHold" | "requestRender" | "getHeight" | "escapeHides"
+>;
+
+/** Open and focus a fullscreen BTW history sheet (`/btw` history, `/ask`). */
+export function showBtwHistorySheet(
+	ctx: InteractiveModeContext,
+	options: BtwSheetOptions,
+): { panel: BtwHistoryPanel; overlay: OverlayHandle } {
+	const panel = new BtwHistoryPanel({
+		...options,
+		spaceHoldKeys: ctx.keybindings.getKeys("app.stt.pushToTalk"),
+		spaceHold: input => ctx.dictationSpaceHold(input),
+		requestRender: () => ctx.ui.requestRender(),
+		getHeight: () => ctx.ui.terminal.rows,
+		// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
+		escapeHides: ctx.ui.nativeRendering,
+	});
+	const overlay = ctx.ui.showOverlay(panel, {
+		anchor: "bottom-center",
+		width: "100%",
+		maxHeight: "100%",
+		margin: 0,
+		fullscreen: true,
+	});
+	ctx.ui.setFocus(panel);
+	return { panel, overlay };
+}
+
+/** Copy a side-conversation answer and confirm it; false when the clipboard write failed (the error is shown). */
+export async function copyBtwAnswer(
+	ctx: Pick<InteractiveModeContext, "showStatus" | "showError">,
+	answer: string,
+	what: string,
+): Promise<boolean> {
+	try {
+		await copyToClipboard(replaceTabs(answer).trim());
+		ctx.showStatus(`Copied ${what} to clipboard`);
+		return true;
+	} catch (error) {
+		ctx.showError(sanitizeErrorLine(error));
+		return false;
+	}
 }
 
 function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
@@ -186,14 +233,10 @@ export class BtwController {
 		// start another /btw before they do. Confirm only the still-active surface.
 		const inlineRequest = options?.historyRecordId === undefined ? this.#activeRequest : undefined;
 		try {
-			await copyToClipboard(replaceTabs(answer).trim());
-			this.ctx.showStatus("Copied /btw answer to clipboard");
+			if (!(await copyBtwAnswer(this.ctx, answer, "/btw answer"))) return true;
 			if (options?.historyRecordId !== undefined) this.#historyPanel?.markCopied(options.historyRecordId, answer);
 			else if (inlineRequest && this.#visible && this.#activeRequest === inlineRequest)
 				inlineRequest.component.markCopied();
-			return true;
-		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(error));
 			return true;
 		} finally {
 			this.#copyInFlight = false;
@@ -697,7 +740,7 @@ export class BtwController {
 		}
 		this.#hideInline();
 		const historySessionId = this.#sessionManager.getSessionId();
-		const panel = new BtwHistoryPanel({
+		const { panel, overlay } = showBtwHistorySheet(this.ctx, {
 			records: this.#historyRecords(store),
 			onClose: () => this.#closeHistory(),
 			onCopy: record => {
@@ -721,9 +764,6 @@ export class BtwController {
 			},
 			onPasteImage: () => this.ctx.handleImagePaste(),
 			onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
-			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
-			spaceHold: input => this.ctx.dictationSpaceHold(input),
-			requestRender: () => this.ctx.ui.requestRender(),
 			inject: this.#injectEnabled()
 				? {
 						state: (record, turnIndex) => this.#injectState(record, turnIndex),
@@ -731,19 +771,9 @@ export class BtwController {
 						send: record => this.#inject(record),
 					}
 				: undefined,
-			getHeight: () => this.ctx.ui.terminal.rows,
-			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
-			escapeHides: this.ctx.ui.nativeRendering,
 		});
 		this.#historyPanel = panel;
-		this.#historyOverlay = this.ctx.ui.showOverlay(panel, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
-		});
-		this.ctx.ui.setFocus(panel);
+		this.#historyOverlay = overlay;
 		this.ctx.ui.requestRender();
 		return panel;
 	}

@@ -11,6 +11,7 @@ import {
 	type NoulQuestion,
 	renderQuestion,
 } from "@oh-my-pi/pi-ai";
+import { truncate } from "@oh-my-pi/pi-utils";
 import questionFile from "../prompts/judge/mesh.json" with { type: "json" };
 import type { MeshPeerView } from "./engine";
 
@@ -18,10 +19,10 @@ const QUESTIONS = judgeQuestions(questionFile);
 
 /** Peers sent to the judge; the rest of a larger mesh stays unranked. */
 export const MAX_RANKED_PEERS = 32;
-/** Characters of each peer field shown to the judge. */
-const FIELD_CHARS = 400;
+/** Longest peer field shown to the judge, ellipsis included. */
+const FIELD_CHARS = 401;
 
-export type MeshMatchField = keyof typeof QUESTIONS.match.criteria;
+type MeshMatchField = keyof typeof QUESTIONS.match.criteria;
 
 export interface RankedMeshPeer {
 	peer: MeshPeerView;
@@ -32,8 +33,7 @@ export interface RankedMeshPeer {
 }
 
 function clip(text: string | null | undefined): string | null {
-	if (!text) return null;
-	return text.length > FIELD_CHARS ? `${text.slice(0, FIELD_CHARS)}…` : text;
+	return text ? truncate(text, FIELD_CHARS) : null;
 }
 
 function judgeView(peer: MeshPeerView): { [key: string]: JsonValue } {

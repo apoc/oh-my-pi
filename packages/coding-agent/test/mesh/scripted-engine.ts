@@ -1,16 +1,16 @@
 /**
  * Scripted {@link MeshEngine} for frontend tests. Answer correlation (early answers, held slots,
- * waiter replacement, TTL, cap eviction, foreign peers, malformed acks) is the Rust engine's and is
+ * TTL, cap eviction, foreign peers, malformed acks) is the Rust engine's and is
  * tested there; here tests script its observable outcomes: `answer(key, …)` resolves (or pre-loads)
  * an `awaitReply`, `late(key, …)` emits a reply event, `drop(keys)` a pending_dropped event.
  */
+import type { MeshStatus } from "@oh-my-pi/pi-natives";
 import type {
 	MeshEngine,
 	MeshIncomingReply,
 	MeshInboundHandler,
 	MeshPeerView,
 	MeshRequestOptions,
-	MeshStatus,
 } from "../../src/mesh/engine";
 import type { MeshRequest, MeshResponse } from "../../src/mesh/wire";
 
@@ -95,11 +95,13 @@ export class ScriptedMeshEngine implements MeshEngine {
 			this.#waits.delete(key);
 			resolve(reply);
 		};
+		if (signal?.aborted) return Promise.resolve(undefined);
 		const onAbort = () => finish(undefined);
 		const timer = setTimeout(onAbort, timeoutMs);
+		// This wait replaces a running one for the same key, which resolves `undefined`.
+		this.#waits.get(key)?.(undefined);
 		this.#waits.set(key, finish);
-		if (signal?.aborted) onAbort();
-		else signal?.addEventListener("abort", onAbort, { once: true });
+		signal?.addEventListener("abort", onAbort, { once: true });
 		return promise;
 	}
 

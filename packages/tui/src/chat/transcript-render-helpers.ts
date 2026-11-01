@@ -27,7 +27,7 @@ import { CustomMessageComponent } from "./custom-message";
 import type { MessageRenderer } from "./extension-types";
 import { type TranscriptBlock } from "../chrome/transcript-container";
 import { TranscriptStatusBlock, type TranscriptStatusRow } from "../chrome/transcript-status";
-import { meshDisplayBlock, meshDisplayText, meshSenderLabel } from "../overlays/mesh-manager";
+import { meshDisplayBlock, meshDisplayText, meshSenderLabel } from "../overlays/mesh-display";
 import { theme } from "../theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
@@ -245,14 +245,16 @@ export interface MeshMessageCard {
  */
 export function createMeshMessageCard(card: MeshMessageCard, getExpanded: () => boolean): Component {
 	const name = meshDisplayText(card.peer?.displayName) || meshDisplayText(card.peer?.instanceId) || "?";
-	const peer = meshSenderLabel(name, meshDisplayText(card.peer?.host));
+	const peer = meshSenderLabel(name, meshDisplayText(card.peer?.host)).trim() || "?";
 	const tags = [meshDisplayText(card.kind)];
 	if (card.thread) tags.push(`thread ${meshDisplayText(card.thread)}`);
 	if (card.error) tags.push("error");
+	const incoming = card.direction === "incoming";
 	return createIrcMessageCard(
 		{
-			kind: card.direction === "incoming" ? "mesh-incoming" : "mesh-outgoing",
-			...(card.direction === "incoming" ? { from: peer } : { to: peer }),
+			kind: "relay",
+			title: `MESH ${incoming ? theme.nav.back : theme.nav.selected} ${peer}`,
+			role: `omp.mesh.${card.direction}`,
 			body: meshDisplayBlock(card.text),
 			timestamp: card.timestamp,
 			tags,

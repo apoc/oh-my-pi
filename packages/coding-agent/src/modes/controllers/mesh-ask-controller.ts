@@ -7,25 +7,23 @@
  * An answer nobody waits for any more (stopped, timed out) lands as a `MESH` transcript card and is
  * folded into its conversation, so `/ask <peer>` shows it.
  */
-import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
 import { getBtwCopyText, getBtwLatestTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
-import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
-import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-manager";
+import type { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-display";
 import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { toError } from "@oh-my-pi/pi-utils";
-import type { MeshTrafficEntry } from "../../mesh/bridge";
-import { MeshEngineError, type MeshPeerView } from "../../mesh/engine";
-import { MESH_USER_AGENT_ID, type MeshSendResult } from "../../mesh/outbound";
+import { MeshEngineError, type MeshIncomingReply, type MeshPeerView } from "../../mesh/engine";
+import { MESH_SEND_MAX_TIMEOUT_SEC, MESH_USER_AGENT_ID, type MeshSendResult } from "../../mesh/outbound";
 import { resolveMeshPeer, visibleMeshPeers } from "../../mesh/peers";
 import { getMeshRuntime, type MeshRuntime } from "../../mesh/runtime";
 import type { MeshSender, MeshSnapshot } from "../../mesh/wire";
 import { beginBtwTurn, patchLatestBtwTurn } from "../../session/btw-turn";
 import { parseSubcommand } from "../../slash-commands/helpers/parse";
-import { MESH_SEND_MAX_TIMEOUT_SEC } from "../../tools/mesh-send";
-import { copyToClipboard } from "../../utils/clipboard";
 import type { InteractiveModeContext } from "../types";
+import { copyBtwAnswer, showBtwHistorySheet } from "./btw-controller";
 
 /** Display fields of a peer for cards and headings; peer-declared, sanitized where rendered. */
 type MeshAskPeer = Pick<MeshSender, "instanceId" | "displayName" | "host"> & { sessionName?: string };
@@ -111,18 +109,6 @@ export class MeshAskController {
 		return undefined;
 	}
 
-	/**
-	 * A reply to a message the user sent arrived without a waiter (an answer the user stopped
-	 * waiting for, or one that outlived the wait); its card is already shown. Fold it into its turn.
-	 */
-	handleReply(from: MeshSender, entry: MeshTrafficEntry): void {
-		if (entry.replyTo === undefined) return;
-		const conversation = this.#conversations.find(
-			item => item.msgId === entry.replyTo && item.peer.instanceId === from.instanceId,
-		);
-		if (conversation) this.#applyReply(conversation, entry.thread, entry.text, entry.error ? entry.text : undefined);
-	}
-
 	dispose(): void {
 		for (const conversation of this.#conversations) conversation.wait?.abort();
 		this.#closeDialog();
@@ -137,7 +123,7 @@ export class MeshAskController {
 	#open(peer: MeshAskPeer): boolean {
 		this.#closeDialog();
 		const records = this.#records(peer.instanceId);
-		const panel = new BtwHistoryPanel({
+		const { panel, overlay } = showBtwHistorySheet(this.ctx, {
 			records,
 			texts: {
 				heading: `Ask ${peerTitle(peer)}`,
@@ -169,21 +155,8 @@ export class MeshAskController {
 				return conversation ? this.#send(conversation.peer, question, conversation) : Promise.resolve(false);
 			},
 			onStart: question => this.#send(peer, question),
-			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
-			spaceHold: input => this.ctx.dictationSpaceHold(input),
-			requestRender: () => this.ctx.ui.requestRender(),
-			getHeight: () => this.ctx.ui.terminal.rows,
-			escapeHides: this.ctx.ui.nativeRendering,
-		});
-		const overlay = this.ctx.ui.showOverlay(panel, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
 		});
 		this.#dialog = { peerId: peer.instanceId, panel, overlay };
-		this.ctx.ui.setFocus(panel);
 		const newest = records[0];
 		if (newest) panel.showRecord(newest.id);
 		else panel.openStart();
@@ -247,11 +220,6 @@ export class MeshAskController {
 		if (!runtime) return false;
 		const view = this.#liveView(runtime, peer.instanceId, peerTitle(peer));
 		if (!view) return false;
-		// The engine drops everything a blocked peer sends, answers included.
-		if (view.blocked) {
-			this.ctx.showError(`${peerTitle(peer)} is blocked: it cannot answer. Unblock it in /mesh first.`);
-			return false;
-		}
 		const outbound = runtime.frontend.outbound;
 		let result: MeshSendResult;
 		if (conversation) conversation.sending = true;
@@ -259,12 +227,18 @@ export class MeshAskController {
 			// No abort signal: the peer may already hold the message, and its answer must still route.
 			// Always held for a waiter: an answer that overtakes its acknowledgement is kept for it.
 			result = await outbound.send({
-				to: peer.instanceId,
+				to: view,
 				fromAgentId: MESH_USER_AGENT_ID,
 				kind: "ask",
 				text,
 				thread: conversation?.thread,
 				awaitReply: true,
+				// An answer the user no longer waits for: its card is shown; it also completes its turn, if still the latest.
+				onLate: reply => {
+					if (reply.op !== "reply") return;
+					const asked = this.#conversations.find(c => c.msgId === reply.replyTo);
+					if (asked) this.#applyReply(asked, reply);
+				},
 			});
 		} catch (error) {
 			const message = error instanceof MeshEngineError ? `${error.code}: ${error.message}` : toError(error).message;
@@ -284,7 +258,11 @@ export class MeshAskController {
 				);
 				return false;
 			}
-			this.ctx.showError(sanitizeErrorLine(`${peerTitle(peer)} refused: ${result.code}: ${result.message}`));
+			this.ctx.showError(
+				result.code === "blocked"
+					? `${peerTitle(peer)} is blocked: ${result.message}`
+					: sanitizeErrorLine(`${peerTitle(peer)} refused: ${result.code}: ${result.message}`),
+			);
 			return false;
 		}
 		const { record } = beginBtwTurn(text, null, conversation?.record);
@@ -323,7 +301,7 @@ export class MeshAskController {
 			return;
 		}
 		if (reply.op !== "reply") return;
-		this.#applyReply(conversation, reply.thread, reply.text, reply.error);
+		this.#applyReply(conversation, reply);
 		// A dialog answer has no card: when its dialog is closed, say where it is.
 		if (this.#dialog?.peerId !== conversation.peer.instanceId) {
 			const title = peerTitle(conversation.peer);
@@ -331,16 +309,13 @@ export class MeshAskController {
 		}
 	}
 
-	#applyReply(
-		conversation: MeshAskConversation,
-		thread: string | undefined,
-		answer: string,
-		error: string | undefined,
-	): void {
-		if (thread) conversation.thread = thread;
+	#applyReply(conversation: MeshAskConversation, reply: Extract<MeshIncomingReply, { op: "reply" }>): void {
+		if (reply.thread) conversation.thread = reply.thread;
 		this.#finishTurn(
 			conversation,
-			error !== undefined ? { status: "error", error } : { status: "complete", answer, error: undefined },
+			reply.error !== undefined
+				? { status: "error", error: reply.error }
+				: { status: "complete", answer: reply.text, error: undefined },
 		);
 	}
 
@@ -363,11 +338,7 @@ export class MeshAskController {
 		if (this.#copyInFlight || !answer.trim()) return;
 		this.#copyInFlight = true;
 		try {
-			await copyToClipboard(replaceTabs(answer).trim());
-			this.ctx.showStatus("Copied mesh answer to clipboard");
-			this.#dialog?.panel.markCopied(recordId, answer);
-		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(error));
+			if (await copyBtwAnswer(this.ctx, answer, "mesh answer")) this.#dialog?.panel.markCopied(recordId, answer);
 		} finally {
 			this.#copyInFlight = false;
 		}

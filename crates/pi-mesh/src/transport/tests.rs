@@ -2,12 +2,12 @@ use std::{
 	net::{Ipv4Addr, SocketAddr},
 	path::Path,
 	sync::Arc,
-	time::{Duration, SystemTime, UNIX_EPOCH},
+	time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use parking_lot::Mutex;
-use pi_instances::{InstanceEntry, InstanceError, InstanceHost, Registration};
+use pi_instances::{InstanceEntry, InstanceError, InstanceHost, Registration, now_ms};
 use serde_json::{json, value::RawValue};
 use tokio::net::TcpStream;
 
@@ -42,13 +42,6 @@ impl InboundSink for Echo {
 		};
 		Box::pin(async move { MeshResponse::Ok(json!({ "msgId": envelope.msg_id, "origin": kind })) })
 	}
-}
-
-fn now_ms() -> u64 {
-	SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.unwrap()
-		.as_millis() as u64
 }
 
 fn envelope(msg_id: &str, to: &str, body: MeshRequest) -> MeshEnvelope {

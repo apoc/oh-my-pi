@@ -172,8 +172,6 @@ struct Live {
 	shared: Arc<Shared>,
 	/// The entry as it should be on disk.
 	entry:  InstanceEntry,
-	bytes:  Vec<u8>,
-	path:   PathBuf,
 	task:   JoinHandle<()>,
 	bound:  Option<pi_ipc::Bound>,
 }
@@ -316,7 +314,9 @@ impl Inner {
 	/// Path and desired bytes of the live entry.
 	fn published(&self) -> Option<(PathBuf, Vec<u8>)> {
 		match &*self.state.lock() {
-			State::Live(live) => Some((live.path.clone(), live.bytes.clone())),
+			State::Live(live) => {
+				Some((entry_path(&self.dir, &self.instance_id), live.entry.to_file_bytes()))
+			},
 			_ => None,
 		}
 	}
@@ -339,7 +339,7 @@ impl Inner {
 		let State::Live(live) = previous else {
 			return None;
 		};
-		let _ = std::fs::remove_file(&live.path);
+		let _ = std::fs::remove_file(entry_path(&self.dir, &self.instance_id));
 		Some(live)
 	}
 
@@ -361,7 +361,7 @@ impl Inner {
 			if matches!(*state, State::Closed) {
 				// `withdraw_sync` ran while binding.
 				drop(state);
-				let _ = std::fs::remove_file(&live.path);
+				let _ = std::fs::remove_file(entry_path(&self.dir, &self.instance_id));
 				return Err(HostError::Closed);
 			}
 			*state = State::Live(Box::new(live));
@@ -404,24 +404,19 @@ impl Inner {
 			created_at: now_ms(),
 			capabilities: vec![namespace.to_owned()],
 		};
-		let live = Live {
-			bytes: entry.to_file_bytes(),
-			path: entry_path(&self.dir, &self.instance_id),
-			entry,
-			shared,
-			task,
-			bound: Some(bound),
-		};
+		let live = Live { entry, shared, task, bound: Some(bound) };
+		let path = entry_path(&self.dir, &self.instance_id);
 		let written = tokio::task::spawn_blocking({
-			let (path, bytes) = (live.path.clone(), live.bytes.clone());
+			let (path, bytes) = (path.clone(), live.entry.to_file_bytes());
 			move || write_private_atomic(&path, &bytes)
 		})
 		.await
 		.unwrap_or_else(|join| Err(io::Error::other(join)));
 		match written {
 			Ok(()) => Ok(live),
-			// Dropping `live` stops the listener and removes the endpoint files.
-			Err(error) => Err(HostError::Write(live.path.clone(), error)),
+			// Dropping `live` (here, or if this future is dropped while the
+			// write runs) stops the listener and removes the endpoint files.
+			Err(error) => Err(HostError::Write(path, error)),
 		}
 	}
 
@@ -449,8 +444,8 @@ impl Inner {
 		Ok(())
 	}
 
-	/// Stop routing registration `id` of `namespace` and recompute the entry
-	/// bytes (no I/O). `true` when it was registered.
+	/// Stop routing registration `id` of `namespace` and recompute the
+	/// entry's capabilities (no I/O). `true` when it was registered.
 	fn remove_handler(&self, namespace: &str, id: u64) -> bool {
 		let removed = {
 			let mut state = self.state.lock();
@@ -487,17 +482,16 @@ impl Inner {
 
 impl Drop for Inner {
 	fn drop(&mut self) {
-		if let State::Live(live) = std::mem::replace(self.state.get_mut(), State::Closed) {
-			let _ = std::fs::remove_file(&live.path);
+		if let State::Live(_live) = std::mem::replace(self.state.get_mut(), State::Closed) {
+			let _ = std::fs::remove_file(entry_path(&self.dir, &self.instance_id));
 		}
 	}
 }
 
 impl Live {
-	/// Recompute `capabilities` (sorted: `BTreeMap` keys) and the file bytes.
+	/// Recompute `capabilities` (sorted: `BTreeMap` keys).
 	fn sync_capabilities(&mut self) {
 		self.entry.capabilities = self.shared.handlers.read().keys().cloned().collect();
-		self.bytes = self.entry.to_file_bytes();
 	}
 }
 
@@ -512,7 +506,7 @@ impl Drop for Live {
 			pi_ipc::release(bound);
 		}
 		#[cfg(unix)]
-		let _ = std::fs::remove_file(format!("{}.bind.lock", self.entry.endpoint));
+		let _ = std::fs::remove_file(pi_ipc::bind_lock_path(Path::new(&self.entry.endpoint)));
 	}
 }
 
@@ -530,10 +524,6 @@ pub struct Registration {
 }
 
 impl Registration {
-	pub fn namespace(&self) -> &str {
-		&self.namespace
-	}
-
 	/// Stop serving the namespace and wait until the entry no longer lists
 	/// it (the rewrite runs on a blocking thread).
 	pub async fn unregister(mut self) {
