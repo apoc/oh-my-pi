@@ -3,16 +3,17 @@
  * the opt-in `collab.autoStart` policy, and room rotation when the active
  * session changes or a room ends on its own.
  *
- * Every room the relay opens for this process shares one random `instanceId`
- * and gets the next `generation`, which is what the local registry keys
- * capabilities by; a room the relay never opened gives its generation back.
- * A session change stops the current room — withdrawing its registry entry
+ * Every room the relay opens for this process shares the process's instance
+ * host — its `instanceId` — and gets the next `generation`, which is what the
+ * local registry keys capabilities by; a room the relay never opened gives its
+ * generation back.
+ * A session change stops the current room — withdrawing it from the registry
  * and telling guests goodbye — before a replacement room for the new session
  * is started, so a card that names generation N can never reach session N+1.
  */
-import { randomBytes } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import { sharedInstanceHost } from "../instances";
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { CollabHost, CollabHostStoppedError, CollabRelayUnavailableError } from "./host";
@@ -41,7 +42,6 @@ export interface CollabStartOptions {
 }
 
 export class CollabController {
-	readonly instanceId: string;
 	#ctx: InteractiveModeContext;
 	#generation = 0;
 	#host: CollabHost | undefined;
@@ -66,8 +66,11 @@ export class CollabController {
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
-		// 64 random bits: unique per process on one machine, short enough for `omp collab link <id>` and socket paths.
-		this.instanceId = randomBytes(8).toString("hex");
+	}
+
+	/** Registry identity of every room this process hosts: the shared instance host's id. */
+	get instanceId(): string {
+		return sharedInstanceHost().instanceId;
 	}
 
 	/** The live room for the current session; stale or ending rooms are absent. */
@@ -252,7 +255,6 @@ export class CollabController {
 		this.#observeSessionChanges();
 		const previous = this.#host;
 		const host: CollabHost = new CollabHost(this.#ctx, {
-			instanceId: this.instanceId,
 			generation: ++this.#generation,
 			access,
 			guestActionsReady: () => this.#startupComplete && !this.#ctx.session.isSessionTransitioning,

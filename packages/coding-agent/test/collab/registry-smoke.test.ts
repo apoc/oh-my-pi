@@ -1,7 +1,8 @@
 /**
  * Real two-process smoke test for the local Collab host registry (issue #6099).
  *
- * A genuine child Bun process publishes over a Unix socket / named pipe.
+ * A genuine child Bun process publishes on its instance host (Unix socket /
+ * named pipe).
  * The parent discovers metadata without capabilities, retrieves a link only
  * on explicit request through the real CLI, and observes crash pruning.
  * All writes stay under temp dirs, including a fake HOME for the CLI path.
@@ -95,7 +96,7 @@ describe("collab host registry (two-process smoke)", () => {
 	it("discovers a separately-spawned host without a URL and prunes it after a crash", async () => {
 		const dir = await tempDir("omp-collab-smoke-seam-");
 		const marker = `seam-${Date.now().toString(36)}`;
-		const instanceId = "seam-host";
+		const instanceId = "seamhost00000001";
 		const { child, stderr } = spawnHelper([dir, marker, instanceId]);
 
 		const ready = await readUntil(child.stdout, "READY", READY_TIMEOUT_MS);
@@ -124,7 +125,7 @@ describe("collab host registry (two-process smoke)", () => {
 	it("lists metadata and explicitly retrieves control or view links through the real CLI under a fake HOME", async () => {
 		const home = await tempDir("omp-collab-smoke-home-");
 		const marker = `cli-${Date.now().toString(36)}`;
-		const instanceId = "cli-host";
+		const instanceId = "clihost000000001";
 		const controlUrl = `https://collab.example/control/${marker}`;
 		const viewUrl = `https://collab.example/view/${marker}`;
 		// Clear every override that could redirect the registry outside the fake HOME.
@@ -140,6 +141,8 @@ describe("collab host registry (two-process smoke)", () => {
 		delete env.PI_PROFILE;
 		delete env.OMP_PROFILE;
 		delete env.PI_CODING_AGENT_DIR;
+		// A marked test child would use the per-user test registry, not the fake HOME's.
+		delete env.PI_TEST_RUNTIME;
 
 		const { child, stderr } = spawnHelper([], env);
 		const ready = await readUntil(child.stdout, "READY", READY_TIMEOUT_MS);
@@ -165,7 +168,7 @@ describe("collab host registry (two-process smoke)", () => {
 		const listed = await runCli(["list", "--json"]);
 		expect({ code: listed.code, stderr: listed.stderr }).toEqual({ code: 0, stderr: "" });
 		const listJson: CollabListJsonOutput = JSON.parse(listed.stdout);
-		const hosts = await listCollabHosts({ dir: path.join(home, ".omp", "run", "collab-hosts") });
+		const hosts = await listCollabHosts({ dir: path.join(home, ".omp", "run", "instances") });
 		expect(listJson).toEqual({ version: COLLAB_REGISTRY_VERSION, hosts });
 		expect(listJson.hosts).toHaveLength(1);
 		expect(listJson.hosts[0]).toMatchObject({ instanceId, pid: child.pid });

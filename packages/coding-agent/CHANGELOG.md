@@ -271,6 +271,10 @@
 - `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
 - The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`); an agent is announced once its session has a name and a summary, which comes after 3 model turns. While the mesh is on, the system prompt tells the agent to consult a peer whose work matters to its task, and to coordinate before editing files a peer on the same branch may be editing
 
+### Changed
+
+- Local Collab host discovery (`omp collab list`, `omp collab link`, `/collab list`) now runs on the shared same-machine instance registry `~/.omp/run/instances` instead of `~/.omp/run/collab-hosts`: a host's instance ID is its process's instance ID, the registry directory is restricted to the current user on Windows too (no longer inheriting the configuration root's ACL), and hosts published by older omp builds are not listed (nor do they list newer ones) ([docs](../../docs/collab.md))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

@@ -6,9 +6,9 @@
  * session switch revokes the old room before its successor is published; and
  * the published access level caps what `omp collab link` can obtain.
  *
- * Real CollabHost/CollabSocket run over the in-memory relay; the registry's
- * real Unix-socket IPC is redirected into a temp dir via a spy on
- * `publishCollabHost`, exactly as in host-registry.test.ts.
+ * Real CollabHost/CollabSocket run over the in-memory relay; the process's
+ * shared instance host is replaced by a real one in a temp dir (rooms of
+ * "other processes" get their own), exactly as in host-registry.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -27,6 +27,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import * as instances from "@oh-my-pi/pi-coding-agent/instances";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -38,6 +39,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
@@ -230,8 +232,20 @@ async function settled(publishSpy: Mock<typeof registry.publishCollabHost>, call
 	await Promise.all(publishSpy.mock.results.map(result => result.value));
 }
 
+/** A room in "another process": its own instance host in the shared registry dir. */
+function otherInstanceHost(): InstanceHost {
+	const host = new InstanceHost({ dir: tmp });
+	otherHosts.push(host);
+	return host;
+}
+
 let tmp: string;
 let publishSpy: Mock<typeof registry.publishCollabHost>;
+let sharedSpy: Mock<typeof instances.sharedInstanceHost>;
+/** Stands in for this process's shared instance host. */
+let instanceHost: InstanceHost;
+/** Instance hosts of rooms that model another omp process. */
+const otherHosts: InstanceHost[] = [];
 let controller: CollabController | undefined;
 const guestCleanups: (() => void)[] = [];
 const publishWaiters: (() => void)[] = [];
@@ -250,9 +264,11 @@ beforeEach(async () => {
 		}
 	};
 	globalThis.WebSocket = Capturing as unknown as typeof WebSocket;
+	instanceHost = new InstanceHost({ dir: tmp });
+	sharedSpy = spyOn(instances, "sharedInstanceHost").mockReturnValue(instanceHost);
 	const real = registry.publishCollabHost;
 	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) => {
-		const publication = real(source, { ...options, dir: tmp });
+		const publication = real(source, options);
 		for (const wake of publishWaiters.splice(0)) wake();
 		return publication;
 	});
@@ -264,6 +280,9 @@ afterEach(async () => {
 	await controller?.shutdown("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
 	publishSpy?.mockRestore();
+	sharedSpy?.mockRestore();
+	for (const host of otherHosts.splice(0)) await host.close();
+	await instanceHost.close();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
 	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
@@ -366,7 +385,7 @@ describe("interactive collaboration startup", () => {
 			persistence.mockRestore();
 			expect(testSession.sessionManager.getSessionId()).not.toBe(first.sessionId);
 			if (command === "/join") {
-				const remote = new CollabHost(makeControllerContext().ctx);
+				const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 				remoteHosts.push(remote);
 				await remote.start(RELAY_URL);
 				await executeBuiltinSlashCommand("/join " + remote.link, { ctx: mode });
@@ -425,7 +444,7 @@ describe("interactive collaboration startup", () => {
 		await testSession.sessionManager.ensureOnDisk();
 		await testSession.sessionManager.flush();
 		const localFile = testSession.sessionManager.getSessionFile();
-		const remote = new CollabHost(makeControllerContext().ctx);
+		const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 		remoteHosts.push(remote);
 		await remote.start(RELAY_URL);
 		const render = InteractiveMode.prototype.renderInitialMessages;
@@ -509,7 +528,7 @@ describe("interactive collaboration startup", () => {
 		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: true });
 		await mode.collabController.idle();
 		await executeBuiltinSlashCommand("/collab stop", { ctx: mode });
-		const remote = new CollabHost(makeControllerContext().ctx);
+		const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 		remoteHosts.push(remote);
 		await remote.start(RELAY_URL);
 		return { local: mode, remote, localFile };

@@ -28,6 +28,8 @@ pub mod ast;
 pub mod audio;
 pub mod block;
 pub mod clipboard;
+/// Local Collab host registry: the `collab` namespace on an `InstanceHost`.
+pub mod collab_registry;
 pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;

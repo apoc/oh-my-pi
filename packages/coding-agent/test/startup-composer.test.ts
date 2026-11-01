@@ -11,6 +11,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import * as instances from "@oh-my-pi/pi-coding-agent/instances";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer, type ComposerPreferences } from "@oh-my-pi/pi-tui/prompt/composer";
 import * as composerCache from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -25,6 +26,7 @@ import {
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
@@ -123,10 +125,9 @@ describe("outer startup collaboration gate", () => {
 		cfgStartupShowSplash.override(activeSettings, false);
 		cfgMarketplaceAutoUpdate.override(activeSettings, "off");
 		installInMemoryRelay();
-		const publish = registry.publishCollabHost;
-		vi.spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
-			publish(source, { ...options, dir: testSession.tempDir }),
-		);
+		// The process's instance host, in the test's temp dir.
+		const instanceHost = new InstanceHost({ dir: testSession.tempDir });
+		vi.spyOn(instances, "sharedInstanceHost").mockReturnValue(instanceHost);
 		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 		const init = InteractiveMode.prototype.init;
@@ -277,6 +278,7 @@ describe("outer startup collaboration gate", () => {
 			mode?.stop();
 			stopPendingStartupComposer();
 			vi.restoreAllMocks();
+			await instanceHost.close();
 			uninstallInMemoryRelay();
 			authStorage.close();
 			// setProjectDir chdir'd into tempDir; Windows cannot delete the process cwd.

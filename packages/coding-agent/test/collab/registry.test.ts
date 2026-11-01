@@ -1,46 +1,51 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+/**
+ * The TypeScript adapter over the native collab registry (`pi_instances::collab`):
+ * publication through an `InstanceHost`, the one-tick source answer, and the
+ * mapping of native failures to `CollabLinkError`. The registry engine itself
+ * (wire checks, pruning, sorting, selectors, bounding, directory security) is
+ * covered by `crates/pi-instances/src/tests/collab.rs` and `list.rs`.
+ */
+import { afterEach, describe, expect, it } from "bun:test";
 import * as crypto from "node:crypto";
-import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	COLLAB_REGISTRY_VERSION,
 	type CollabHostPublication,
 	type CollabHostRegistrySource,
 	type CollabHostSnapshot,
+	CollabLinkError,
 	listCollabHosts,
 	publishCollabHost,
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
-import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
-const openServers: { server: IpcServer; connections: Set<IpcConnection> }[] = [];
+const openHosts: InstanceHost[] = [];
 
 afterEach(async () => {
-	for (const pub of openPublications.splice(0)) {
-		try {
-			await pub.close();
-		} catch {
-			// best-effort
-		}
-	}
-	for (const { server, connections } of openServers.splice(0)) {
-		// Hung fixture connections must not outlive the test.
-		for (const connection of connections) connection.destroy();
-		await server.close();
-	}
-	for (const dir of cleanupDirs.splice(0)) {
-		await fs.rm(dir, { recursive: true, force: true });
-	}
+	for (const pub of openPublications.splice(0)) await pub.close();
+	for (const host of openHosts.splice(0)) await host.close();
+	for (const dir of cleanupDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
 });
 
 async function tempDir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collab-registry-"));
 	cleanupDirs.push(dir);
 	return dir;
+}
+
+/** A fresh 16-char lowercase alphanumeric instance id. */
+function instanceId(): string {
+	return crypto.randomBytes(8).toString("hex");
+}
+
+function newHost(dir: string, id = instanceId()): InstanceHost {
+	const host = new InstanceHost({ dir, instanceId: id });
+	openHosts.push(host);
+	return host;
 }
 
 interface Fixture {
@@ -56,7 +61,7 @@ function makeFixture(over: Partial<CollabHostSnapshot> = {}): Fixture {
 	const writeToken = `WRITETOKEN-${crypto.randomBytes(6).toString("hex")}`;
 	return {
 		snapshot: {
-			instanceId: crypto.randomBytes(8).toString("hex"),
+			instanceId: instanceId(),
 			generation: 1,
 			sessionId: `sess-${crypto.randomBytes(4).toString("hex")}`,
 			sessionName: "Fixture Session",
@@ -85,54 +90,18 @@ function sourceFor(f: Fixture): CollabHostRegistrySource {
 	};
 }
 
-async function publish(dir: string, f: Fixture): Promise<CollabHostPublication> {
-	const pub = await publishCollabHost(sourceFor(f), { dir, instanceId: f.snapshot.instanceId });
+async function publishSource(
+	dir: string,
+	id: string,
+	source: CollabHostRegistrySource,
+): Promise<CollabHostPublication> {
+	const pub = await publishCollabHost(source, { host: newHost(dir, id) });
 	openPublications.push(pub);
 	return pub;
 }
 
-/** Reads the discovery token from the single metadata file in `dir`. */
-async function readSoleToken(dir: string): Promise<string> {
-	const names = (await fs.readdir(dir)).filter(n => n.endsWith(".json"));
-	expect(names).toHaveLength(1);
-	const [name] = names;
-	if (!name) throw new Error("published registry metadata is missing");
-	const meta = await Bun.file(path.join(dir, name)).json();
-	return meta.token as string;
-}
-
-/** Connects to `endpoint`, sends one JSON request line, returns the raw response line. */
-async function rawRequest(endpoint: string, request: object): Promise<string> {
-	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	const connection = await IpcConnection.connect(endpoint, { framing: "lines" });
-	connection.start(
-		line => {
-			resolve(line);
-			connection.destroy();
-		},
-		reason => reject(new Error(`connection closed before a response: ${reason ?? "EOF"}`)),
-	);
-	connection.send(JSON.stringify(request));
-	return promise;
-}
-
-function auxEndpoint(dir: string, label: string): string {
-	return ipcEndpoint(dir, `${label}-${crypto.randomBytes(4).toString("hex")}`);
-}
-
-/** Forwards to the real {@link IpcConnection.connect}; captured before any spy replaces it. */
-const realConnect = IpcConnection.connect.bind(IpcConnection);
-
-async function writeMetadata(dir: string, name: string, meta: Record<string, unknown>): Promise<void> {
-	await Bun.write(
-		path.join(dir, name),
-		JSON.stringify({ instanceId: crypto.randomBytes(8).toString("hex"), ...meta }),
-	);
-}
-
-function freshDeadPid(): number {
-	// The child has exited by the time spawnSync returns: a real, dead PID.
-	return Bun.spawnSync([process.execPath, "-e", ""]).pid;
+function publish(dir: string, f: Fixture): Promise<CollabHostPublication> {
+	return publishSource(dir, f.snapshot.instanceId, sourceFor(f));
 }
 
 async function collectRegularFiles(dir: string): Promise<string[]> {
@@ -152,7 +121,7 @@ describe("collab registry", () => {
 		await publish(dir, f);
 
 		const hosts = await listCollabHosts({ dir });
-		expect(hosts.map(host => host.instanceId)).toEqual([f.snapshot.instanceId]);
+		expect(hosts).toEqual([f.snapshot]);
 		expect(hosts[0]).not.toHaveProperty("url");
 		expect(JSON.stringify(hosts)).not.toContain(f.roomKey);
 		expect(JSON.stringify(hosts)).not.toContain(f.writeToken);
@@ -174,234 +143,109 @@ describe("collab registry", () => {
 		expect(JSON.stringify(view)).not.toContain(f.writeToken);
 	});
 
-	it("returns only the requested URL on the link wire, never the control capability to a view request", async () => {
+	it("reports the publishing host's identity whatever the source claims", async () => {
 		const dir = await tempDir();
-		const f = makeFixture();
-		const pub = await publish(dir, f);
-		const request = { v: COLLAB_REGISTRY_VERSION, token: await readSoleToken(dir), op: "link", generation: 1 };
+		const f = makeFixture({ instanceId: "not-the-host-id", pid: 1 });
+		const id = instanceId();
+		await publishSource(dir, id, sourceFor(f));
 
-		const control = await rawRequest(pub.endpoint, { ...request, access: "control" });
-		expect(JSON.parse(control)).toEqual({ ok: true, v: COLLAB_REGISTRY_VERSION, url: f.controlUrl });
-		const view = await rawRequest(pub.endpoint, { ...request, access: "view" });
-		expect(JSON.parse(view)).toEqual({ ok: true, v: COLLAB_REGISTRY_VERSION, url: f.viewUrl });
-		expect(view).not.toContain(f.controlUrl);
-		expect(view).not.toContain(f.writeToken);
+		expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: id, pid: process.pid }]);
 	});
 
-	it("refuses control access to a view-only host through resolution and the wire", async () => {
+	it("keeps a nullable session name, model and busy flag as null", async () => {
 		const dir = await tempDir();
-		const f = makeFixture({ access: "view" });
-		const pub = await publish(dir, f);
+		const f = makeFixture({ sessionName: null, model: null, busy: null });
+		await publish(dir, f);
 
-		await expect(resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).rejects.toMatchObject({
+		const [host] = await listCollabHosts({ dir });
+		expect(host).toEqual(f.snapshot);
+		expect(JSON.stringify(host)).toContain('"sessionName":null');
+	});
+
+	it("maps native link failures to CollabLinkError with the native code and message", async () => {
+		const dir = await tempDir();
+		const viewOnly = makeFixture({ access: "view" });
+		await publish(dir, viewOnly);
+
+		const denied = await resolveCollabHostLink(viewOnly.snapshot.instanceId, "control", { dir }).catch(e => e);
+		expect(denied).toBeInstanceOf(CollabLinkError);
+		expect(denied).toMatchObject({
 			name: "CollabLinkError",
 			code: "access_unavailable",
+			message: `host ${viewOnly.snapshot.instanceId} does not publish control access`,
 		});
-		const line = await rawRequest(pub.endpoint, {
-			v: COLLAB_REGISTRY_VERSION,
-			token: await readSoleToken(dir),
-			op: "link",
-			access: "control",
-			generation: f.snapshot.generation,
-		});
-		expect(JSON.parse(line)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "access_unavailable" });
-		expect(await resolveCollabHostLink(f.snapshot.instanceId, "view", { dir })).toMatchObject({
+		expect(await resolveCollabHostLink(viewOnly.snapshot.instanceId, "view", { dir })).toMatchObject({
 			access: "view",
-			url: f.viewUrl,
+			url: viewOnly.viewUrl,
 		});
+
+		const missing = await resolveCollabHostLink("  missing-host ", "control", { dir }).catch(e => e);
+		expect(missing).toBeInstanceOf(CollabLinkError);
+		expect(missing).toMatchObject({ code: "not_found", message: "no active Collab host matches missing-host" });
+
+		const second = makeFixture();
+		await publish(dir, second);
+		const ambiguous = await resolveCollabHostLink(String(process.pid), "control", { dir }).catch(e => e);
+		expect(ambiguous).toBeInstanceOf(CollabLinkError);
+		expect(ambiguous.code).toBe("ambiguous");
+		expect(ambiguous.message).toStartWith(`${process.pid} matches more than one Collab host; use an instance id: `);
 	});
 
-	it("rejects a listed generation after the room rotates without returning its successor's URL", async () => {
+	it("surfaces stale_generation when the host rotates between resolution's listing and link request", async () => {
 		const dir = await tempDir();
-		const f = makeFixture();
-		const pub = await publish(dir, f);
-		const [listed] = await listCollabHosts({ dir });
-		if (!listed) throw new Error("published host was not discoverable");
-		f.snapshot.generation++;
-
-		const line = await rawRequest(pub.endpoint, {
-			v: COLLAB_REGISTRY_VERSION,
-			token: await readSoleToken(dir),
-			op: "link",
-			access: "control",
-			generation: listed.generation,
-		});
-		expect(JSON.parse(line)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "stale_generation" });
-	});
-
-	it("surfaces stale_generation when the host rotates between resolution's snapshot and link requests", async () => {
-		const dir = await tempDir();
-		const f = makeFixture();
+		const f = makeFixture({ access: "view" });
 		const source = sourceFor(f);
 		let rotate = false;
 		source.snapshot = () => {
 			const snapshot = { ...f.snapshot };
 			if (rotate) {
-				f.snapshot.generation++;
+				// The next generation is a control room: the caller must be told to
+				// re-list, not that control is unavailable.
+				f.snapshot = { ...f.snapshot, generation: f.snapshot.generation + 1, access: "control" };
 				rotate = false;
 			}
 			return snapshot;
 		};
-		openPublications.push(await publishCollabHost(source, { dir, instanceId: f.snapshot.instanceId }));
-		await listCollabHosts({ dir });
+		await publishSource(dir, f.snapshot.instanceId, source);
 		rotate = true;
 
 		await expect(resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).rejects.toMatchObject({
 			name: "CollabLinkError",
 			code: "stale_generation",
 		});
-	});
-
-	it("surfaces stale_generation when the room rotated to a new endpoint between resolution's listing and link request", async () => {
-		const dir = await tempDir();
-		const first = makeFixture({ instanceId: "rotating-endpoint", sessionId: "generation-1" });
-		const pub = await publish(dir, first);
-		const second = makeFixture({ instanceId: "rotating-endpoint", sessionId: "generation-2", generation: 2 });
-
-		// The listing inside resolution answers from generation 1; the room then
-		// rotates — the old endpoint is withdrawn and generation 2 publishes under
-		// its own — before the link request connects.
-		let connections = 0;
-		const connect = spyOn(IpcConnection, "connect").mockImplementation(async (endpoint, options) => {
-			if (++connections === 2) {
-				await pub.close();
-				await publish(dir, second);
-			}
-			return realConnect(endpoint, options);
-		});
-		try {
-			await expect(resolveCollabHostLink("rotating-endpoint", "control", { dir })).rejects.toMatchObject({
-				name: "CollabLinkError",
-				code: "stale_generation",
-			});
-		} finally {
-			connect.mockRestore();
-		}
-
-		// Listing again yields the successor, and only its link.
-		expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: "rotating-endpoint", generation: 2 }]);
-		expect(await resolveCollabHostLink("rotating-endpoint", "control", { dir })).toMatchObject({
-			generation: 2,
-			url: second.controlUrl,
-		});
-	});
-
-	it("reports stale_generation, not access_unavailable, when a view-only generation rotated to control before the link request", async () => {
-		const dir = await tempDir();
-		const viewOnly = makeFixture({ instanceId: "upgrading-host", access: "view" });
-		const pub = await publish(dir, viewOnly);
-		const control = makeFixture({ instanceId: "upgrading-host", generation: 2, access: "control" });
-
-		// The listing sees a view-only generation; a control link is requested;
-		// before that request connects the room has rotated to a control-capable
-		// generation. The caller must be told to re-list, not that control is
-		// unavailable.
-		let connections = 0;
-		const connect = spyOn(IpcConnection, "connect").mockImplementation(async (endpoint, options) => {
-			if (++connections === 2) {
-				await pub.close();
-				await publish(dir, control);
-			}
-			return realConnect(endpoint, options);
-		});
-		try {
-			await expect(resolveCollabHostLink("upgrading-host", "control", { dir })).rejects.toMatchObject({
-				name: "CollabLinkError",
-				code: "stale_generation",
-			});
-		} finally {
-			connect.mockRestore();
-		}
-		expect(await resolveCollabHostLink("upgrading-host", "control", { dir })).toMatchObject({
-			generation: 2,
-			url: control.controlUrl,
-		});
-	});
-
-	it("keeps a host with an oversized session name or cwd listable by bounding snapshot fields on the wire", async () => {
-		const dir = await tempDir();
-		// Each of these alone would push the snapshot JSON past the 64 KiB response cap.
-		const f = makeFixture({ sessionName: "n".repeat(100_000), cwd: `/deep/${"d".repeat(100_000)}` });
-		await publish(dir, f);
-
-		const hosts = await listCollabHosts({ dir });
-		expect(hosts).toHaveLength(1);
-		expect(hosts[0]!.sessionName).toBe("n".repeat(1024));
-		expect(hosts[0]!.cwd).toBe(`/deep/${"d".repeat(1024 - "/deep/".length)}`);
 		expect(await resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).toMatchObject({
+			generation: 2,
 			url: f.controlUrl,
 		});
 	});
 
-	it("resolves a unique PID and rejects it as ambiguous when a second instance shares the process", async () => {
+	it("omits a host whose source throws or answers a malformed snapshot, without leaking the error", async () => {
 		const dir = await tempDir();
-		const first = makeFixture({ instanceId: "pid-first" });
-		await publish(dir, first);
-		expect(await resolveCollabHostLink(String(process.pid), "control", { dir })).toMatchObject({
-			instanceId: first.snapshot.instanceId,
-			url: first.controlUrl,
+		const healthy = makeFixture({ sessionId: "healthy" });
+		await publish(dir, healthy);
+		await publishSource(dir, instanceId(), {
+			snapshot: () => {
+				throw new Error(`secret ${healthy.controlUrl}`);
+			},
+			link: () => healthy.controlUrl,
 		});
-
-		await publish(dir, makeFixture({ instanceId: "pid-second" }));
-		await expect(resolveCollabHostLink(String(process.pid), "control", { dir })).rejects.toMatchObject({
-			name: "CollabLinkError",
-			code: "ambiguous",
+		const garbage = makeFixture({ sessionId: "garbage", busy: "yes" as unknown as boolean });
+		await publish(dir, garbage);
+		const fractional = makeFixture({ sessionId: "fractional", generation: 1.5 });
+		await publish(dir, fractional);
+		const throwingLink = makeFixture({ sessionId: "throwing-link" });
+		await publishSource(dir, throwingLink.snapshot.instanceId, {
+			snapshot: () => throwingLink.snapshot,
+			link: () => {
+				throw new Error("room gone");
+			},
 		});
-	});
-
-	it("prefers an exact numeric instance ID over a matching PID", async () => {
-		const dir = await tempDir();
-		const exact = makeFixture({ instanceId: "99999999" });
-		await publish(dir, exact);
-		await publish(dir, makeFixture({ instanceId: "numeric-pid", pid: 99_999_999 }));
-
-		expect(await resolveCollabHostLink("99999999", "control", { dir })).toMatchObject({
-			instanceId: exact.snapshot.instanceId,
-			url: exact.controlUrl,
-		});
-	});
-
-	it("reports not_found for an unknown selector", async () => {
-		const dir = await tempDir();
-		await publish(dir, makeFixture());
-		await expect(resolveCollabHostLink("missing-host", "control", { dir })).rejects.toMatchObject({
-			name: "CollabLinkError",
-			code: "not_found",
-		});
-	});
-
-	it("rejects invalid access and missing or unknown operations without returning capabilities", async () => {
-		const dir = await tempDir();
-		const f = makeFixture();
-		const pub = await publish(dir, f);
-		const auth = { v: COLLAB_REGISTRY_VERSION, token: await readSoleToken(dir) };
-
-		const invalidAccess = await rawRequest(pub.endpoint, { ...auth, op: "link", access: "write", generation: 1 });
-		expect(JSON.parse(invalidAccess)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_access" });
-		const missingOp = await rawRequest(pub.endpoint, auth);
-		expect(JSON.parse(missingOp)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_operation" });
-		const unknownOp = await rawRequest(pub.endpoint, { ...auth, op: "unknown" });
-		expect(JSON.parse(unknownOp)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_operation" });
-	});
-
-	it("lists a host that omits busy as unknown and drops one that reports garbage", async () => {
-		const dir = await tempDir();
-		// An omp older than the `busy` field: same protocol version, one key short.
-		const older = makeFixture({ sessionId: "older-host" });
-		const { busy: _busy, ...withoutBusy } = older.snapshot;
-		openPublications.push(
-			await publishCollabHost(
-				{ snapshot: () => withoutBusy as CollabHostSnapshot, link: () => null },
-				{ dir, instanceId: older.snapshot.instanceId },
-			),
-		);
-		const broken = makeFixture({ sessionId: "broken-host", busy: "yes" as unknown as boolean });
-		await publish(dir, broken);
 
 		const hosts = await listCollabHosts({ dir });
-		// Unknown, never idle: the older host stays listed with a null flag, and a
-		// snapshot that answers with a non-boolean is malformed, not busy.
-		expect(hosts.map(host => [host.sessionId, host.busy])).toEqual([["older-host", null]]);
+		expect(hosts.map(host => host.sessionId).sort()).toEqual(["healthy", "throwing-link"]);
+		await expect(resolveCollabHostLink(throwingLink.snapshot.instanceId, "control", { dir })).rejects.toMatchObject({
+			code: "unreachable",
+		});
 	});
 
 	it("keeps both URLs and room secrets off disk even after resolving links", async () => {
@@ -423,286 +267,57 @@ describe("collab registry", () => {
 		}
 	});
 
-	it("rejects a wrong bearer without leaking metadata or capabilities", async () => {
+	it("withdraws the collab capability on close while the instance host stays published", async () => {
 		const dir = await tempDir();
 		const f = makeFixture();
-		const pub = await publish(dir, f);
-		const auth = { v: COLLAB_REGISTRY_VERSION, token: "not-the-real-token" };
-
-		const snapshot = await rawRequest(pub.endpoint, { ...auth, op: "snapshot" });
-		expect(JSON.parse(snapshot)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "authentication_failed" });
-		const link = await rawRequest(pub.endpoint, { ...auth, op: "link", access: "control", generation: 1 });
-		expect(JSON.parse(link)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "authentication_failed" });
-	});
-
-	it("sorts hosts by startedAt, pid, then instanceId regardless of publication order", async () => {
-		const dir = await tempDir();
-		const early = makeFixture({ instanceId: "early-host", startedAt: 900, pid: 99 });
-		const highPid = makeFixture({ instanceId: "high-pid", startedAt: 1000, pid: 50 });
-		const lowId = makeFixture({ instanceId: "tie-alpha", startedAt: 1000, pid: 30 });
-		const highId = makeFixture({ instanceId: "tie-bravo", startedAt: 1000, pid: 30 });
-		await publish(dir, highPid);
-		await publish(dir, highId);
-		await publish(dir, early);
-		await publish(dir, lowId);
-
-		const hosts = await listCollabHosts({ dir });
-		expect(hosts.map(h => h.instanceId)).toEqual(["early-host", "tie-alpha", "tie-bravo", "high-pid"]);
-	});
-
-	it("lists healthy hosts, prunes malformed or dead entries, and preserves live incompatible or timed-out entries", async () => {
-		const dir = await tempDir();
-		await publish(dir, makeFixture({ sessionId: "healthy" }));
-		await Bun.write(path.join(dir, "garbage.json"), "{not json");
-		await writeMetadata(dir, "version-mismatch.json", {
-			version: 99,
-			pid: freshDeadPid(),
-			endpoint: auxEndpoint(dir, "vmismatch"),
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-		await writeMetadata(dir, "live-version-mismatch.json", {
-			version: 99,
-			pid: process.pid,
-			endpoint: auxEndpoint(dir, "live-version"),
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-		await writeMetadata(dir, "stale.json", {
-			version: COLLAB_REGISTRY_VERSION,
-			pid: freshDeadPid(),
-			endpoint: auxEndpoint(dir, "stale-missing"),
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-
-		const unresponsiveEndpoint = auxEndpoint(dir, "unresponsive");
-		const hungConnections = new Set<IpcConnection>();
-		const unresponsive = await IpcServer.listen(unresponsiveEndpoint, { framing: "lines" }, connection => {
-			hungConnections.add(connection);
-			// Accept and read requests, but never answer.
-			connection.start(
-				() => {},
-				() => hungConnections.delete(connection),
-			);
-		});
-		openServers.push({ server: unresponsive, connections: hungConnections });
-		await writeMetadata(dir, "unresponsive.json", {
-			version: COLLAB_REGISTRY_VERSION,
-			pid: process.pid,
-			endpoint: unresponsiveEndpoint,
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-
-		const hosts = await listCollabHosts({ dir, timeoutMs: 250 });
-		expect(hosts.map(h => h.sessionId)).toEqual(["healthy"]);
-		const remaining = await fs.readdir(dir);
-		expect(remaining).not.toContain("garbage.json");
-		expect(remaining).not.toContain("version-mismatch.json");
-		expect(remaining).not.toContain("stale.json");
-		expect(remaining).toContain("live-version-mismatch.json");
-		expect(remaining).toContain("unresponsive.json");
-	});
-
-	it("skips a transient connection error without pruning a host that becomes reachable again", async () => {
-		const dir = await tempDir();
-		const f = makeFixture();
-		await publish(dir, f);
-		const connect = spyOn(IpcConnection, "connect").mockImplementation(() =>
-			Promise.reject(Object.assign(new Error("file limit"), { code: "EMFILE" })),
-		);
-		try {
-			expect(await listCollabHosts({ dir })).toEqual([]);
-		} finally {
-			connect.mockRestore();
-		}
-
-		expect(await resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).toMatchObject({
-			url: f.controlUrl,
-		});
-	});
-
-	it("does not prune a successor room that republished under the same instance between stale-entry validation and removal", async () => {
-		const dir = await tempDir();
-		// Stale metadata for generation N whose endpoint is already gone.
-		await writeMetadata(dir, "rotating-host.json", {
-			version: COLLAB_REGISTRY_VERSION,
-			instanceId: "rotating-host",
-			pid: process.pid,
-			endpoint: ipcEndpoint(dir, "rotating-host"),
-			createdAt: Date.now(),
-			token: "stale-token",
-		});
-		// The listing finds N dead and starts removing it; before its first
-		// unlink lands, generation N+1 publishes under the same instance. The
-		// removal must only ever hit N's own artifacts.
-		const successor = makeFixture({ instanceId: "rotating-host", sessionId: "generation-2" });
-		const realRm = nodeFs.promises.rm;
-		let republished: Promise<CollabHostPublication> | undefined;
-		const rm = spyOn(nodeFs.promises, "rm").mockImplementation(async (target, options) => {
-			republished ??= publish(dir, successor);
-			await republished;
-			return realRm(target, options);
-		});
-		let hosts: CollabHostSnapshot[];
-		try {
-			hosts = await listCollabHosts({ dir });
-		} finally {
-			rm.mockRestore();
-		}
-		expect(republished).toBeDefined();
-
-		// The stale query yields nothing, N's metadata is gone, and the
-		// successor stays listed and linkable.
-		expect(hosts).toEqual([]);
-		expect(await fs.readdir(dir)).not.toContain("rotating-host.json");
-		expect(await listCollabHosts({ dir })).toMatchObject([
-			{ instanceId: "rotating-host", sessionId: "generation-2" },
-		]);
-		expect(await resolveCollabHostLink("rotating-host", "control", { dir })).toMatchObject({
-			url: successor.controlUrl,
-		});
-	});
-
-	it("leaves no artifacts behind when the metadata write fails, and the instance can publish again", async () => {
-		const dir = await tempDir();
-		const f = makeFixture();
-		const realOpen = nodeFs.promises.open;
-		const open = spyOn(nodeFs.promises, "open").mockImplementation(async (...args: Parameters<typeof realOpen>) => {
-			const handle = await realOpen(...args);
-			// The exclusive create succeeded; the write then hits a full disk.
-			handle.writeFile = () =>
-				Promise.reject(Object.assign(new Error("no space left on device"), { code: "ENOSPC" }));
-			return handle;
-		});
-		try {
-			await expect(publish(dir, f)).rejects.toMatchObject({ code: "ENOSPC" });
-		} finally {
-			open.mockRestore();
-		}
-		expect(await fs.readdir(dir)).toEqual([]);
-
-		await publish(dir, f);
-		expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: f.snapshot.instanceId }]);
-	});
-
-	it("removes metadata and socket and disappears from listings after close", async () => {
-		const dir = await tempDir();
-		const f = makeFixture();
-		const pub = await publish(dir, f);
+		const host = newHost(dir, f.snapshot.instanceId);
+		const pub = await publishCollabHost(sourceFor(f), { host });
 		expect(await listCollabHosts({ dir })).toHaveLength(1);
+		await pub.close();
 		await pub.close();
 
 		expect(await listCollabHosts({ dir })).toEqual([]);
-		expect((await fs.readdir(dir)).filter(n => n.endsWith(".json"))).toEqual([]);
-		if (process.platform !== "win32") {
-			await expect(fs.stat(pub.endpoint)).rejects.toMatchObject({ code: "ENOENT" });
-		}
+		const entry = await Bun.file(path.join(dir, `${f.snapshot.instanceId}.json`)).json();
+		expect(entry.capabilities).toEqual([]);
+
+		// The namespace is free again: a successor room publishes on the same host.
+		const successor = makeFixture({ instanceId: f.snapshot.instanceId, generation: 2 });
+		openPublications.push(await publishCollabHost(sourceFor(successor), { host }));
+		expect(await listCollabHosts({ dir })).toMatchObject([{ generation: 2 }]);
+
+		await host.close();
+		expect((await fs.readdir(dir)).filter(name => name.endsWith(".json"))).toEqual([]);
 	});
 
-	it("treats endpoint death as authoritative over a reused PID", async () => {
+	it("refuses a second publication on one host and any publication on a closed host", async () => {
 		const dir = await tempDir();
-		const forgedFile = "reused-pid.json";
-		await writeMetadata(dir, forgedFile, {
-			version: COLLAB_REGISTRY_VERSION,
-			pid: process.pid,
-			endpoint: auxEndpoint(dir, "reused"),
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-
-		expect(await listCollabHosts({ dir })).toEqual([]);
-		expect(await Bun.file(path.join(dir, forgedFile)).exists()).toBe(false);
-	});
-
-	it("cannot duplicate a genuine host using a forged token and does not prune its live endpoint", async () => {
-		const dir = await tempDir();
-		const f = makeFixture({ sessionId: "genuine" });
-		const pub = await publish(dir, f);
-		await writeMetadata(dir, "forged.json", {
-			version: COLLAB_REGISTRY_VERSION,
-			pid: process.pid,
-			endpoint: pub.endpoint,
-			createdAt: Date.now(),
-			token: crypto.randomBytes(16).toString("hex"),
-		});
-
-		expect((await listCollabHosts({ dir })).map(host => host.instanceId)).toEqual([f.snapshot.instanceId]);
-		expect(await Bun.file(path.join(dir, "forged.json")).exists()).toBe(true);
-		expect(await resolveCollabHostLink(f.snapshot.instanceId, "control", { dir })).toMatchObject({
-			url: f.controlUrl,
-		});
-	});
-
-	it.skipIf(process.platform === "win32")("creates an owner-only directory, metadata file, and socket", async () => {
-		const dir = path.join(await tempDir(), "r");
 		const f = makeFixture();
-		const pub = await publish(dir, f);
+		const host = newHost(dir, f.snapshot.instanceId);
+		openPublications.push(await publishCollabHost(sourceFor(f), { host }));
+		await expect(publishCollabHost(sourceFor(f), { host })).rejects.toThrow(/collab/);
 
-		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
-		const [metaName] = (await fs.readdir(dir)).filter(n => n.endsWith(".json"));
-		expect((await fs.stat(path.join(dir, metaName ?? ""))).mode & 0o777).toBe(0o600);
-		expect((await fs.stat(pub.endpoint)).mode & 0o777).toBe(0o600);
+		const closed = newHost(dir);
+		await closed.close();
+		await expect(publishCollabHost(sourceFor(makeFixture()), { host: closed })).rejects.toThrow();
 	});
 
-	it.skipIf(process.platform === "win32")("tightens a pre-existing 0755 registry directory to 0700", async () => {
-		const dir = await tempDir();
-		await fs.chmod(dir, 0o755);
-		await publish(dir, makeFixture());
+	it("lists nothing for a missing directory and rejects a symlinked one with a non-link code", async () => {
+		const base = await tempDir();
+		expect(await listCollabHosts({ dir: path.join(base, "absent") })).toEqual([]);
 
-		expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
-	});
-
-	it("refuses a symlinked registry directory instead of listing or pruning through it", async () => {
-		// A planted symlink must not turn listing (which prunes malformed
-		// `*.json`) into a way to delete files in an unrelated directory.
 		const target = await tempDir();
 		const bystander = path.join(target, "important.json");
 		await Bun.write(bystander, "{not registry metadata");
-		const link = path.join(await tempDir(), "collab-hosts");
+		const link = path.join(base, "instances");
 		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
-		const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		if (!descriptor) throw new Error("Missing process.platform descriptor");
-		try {
-			// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
-			for (const platform of new Set([process.platform, "win32"])) {
-				Object.defineProperty(process, "platform", { configurable: true, value: platform });
-				await expect(listCollabHosts({ dir: link })).rejects.toThrow();
-				expect(await Bun.file(bystander).text()).toBe("{not registry metadata");
-				await expect(publishCollabHost(sourceFor(makeFixture()), { dir: link })).rejects.toThrow(/symlink/);
-				expect(await fs.readdir(target)).toEqual(["important.json"]);
-			}
-		} finally {
-			Object.defineProperty(process, "platform", descriptor);
-		}
+
+		const listed = await listCollabHosts({ dir: link }).catch(e => e);
+		expect(listed).toMatchObject({ code: "registry_dir" });
+		expect(listed).not.toBeInstanceOf(CollabLinkError);
+		const resolved = await resolveCollabHostLink("anything", "view", { dir: link }).catch(e => e);
+		expect(resolved).toMatchObject({ code: "registry_dir" });
+		expect(resolved).not.toBeInstanceOf(CollabLinkError);
+		await expect(publishCollabHost(sourceFor(makeFixture()), { host: newHost(link) })).rejects.toThrow(/symlink/);
+		expect(await fs.readdir(target)).toEqual(["important.json"]);
 	});
-
-	it.skipIf(process.platform === "win32")(
-		"publishes, lists, and links a host whose canonical socket path overflows sun_path",
-		async () => {
-			// A deep config root pushes `<dir>/<entryId>.sock` past the 104/108
-			// byte socket path limit; the endpoint relocates natively, and listers
-			// must find it through the endpoint recorded in the metadata.
-			const base = await tempDir();
-			const dir = path.join(base, "n".repeat(60), "m".repeat(60), "collab-hosts");
-			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-			const f = makeFixture({ instanceId: "deep-config-root" });
-			const pub = await publish(dir, f);
-
-			const [metaName] = (await fs.readdir(dir)).filter(n => n.endsWith(".json"));
-			expect(pub.endpoint).toBe(ipcEndpoint(dir, path.basename(metaName ?? "", ".json")));
-			expect(pub.endpoint.startsWith(dir + path.sep)).toBe(false);
-			expect((await fs.stat(pub.endpoint)).mode & 0o777).toBe(0o600);
-			expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: "deep-config-root" }]);
-			expect(await resolveCollabHostLink("deep-config-root", "control", { dir })).toMatchObject({
-				url: f.controlUrl,
-			});
-
-			await pub.close();
-			await expect(fs.stat(pub.endpoint)).rejects.toMatchObject({ code: "ENOENT" });
-			await expect(fs.stat(`${pub.endpoint}.bind.lock`)).rejects.toMatchObject({ code: "ENOENT" });
-			expect(await listCollabHosts({ dir })).toEqual([]);
-		},
-	);
 });
