@@ -18,19 +18,24 @@ use windows_sys::{
 	Win32::{
 		Foundation::{ERROR_SUCCESS, HANDLE, LocalFree},
 		Security::{
-			ACL,
+			ACCESS_ALLOWED_ACE, ACL,
 			Authorization::{
 				ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-				SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+				GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 			},
-			DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
-			GetTokenInformation, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-			PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+			DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
+			GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation,
+			OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+			PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 		},
 		System::Threading::{GetCurrentProcess, OpenProcessToken},
 	},
 	core::PWSTR,
 };
+
+/// `ACCESS_ALLOWED_ACE_TYPE` (in `System_SystemServices`, a feature this crate
+/// does not otherwise need).
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 /// The `TOKEN_USER` of a process token, in pointer-aligned storage.
 pub struct ProcessUser(Vec<u64>);
@@ -227,6 +232,74 @@ pub fn restrict_dir_to_current_user(dir: &Path) -> io::Result<()> {
 	}
 }
 
+/// Whether `dir` already looks the way [`restrict_dir_to_current_user`]
+/// leaves it.
+///
+/// That is: owned by the current user, with a protected DACL holding one
+/// allow ACE for the current user. Check-only (for listers that must not
+/// rewrite security on every call); a link or non-directory is refused with
+/// `InvalidInput`.
+pub fn verify_dir_restricted(dir: &Path) -> io::Result<bool> {
+	let file_type = fs::symlink_metadata(dir)?.file_type();
+	if file_type.is_symlink() || !file_type.is_dir() {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!("{} is not a real directory", dir.display()),
+		));
+	}
+	let path: Vec<u16> = dir.as_os_str().encode_wide().chain(iter::once(0)).collect();
+	let mut owner: PSID = ptr::null_mut();
+	let mut dacl: *mut ACL = ptr::null_mut();
+	let mut raw: PSECURITY_DESCRIPTOR = ptr::null_mut();
+	// SAFETY: `path` is NUL-terminated; outputs are valid pointers; `owner`
+	// and `dacl` point into `raw`, which `Descriptor` frees on drop.
+	let status = unsafe {
+		GetNamedSecurityInfoW(
+			path.as_ptr(),
+			SE_FILE_OBJECT,
+			OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+			&raw mut owner,
+			ptr::null_mut(),
+			&raw mut dacl,
+			ptr::null_mut(),
+			&raw mut raw,
+		)
+	};
+	if status != ERROR_SUCCESS {
+		return Err(io::Error::from_raw_os_error(status as i32));
+	}
+	let descriptor = Descriptor(raw);
+	let me = current_user()?;
+	// SAFETY: both SIDs are live (`descriptor`, `me`).
+	if owner.is_null() || unsafe { EqualSid(owner, me.sid()) } == 0 {
+		return Ok(false);
+	}
+	let (mut control, mut revision) = (0u16, 0u32);
+	// SAFETY: `descriptor.0` is a valid descriptor; outputs are valid.
+	if unsafe { GetSecurityDescriptorControl(descriptor.0, &raw mut control, &raw mut revision) }
+		== 0
+	{
+		return Err(io::Error::last_os_error());
+	}
+	// SAFETY: a non-null `dacl` points into `descriptor`.
+	if control & SE_DACL_PROTECTED == 0 || dacl.is_null() || unsafe { (*dacl).AceCount } != 1 {
+		return Ok(false);
+	}
+	let mut ace: *mut std::ffi::c_void = ptr::null_mut();
+	// SAFETY: index 0 exists; `ace` is a valid out pointer.
+	if unsafe { GetAce(dacl, 0, &raw mut ace) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+	// SAFETY: `ace` points at ACE 0 inside `descriptor`; its type is checked
+	// before the allowed-ACE layout is relied on for the SID.
+	let granted_to_me = unsafe {
+		(*ace).Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+			&& EqualSid((&raw mut (*ace).SidStart).cast(), me.sid()) != 0
+	};
+	Ok(granted_to_me)
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{ffi::c_void, fs, io, iter, os::windows::ffi::OsStrExt, process::Command, ptr};
@@ -241,13 +314,24 @@ mod tests {
 		},
 	};
 
-	use super::{Descriptor, current_user, restrict_dir_to_current_user};
+	use super::{
+		ACCESS_ALLOWED_ACE_TYPE, Descriptor, current_user, restrict_dir_to_current_user,
+		verify_dir_restricted,
+	};
 
 	/// `FILE_ALL_ACCESS`, the `FA` right the SDDL grants.
 	const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
-	/// `ACCESS_ALLOWED_ACE_TYPE` (in `System_SystemServices`, a feature this
-	/// crate does not otherwise need).
-	const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+	#[test]
+	fn verify_accepts_only_a_restricted_directory() {
+		let dir = tempfile::tempdir().unwrap();
+		assert!(!verify_dir_restricted(dir.path()).unwrap(), "inherited ACL is not restricted");
+		restrict_dir_to_current_user(dir.path()).unwrap();
+		assert!(verify_dir_restricted(dir.path()).unwrap());
+		let file = dir.path().join("file");
+		fs::write(&file, b"").unwrap();
+		assert_eq!(verify_dir_restricted(&file).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+	}
 
 	#[test]
 	fn restricts_a_plain_directory() {

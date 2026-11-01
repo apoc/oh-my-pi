@@ -190,10 +190,9 @@ fn verify_server_user(pipe: HANDLE, endpoint: &str) -> Result<(), IpcError> {
 	let ours = current_user().map_err(|error| IpcError::io(&error, "read own token"))?;
 	// SAFETY: both SIDs point into live token buffers.
 	if unsafe { EqualSid(server.sid(), ours.sid()) } == 0 {
-		return Err(IpcError::new(
-			"EACCES",
-			format!("{endpoint} is served by a process of another user"),
-		));
+		return Err(IpcError::foreign_peer(format!(
+			"{endpoint} is served by a process of another user"
+		)));
 	}
 	Ok(())
 }
