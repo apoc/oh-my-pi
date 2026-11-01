@@ -6,13 +6,14 @@
  * - `mesh://<peer>/threads` - threads this instance asked that peer
  * - `mesh://<peer>/threads/<id>` - one thread's question/answer transcript
  *
- * `<peer>` resolves like `mesh_send`'s `to`. Thread views are fetched from the peer, which only
+ * `<peer>` resolves like `mesh_send`'s `to`, but only to a peer with a snapshot (never an unlisted
+ * id). Thread views are fetched from the peer, which only
  * shows threads this instance asked. Only the top-level session the mesh serves can read `mesh://`.
  */
 import { isRecord, toError } from "@oh-my-pi/pi-utils";
 import { meshDisplayText } from "@oh-my-pi/pi-tui/overlays/mesh-display";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { MeshPeerView } from "../mesh/engine";
+import { MeshEngineError, type MeshPeerView } from "../mesh/engine";
 import {
 	formatMeshEndpoint,
 	formatMeshPeerList,
@@ -162,7 +163,8 @@ export class MeshProtocolHandler implements ProtocolHandler {
 				signal: context?.signal,
 			});
 		} catch (error) {
-			throw new ToolError(`${meshPeerLabel(peer)} unreachable: ${meshPeerText(toError(error).message)}`);
+			const reason = error instanceof MeshEngineError ? error.code : "unreachable";
+			throw new ToolError(`${meshPeerLabel(peer)} ${reason}: ${meshPeerText(toError(error).message)}`);
 		}
 		if (!response.ok) {
 			throw new ToolError(`${meshPeerLabel(peer)} refused: ${response.code}: ${meshPeerText(response.message)}`);

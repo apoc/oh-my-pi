@@ -36,11 +36,12 @@ export const MESH_SEND_MAX_TIMEOUT_SEC = 1800;
 
 /**
  * A refused send: by the peer (its {@link MeshErrorCode}; peer text), or `blocked` here: this
- * instance drops everything a blocked peer sends, so nothing but a note goes to it.
+ * instance refuses everything a blocked peer sends, so nothing but a note goes to it.
  */
 export type MeshRefusal = { ok: false; code: MeshErrorCode | "blocked"; message: string };
 
-export type MeshSendResult = { ok: true; msgId: string; thread?: string } | MeshRefusal;
+/** `pending: "approval"`: the peer acknowledged, but its user must still approve the message. */
+export type MeshSendResult = { ok: true; msgId: string; thread?: string; pending?: "approval" } | MeshRefusal;
 
 export type MeshWatchSendResult = { ok: true; watchId: string } | MeshRefusal;
 
@@ -146,9 +147,14 @@ export class MeshOutbound {
 				? await this.#request(args.to, args.fromAgentId, body, args)
 				: await this.#tracked(args.to, args.fromAgentId, body, args);
 		if (!response.ok) return response;
-		// The engine validated the acknowledgement (`msgId`, `thread`).
-		const { msgId, thread } = response.data as MeshMessageResult;
-		return { ok: true, msgId, ...(thread !== undefined ? { thread } : {}) };
+		// The engine validated the acknowledgement (`msgId`, `thread`); `pending` is the peer's word.
+		const { msgId, thread, pending } = response.data as MeshMessageResult;
+		return {
+			ok: true,
+			msgId,
+			...(thread !== undefined ? { thread } : {}),
+			...(pending === "approval" ? { pending } : {}),
+		};
 	}
 
 	/** Register a one-shot watch on the peer; its event routes like a reply, keyed by `watchId`. */
@@ -238,7 +244,7 @@ export class MeshOutbound {
 		body: MeshRequest,
 		options: { timeoutMs?: number; signal?: AbortSignal; ticket?: string; hold?: boolean },
 	): Promise<MeshOutboundResponse> {
-		// The engine drops everything a blocked peer sends, answers and watch events included.
+		// The engine refuses everything a blocked peer sends, answers and watch events included.
 		if (to.blocked && (body.op !== "message" || body.kind !== "note")) {
 			return { ok: false, code: "blocked", message: "it cannot answer. Unblock it in /mesh first." };
 		}

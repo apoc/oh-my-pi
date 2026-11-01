@@ -25,7 +25,7 @@
 
 ## Outputs
 
-Single text result. Hidden peers and peers without a snapshot (unverified or transient, e.g. the short-lived node of `omp mesh list`) are omitted. Each peer block lists: instance id, display name, state (`online`/`stale`, `busy`/`idle`, `blocked`), session name, endpoint (`local` or `remote <ip> · <dns name|hostname>`), last seen, cwd, branch, model, agent count and work summary. Peer-supplied text, error and acknowledgement text included, has Unicode bidi controls (U+061C, U+200E/200F, U+202A–202E, U+2066–2069) removed and harness tags escaped (`src/mesh/text.ts`); `mesh://` completion labels get the same bidi stripping.
+Single text result. Hidden peers and peers without a snapshot (unverified or transient, e.g. the short-lived node of `omp mesh list`) are omitted. Each peer block lists: instance id, display name, state (`online`/`stale`, `busy`/`idle`, `blocked`), session name, endpoint (`local` or `remote <ip>:<port> · <dns name|hostname>`, IPv6 addresses bracketed), last seen, cwd, branch, model, agent count and work summary. Peer-supplied text, error and acknowledgement text included, has Unicode bidi controls (U+061C, U+200E/200F, U+202A–202E, U+2066–2069) removed and harness tags escaped (`src/mesh/text.ts`); `mesh://` completion labels get the same bidi stripping.
 
 With `query`, the first 32 peers are judged through the `judge` role chain (`resolveJudge`, purpose `mesh_peers`): a yes/no relevance question per peer gives the score, a choice question names the connecting field (`summary`, `repo`, `cwd`, `session`, `agents`, `none`) quoted as the reason. Peers are returned best first. A judge failure returns the unranked list prefixed with `Relevance ranking unavailable (<reason>)`.
 

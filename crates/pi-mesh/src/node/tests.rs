@@ -31,12 +31,18 @@ const C: &str = "ccccccccccccccc3";
 
 #[derive(Default)]
 struct FakeMdns {
-	starts: Mutex<Vec<MdnsConfig>>,
-	stops:  Arc<AtomicUsize>,
-	tx:     Mutex<Option<mpsc::Sender<DiscoveryEvent>>>,
+	starts:    Mutex<Vec<MdnsConfig>>,
+	stops:     Arc<AtomicUsize>,
+	tx:        Mutex<Option<mpsc::Sender<DiscoveryEvent>>>,
+	/// Peers a stopping discovery reports down, like the real one.
+	announced: Arc<Mutex<Vec<String>>>,
 }
 
-struct FakeHandle(Arc<AtomicUsize>);
+struct FakeHandle {
+	stops:     Arc<AtomicUsize>,
+	events:    mpsc::Sender<DiscoveryEvent>,
+	announced: Arc<Mutex<Vec<String>>>,
+}
 
 impl MdnsHandle for FakeHandle {
 	fn refresh(&self) {}
@@ -46,20 +52,30 @@ impl MdnsHandle for FakeHandle {
 	}
 
 	fn stop(&self) -> BoxFuture<()> {
-		self.0.fetch_add(1, Ordering::SeqCst);
-		Box::pin(async {})
+		self.stops.fetch_add(1, Ordering::SeqCst);
+		for id in self.announced.lock().iter() {
+			let _ = self
+				.events
+				.try_send(DiscoveryEvent::PeerDown { instance_id: id.clone() });
+		}
+		// Let the still-running event loop handle them before it is aborted.
+		Box::pin(async {
+			for _ in 0..3 {
+				tokio::task::yield_now().await;
+			}
+		})
 	}
 }
 
 impl FakeMdns {
-	fn start(
-		&self,
-		cfg: MdnsConfig,
-		events: mpsc::Sender<DiscoveryEvent>,
-	) -> Result<Arc<dyn MdnsHandle>, String> {
+	fn start(&self, cfg: MdnsConfig, events: mpsc::Sender<DiscoveryEvent>) -> Arc<dyn MdnsHandle> {
 		self.starts.lock().push(cfg);
-		*self.tx.lock() = Some(events);
-		Ok(Arc::new(FakeHandle(Arc::clone(&self.stops))))
+		*self.tx.lock() = Some(events.clone());
+		Arc::new(FakeHandle {
+			stops: Arc::clone(&self.stops),
+			events,
+			announced: Arc::clone(&self.announced),
+		})
 	}
 
 	async fn emit(&self, event: DiscoveryEvent) {
@@ -97,7 +113,7 @@ fn node_on(
 	let (tx, rx) = mpsc::unbounded_channel();
 	let fake = Arc::clone(mdns);
 	let seams = Seams {
-		mdns:             Arc::new(move |cfg, events| fake.start(cfg, events)),
+		mdns:             Arc::new(move |cfg, events| Ok(fake.start(cfg, events))),
 		is_same_machine:  opts.same_machine,
 		rdns:             ReverseDns::with_resolver(ReverseDnsConfig::default(), Arc::new(|_| None)),
 		lan_bind:         IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -824,4 +840,212 @@ async fn malformed_acks_unknown_threads_and_foreign_answers_are_refused() {
 	}
 	b.close().await;
 	c.close().await;
+}
+
+/// B's snapshot, naming it apart from every fallback (id, `unknown`, our own
+/// host name).
+fn bee_snapshot() -> String {
+	let mut snap: Value = serde_json::from_str(&snapshot_json(B)).unwrap();
+	snap["displayName"] = json!("bee");
+	snap["host"] = json!("bee-host");
+	snap.to_string()
+}
+
+/// An error answer the engine made up for `B`, which left before answering
+/// `msg_id`.
+fn assert_left_unanswered(env: &MeshEnvelope, msg_id: &str) {
+	assert_eq!(
+		(env.from.instance_id.as_str(), env.from.display_name.as_str(), env.from.host.as_str()),
+		(B, "bee", "bee-host"),
+		"sender as last known from B's snapshot"
+	);
+	match &env.body {
+		MeshRequest::Reply { reply_to, thread, text, error } => {
+			assert_eq!(
+				(reply_to.as_str(), thread.as_deref(), text.as_str()),
+				(msg_id, Some("t1"), "")
+			);
+			assert!(error.is_some(), "an error answer");
+		},
+		other => panic!("not a reply: {other:?}"),
+	}
+}
+
+fn assert_no_tracking_event(rx: &mut mpsc::UnboundedReceiver<NodeEvent>, why: &str) {
+	while let Ok(event) = rx.try_recv() {
+		assert!(
+			!matches!(event, NodeEvent::Reply { .. } | NodeEvent::PendingDropped { .. }),
+			"{why}"
+		);
+	}
+}
+
+#[tokio::test]
+async fn requests_to_a_peer_that_left_get_an_error_answer_but_a_flap_does_not() {
+	let dir = tempfile::tempdir().unwrap();
+	let ((a, mut rx_a), (b, rx_b)) = local_pair(dir.path()).await;
+	b.set_snapshot(&bee_snapshot()).unwrap();
+	ack_responder(Arc::clone(&b), rx_b);
+	a.refresh();
+	eventually("B's snapshot", || peer(&a, B).is_some_and(|p| p.snapshot_json.is_some())).await;
+	let timeout = Duration::from_secs(5);
+
+	// Answered for real before B leaves: never answered again.
+	let done = a
+		.request(B, "Main", ask("q0", None), timeout, tracked("t-done", false))
+		.await
+		.unwrap();
+	b.request(A, "Main", answer(&msg_id_of(&done), "real"), timeout, None)
+		.await
+		.unwrap();
+	let NodeEvent::Reply { ticket, .. } = next_tracking_event(&mut rx_a).await else {
+		panic!("expected the real answer");
+	};
+	assert_eq!(ticket, "t-done");
+
+	let waited = a
+		.request(B, "Main", ask("q1", None), timeout, tracked("t-wait", false))
+		.await
+		.unwrap();
+	let waited_id = msg_id_of(&waited);
+	let wait = {
+		let a = Arc::clone(&a);
+		let id = waited_id.clone();
+		tokio::spawn(async move { a.await_reply(&id, Duration::from_secs(60)).await })
+	};
+	eventually("waiter registered", || a.state.lock().replies.is_waiting(&waited_id)).await;
+	let late = a
+		.request(B, "Main", ask("q2", None), timeout, tracked("t-late", false))
+		.await
+		.unwrap();
+	let late_id = msg_id_of(&late);
+
+	// A listing that could not check B in time drops it, but B is still
+	// registered: nothing is answered, and B is back on the next listing.
+	{
+		let mut st = a.state.lock();
+		st.table.set_local_listing(&[], now_ms());
+		a.settle_departed(&mut st);
+	}
+	for _ in 0..=SUSPECT_MISSES {
+		a.confirm_suspects(vec![B.to_owned()]).await;
+	}
+	assert!(a.state.lock().replies.is_waiting(&waited_id), "still waiting");
+	assert_no_tracking_event(&mut rx_a, "a flap answers and drops nothing");
+	a.poll_local().await;
+	eventually("B listed again with its snapshot", || {
+		peer(&a, B).is_some_and(|p| p.snapshot_json.is_some())
+	})
+	.await;
+
+	// B is hard-killed: its endpoint is gone, its entry left behind (and
+	// pruned by the next listing).
+	let entry_path = dir.path().join(format!("{B}.json"));
+	let bytes = std::fs::read(&entry_path).unwrap();
+	b.instances.close().await;
+	std::fs::write(&entry_path, &bytes).unwrap();
+	a.poll_local().await;
+	assert!(peer(&a, B).is_none() && !entry_path.exists());
+	assert!(a.state.lock().replies.is_waiting(&waited_id), "one missing check is not enough");
+	assert_no_tracking_event(&mut rx_a, "not answered after one check");
+	a.poll_local().await;
+	assert!(a.state.lock().replies.is_waiting(&waited_id), "back-to-back polls are not enough");
+	assert_no_tracking_event(&mut rx_a, "not answered before a poll interval passed");
+	// Pretend the first miss was a poll interval plus a probe timeout ago.
+	{
+		let mut st = a.state.lock();
+		let suspect = st.suspects.get_mut(B).expect("B is a suspect");
+		let first = suspect.first_miss.expect("missed once");
+		let earlier = first
+			.checked_sub(a.seams.local_poll + LOCAL_PROBE_TIMEOUT)
+			.expect("clock far enough from its origin");
+		suspect.first_miss = Some(earlier);
+	}
+	a.poll_local().await;
+
+	let got = tokio::time::timeout(Duration::from_secs(5), wait)
+		.await
+		.expect("answered long before the wait's timeout")
+		.unwrap()
+		.expect("an answer");
+	assert_left_unanswered(&got, &waited_id);
+	let mut dropped = Vec::new();
+	let mut replies = Vec::new();
+	while dropped.len() < 2 || replies.is_empty() {
+		match next_tracking_event(&mut rx_a).await {
+			NodeEvent::Reply { ticket, envelope } => replies.push((ticket, envelope)),
+			NodeEvent::PendingDropped { tickets } => dropped.extend(tickets),
+			other => panic!("unexpected {other:?}"),
+		}
+	}
+	assert_eq!(replies.len(), 1, "only the unanswered, unawaited request goes out late");
+	assert_eq!(replies[0].0, "t-late");
+	assert_left_unanswered(&replies[0].1, &late_id);
+	dropped.sort();
+	assert_eq!(dropped, ["t-late", "t-wait"]);
+	assert_eq!(a.state.lock().replies.len(), 1, "the answered request stays until its TTL");
+	assert_no_tracking_event(&mut rx_a, "the answered request gets nothing more");
+	a.close().await;
+	b.close().await;
+}
+
+#[tokio::test]
+async fn mdns_removals_never_answer_for_a_lan_peer() {
+	let dir_a = tempfile::tempdir().unwrap();
+	let dir_b = tempfile::tempdir().unwrap();
+	let mdns = Arc::new(FakeMdns::default());
+	let lan_only = Opts { same_machine: |_| false, ..Opts::default() };
+	let (a, mut rx_a) = node(A, dir_a.path(), &mdns, lan_only);
+	let (b, rx_b) = node(B, dir_b.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	b.set_snapshot(&bee_snapshot()).unwrap();
+	let pb = b
+		.configure(cfg(MeshMode::Remote, Some(key()), vec![], "b"))
+		.await
+		.lan_port
+		.unwrap();
+	a.configure(cfg(MeshMode::Remote, Some(key()), vec![], "a"))
+		.await;
+	mdns.announced.lock().push(B.into());
+	mdns.emit(mdns_peer(B, "127.0.0.1", pb)).await;
+	eventually("verified mDNS peer", || peer(&a, B).is_some_and(|p| p.source == PeerSource::Mdns))
+		.await;
+	ack_responder(Arc::clone(&b), rx_b);
+	let timeout = Duration::from_secs(5);
+	let sent = a
+		.request(B, "Main", ask("q", None), timeout, tracked("t-q", false))
+		.await
+		.unwrap();
+	let id = msg_id_of(&sent);
+	let wait = {
+		let a = Arc::clone(&a);
+		let id = id.clone();
+		tokio::spawn(async move { a.await_reply(&id, Duration::from_secs(60)).await })
+	};
+	eventually("waiter registered", || a.state.lock().replies.is_waiting(&id)).await;
+
+	// The running discovery reports B down (a TTL expiry looks the same)
+	// while B is in the table only through mDNS: it leaves the table.
+	mdns
+		.emit(DiscoveryEvent::PeerDown { instance_id: B.into() })
+		.await;
+	eventually("B gone from the table", || peer(&a, B).is_none()).await;
+	assert_no_tracking_event(&mut rx_a, "an mDNS removal answers and drops nothing");
+
+	// B is announced again, then our discovery restarts (new display name)
+	// and the stopped one reports B down.
+	mdns.emit(mdns_peer(B, "127.0.0.1", pb)).await;
+	eventually("B verified again", || peer(&a, B).is_some_and(|p| p.source == PeerSource::Mdns))
+		.await;
+	a.configure(cfg(MeshMode::Remote, Some(key()), vec![], "a2"))
+		.await;
+	assert_eq!(mdns.stops.load(Ordering::SeqCst), 1);
+	assert!(peer(&a, B).is_none());
+	a.refresh();
+	tokio::time::sleep(Duration::from_millis(300)).await;
+	assert!(a.state.lock().replies.is_waiting(&id), "still waiting for B");
+	assert!(!wait.is_finished());
+	assert_no_tracking_event(&mut rx_a, "an mDNS removal answers and drops nothing");
+	wait.abort();
+	a.close().await;
+	b.close().await;
 }

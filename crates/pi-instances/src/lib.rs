@@ -55,7 +55,7 @@ pub use self::{
 		Handler, HandlerReply, HostError, InstanceHost, RESERVED_CODES, Registration, RequestCtx,
 		with_deadline,
 	},
-	list::{ProbeRequest, list, list_alive, remove_entry_if},
+	list::{ProbeRequest, is_registered, list, list_alive, remove_entry_if},
 };
 
 /// Entry file and wire protocol version.

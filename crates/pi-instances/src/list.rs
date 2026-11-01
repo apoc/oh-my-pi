@@ -121,6 +121,22 @@ pub fn remove_entry_if(
 	prune_if_unchanged(dir, instance_id, token, created_at, false)
 }
 
+/// Whether `instance_id` still has an entry serving `capability`.
+///
+/// A listing omits live entries it could not check in time (skipped, never
+/// pruned), while a dead one is pruned before the listing returns. Blocking.
+/// A read error other than a missing file counts as still registered.
+pub fn is_registered(dir: &Path, instance_id: &str, capability: &str) -> bool {
+	if !is_instance_id(instance_id) {
+		return false;
+	}
+	match std::fs::read(entry_path(dir, instance_id)) {
+		Ok(bytes) => serde_json::from_slice::<InstanceEntry>(&bytes)
+			.is_ok_and(|entry| entry.capabilities.iter().any(|ns| ns == capability)),
+		Err(error) => error.kind() != io::ErrorKind::NotFound,
+	}
+}
+
 /// What checking one entry showed.
 #[derive(Debug)]
 pub(crate) enum Verdict {

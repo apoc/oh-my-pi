@@ -7,7 +7,9 @@
 //! routes answers from that peer to a waiter ([`Replies::await_start`]), to a
 //! held slot for a waiter about to start, or out as a [`Late`] event carrying
 //! the ticket. Message entries keep routing until they expire; watch entries
-//! end with their one event.
+//! end with their one event. When the peer leaves the mesh
+//! ([`Replies::peer_left`]), its messages end with an error answer made up in
+//! its place and its watches are dropped.
 //!
 //! An answer may overtake the acknowledgement of its own request. It is kept
 //! briefly as an early answer, but only while a tracked request it can answer
@@ -98,8 +100,14 @@ struct Entry {
 	held:       bool,
 	stored:     Option<Answer>,
 	waiter:     Option<(u64, oneshot::Sender<Answer>)>,
-	/// A watch whose event is stored: no further answers.
+	/// A watch whose event is stored, or a message answered for a peer that
+	/// left: no further answers.
 	done:       bool,
+	/// A message that got an answer (any route): its peer leaving later is
+	/// not reported as a missing answer.
+	answered:   bool,
+	/// Thread the peer said it answers on (message acknowledgement).
+	thread:     Option<String>,
 }
 
 impl Entry {
@@ -140,8 +148,9 @@ pub struct Replies {
 	inflight_msgs:    HashSet<(String, String)>,
 	/// Peer -> tracked watch requests in flight.
 	inflight_watches: HashMap<String, usize>,
-	/// Waits that received a watch's event; their end reports the watch dropped.
-	consumed_watches: HashSet<u64>,
+	/// Waits handed the answer that ended their entry (a watch's event, a
+	/// departed peer's made-up answer); their end reports the entry dropped.
+	consumed_waits:   HashSet<u64>,
 	next_seq:         u64,
 }
 
@@ -186,16 +195,18 @@ impl Replies {
 		}
 	}
 
-	/// Tracks the request acknowledged with `key`. Prunes expired entries and
-	/// evicts the oldest at the cap first; an early answer waiting for `key`
-	/// is claimed. Refuses (`Err`) a key another peer's entry holds; the
-	/// effects of the prune are returned either way.
+	/// Tracks the request acknowledged with `key` (a message's ack may name
+	/// the `thread` it is answered on). Prunes expired entries and evicts the
+	/// oldest at the cap first; an early answer waiting for `key` is claimed.
+	/// Refuses (`Err`) a key another peer's entry holds; the effects of the
+	/// prune are returned either way.
 	#[allow(clippy::too_many_arguments, reason = "one entry's fields")]
 	pub fn register(
 		&mut self,
 		key: String,
 		op: ReplyOp,
 		peer: String,
+		thread: Option<String>,
 		ticket: String,
 		hold: bool,
 		ttl: Duration,
@@ -231,6 +242,8 @@ impl Replies {
 			stored: None,
 			waiter: None,
 			done: false,
+			answered: false,
+			thread,
 		};
 		let claim = self
 			.early
@@ -243,7 +256,7 @@ impl Replies {
 			fx.dropped.push(previous.ticket);
 		}
 		if let Some(answer) = claim {
-			self.dispatch(&key, answer, &mut fx);
+			self.dispatch(&key, answer, false, &mut fx);
 		}
 		(fx, Ok(()))
 	}
@@ -267,7 +280,7 @@ impl Replies {
 			if !entry.accepts(op, from) {
 				return (no_pending(&key), fx);
 			}
-			self.dispatch(&key, Box::new(env), &mut fx);
+			self.dispatch(&key, Box::new(env), false, &mut fx);
 			return (accepted(), fx);
 		}
 		// The answer may overtake the acknowledgement of its own request.
@@ -300,22 +313,24 @@ impl Replies {
 		(accepted(), fx)
 	}
 
-	/// Waiter, else held slot, else a late event. A watch ends with its event;
-	/// when a waiter took it, the watch's drop is reported by that wait's
-	/// [`Self::end_wait`], after anything the wait still emits.
-	fn dispatch(&mut self, key: &str, answer: Answer, fx: &mut Effects) {
+	/// Waiter, else held slot, else a late event. A watch ends with its event,
+	/// any entry with `end`; when a waiter took the answer, the drop is
+	/// reported by that wait's [`Self::end_wait`], after anything the wait
+	/// still emits.
+	fn dispatch(&mut self, key: &str, answer: Answer, end: bool, fx: &mut Effects) {
 		let Some(entry) = self.pending.get_mut(key) else {
 			return;
 		};
-		let watch = entry.op == ReplyOp::WatchEvent;
+		let ends = end || entry.op == ReplyOp::WatchEvent;
+		entry.answered |= entry.op == ReplyOp::Reply;
 		let undelivered = match entry.waiter.take() {
 			Some((wait, tx)) => {
 				entry.held = false;
 				match tx.send(answer) {
 					Ok(()) => {
-						if watch {
+						if ends {
 							self.pending.remove(key);
-							self.consumed_watches.insert(wait);
+							self.consumed_waits.insert(wait);
 						}
 						return;
 					},
@@ -327,12 +342,12 @@ impl Replies {
 		};
 		if entry.held && entry.stored.is_none() {
 			entry.stored = Some(undelivered);
-			// A stored watch event ends the watch once the wait takes it.
-			entry.done = watch;
+			// A stored ending answer ends the entry once the wait takes it.
+			entry.done = ends;
 			return;
 		}
 		fx.late = Some(Late { ticket: entry.ticket.clone(), answer: undelivered });
-		if watch && let Some(ended) = self.pending.remove(key) {
+		if ends && let Some(ended) = self.pending.remove(key) {
 			fx.dropped.push(ended.ticket);
 		}
 	}
@@ -362,7 +377,7 @@ impl Replies {
 	/// Ends wait `id` (always, after it received or gave up). A wait that gave
 	/// up before an answer reached it leaves later answers to go out late; an
 	/// answer handed to it that it never received goes out late instead of
-	/// being lost; and a watch it consumed is reported dropped last.
+	/// being lost; and an entry it ended is reported dropped last.
 	pub fn end_wait(
 		&mut self,
 		key: &str,
@@ -383,7 +398,7 @@ impl Replies {
 			.try_recv()
 			.ok()
 			.map(|answer| Late { ticket: ticket.to_owned(), answer });
-		if self.consumed_watches.remove(&id) {
+		if self.consumed_waits.remove(&id) {
 			fx.dropped.push(ticket.to_owned());
 		}
 		fx
@@ -397,12 +412,60 @@ impl Replies {
 			.retain(|_, e| !tickets.contains(e.ticket.as_str()));
 	}
 
+	/// Whether anything sent to `peer` still waits for its answer (expired
+	/// entries nobody waits on do not).
+	pub fn tracks(&self, peer: &str, now: Instant) -> bool {
+		self
+			.pending
+			.values()
+			.any(|e| !e.done && !e.answered && e.peer == peer && (e.expires_at >= now || e.waiting()))
+	}
+
+	/// `peer` left the mesh: every message to it still unanswered is
+	/// answered with `answer(msgId, thread)` through the usual routes (waiter,
+	/// held slot, late event) and ends; its watches are dropped. Messages it
+	/// already answered are left alone; expired entries nobody waits on are
+	/// dropped unanswered, as pruning would. One [`Effects`] per entry, oldest
+	/// first.
+	pub fn peer_left(
+		&mut self,
+		peer: &str,
+		now: Instant,
+		mut answer: impl FnMut(&str, Option<&str>) -> Answer,
+	) -> Vec<Effects> {
+		let mut keys: Vec<(u64, String)> = self
+			.pending
+			.iter()
+			.filter(|(_, e)| e.peer == peer && !e.done && !e.answered)
+			.map(|(key, e)| (e.seq, key.clone()))
+			.collect();
+		keys.sort_unstable();
+		let mut out = Vec::with_capacity(keys.len());
+		for (_, key) in keys {
+			let mut fx = Effects::default();
+			let Some(entry) = self.pending.get(&key) else {
+				continue;
+			};
+			let expired = entry.expires_at < now && !entry.waiting();
+			if entry.op == ReplyOp::Reply && !expired {
+				let reply = answer(&key, entry.thread.as_deref());
+				self.dispatch(&key, reply, true, &mut fx);
+			} else if let Some(ended) = self.pending.remove(&key) {
+				// Dropping the entry drops its waiter's sender: the wait ends
+				// empty.
+				fx.dropped.push(ended.ticket);
+			}
+			out.push(fx);
+		}
+		out
+	}
+
 	/// Drops everything; returns the tickets of the dropped entries.
 	pub fn clear(&mut self) -> Vec<String> {
 		self.early.clear();
 		self.inflight_msgs.clear();
 		self.inflight_watches.clear();
-		self.consumed_watches.clear();
+		self.consumed_waits.clear();
 		self.pending.drain().map(|(_, e)| e.ticket).collect()
 	}
 
@@ -470,8 +533,16 @@ mod tests {
 	}
 
 	fn track(r: &mut Replies, key: &str, ticket: &str, hold: bool, now: Instant) -> Effects {
-		let (fx, registered) =
-			r.register(key.into(), ReplyOp::Reply, PEER.into(), ticket.into(), hold, PENDING_TTL, now);
+		let (fx, registered) = r.register(
+			key.into(),
+			ReplyOp::Reply,
+			PEER.into(),
+			Some(format!("th-{key}")),
+			ticket.into(),
+			hold,
+			PENDING_TTL,
+			now,
+		);
 		registered.unwrap();
 		fx
 	}
@@ -481,6 +552,7 @@ mod tests {
 			key.into(),
 			ReplyOp::WatchEvent,
 			PEER.into(),
+			None,
 			ticket.into(),
 			hold,
 			Duration::from_secs(60),
@@ -533,6 +605,94 @@ mod tests {
 			assert_eq!((late.ticket.as_str(), text(&late.answer)), ("t-1", text_in));
 		}
 		assert_eq!(r.len(), 1);
+	}
+
+	#[test]
+	fn peer_left_answers_unanswered_messages_and_drops_watches() {
+		let now = Instant::now();
+		let mut r = Replies::default();
+		track(&mut r, "m1", "t-1", false, now);
+		track(&mut r, "m2", "t-2", false, now);
+		track(&mut r, "m3", "t-3", true, now);
+		track(&mut r, "m4", "t-4", false, now);
+		track(&mut r, "m5", "t-5", false, now);
+		track_watch(&mut r, "w1", "t-w", false, now);
+		let (id, ticket, mut rx) = wait(&mut r, "m2");
+		// m4 got its real answer (late), m5's waiter got its real answer.
+		assert!(r.deliver(reply(PEER, "m4", "real"), now).1.late.is_some());
+		let (id5, ticket5, mut rx5) = wait(&mut r, "m5");
+		r.deliver(reply(PEER, "m5", "real"), now);
+		assert_eq!(text(&rx5.try_recv().unwrap()), "real");
+		assert!(r.end_wait("m5", id5, &ticket5, &mut rx5).late.is_none());
+		assert!(r.tracks(PEER, now) && !r.tracks(OTHER, now));
+
+		let mut asked = Vec::new();
+		let fxs = r.peer_left(PEER, now, |key, thread| {
+			asked.push((key.to_owned(), thread.map(str::to_owned)));
+			let mut gone = reply(PEER, key, "");
+			gone.body = MeshRequest::Reply {
+				reply_to: key.into(),
+				thread:   thread.map(str::to_owned),
+				text:     String::new(),
+				error:    Some("gone".into()),
+			};
+			Box::new(gone)
+		});
+		asked.sort();
+		assert_eq!(
+			asked,
+			["m1", "m2", "m3"].map(|k| (k.to_owned(), Some(format!("th-{k}")))),
+			"answered messages get no made-up answer"
+		);
+		let late: Vec<&str> = fxs
+			.iter()
+			.filter_map(|fx| fx.late.as_ref().map(|l| l.ticket.as_str()))
+			.collect();
+		assert_eq!(late, ["t-1"], "only the unawaited, unheld message goes out late");
+		let mut dropped: Vec<&str> = fxs
+			.iter()
+			.flat_map(|fx| &fx.dropped)
+			.map(String::as_str)
+			.collect();
+		dropped.sort_unstable();
+		assert_eq!(dropped, ["t-1", "t-w"], "waited and held ones end with their wait");
+
+		// The wait gave up as the answer reached it: late first, then the drop.
+		let fx = r.end_wait("m2", id, &ticket, &mut rx);
+		let gone = fx.late.expect("handed answer not lost");
+		assert!(
+			matches!(&gone.answer.body, MeshRequest::Reply { error: Some(e), .. } if e == "gone")
+		);
+		assert_eq!(fx.dropped, ["t-2"]);
+		match r.await_start("m3") {
+			AwaitStart::Ready(answer, ended) => {
+				assert_eq!(text(&answer), "");
+				assert_eq!(ended.as_deref(), Some("t-3"));
+			},
+			_ => panic!("held answer expected"),
+		}
+		assert_eq!(r.len(), 2, "answered m4, m5 stay until their TTL");
+		assert!(!r.tracks(PEER, now));
+		assert!(r.peer_left(PEER, now, |_, _| unreachable!()).is_empty());
+	}
+
+	#[test]
+	fn peer_left_drops_expired_messages_unanswered_unless_awaited() {
+		let now = Instant::now();
+		let later = now + PENDING_TTL + Duration::from_secs(1);
+		let mut r = Replies::default();
+		track(&mut r, "m1", "t-1", false, now);
+		assert!(r.tracks(PEER, now) && !r.tracks(PEER, later), "expired: nothing to answer");
+		let fxs = r.peer_left(PEER, later, |_, _| unreachable!());
+		assert_eq!(fxs.len(), 1);
+		assert!(fxs[0].late.is_none());
+		assert_eq!(fxs[0].dropped, ["t-1"], "reported as pruning would");
+
+		track(&mut r, "m2", "t-2", false, now);
+		let (_id, _ticket, mut rx) = wait(&mut r, "m2");
+		assert!(r.tracks(PEER, later), "an active wait keeps it");
+		r.peer_left(PEER, later, |key, _| Box::new(reply(PEER, key, "gone")));
+		assert_eq!(text(&rx.try_recv().unwrap()), "gone");
 	}
 
 	#[test]
@@ -659,6 +819,7 @@ mod tests {
 			"k".into(),
 			ReplyOp::WatchEvent,
 			OTHER.into(),
+			None,
 			"t-2".into(),
 			false,
 			PENDING_TTL,
@@ -786,7 +947,7 @@ mod tests {
 		// Effects emit late first, then drops: the ticket is still known to the
 		// frontend.
 		assert_eq!(fx.dropped, ["t-w1"]);
-		assert!(r.consumed_watches.is_empty());
+		assert!(r.consumed_waits.is_empty());
 	}
 
 	#[test]

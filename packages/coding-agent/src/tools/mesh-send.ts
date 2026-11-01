@@ -11,7 +11,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { MeshEngineError, type MeshIncomingReply } from "../mesh/engine";
 import { MESH_SEND_MAX_TIMEOUT_SEC, type MeshOutbound, type MeshRefusal } from "../mesh/outbound";
-import { meshPeerLabel, resolveMeshPeer } from "../mesh/peers";
+import { resolveMeshSendTarget } from "../mesh/peers";
 import { cfgMeshAutoBackgroundEnabled, cfgMeshAutoBackgroundThresholdMs } from "../mesh/settings";
 import { MAX_TEXT_CHARS, MAX_WATCH_TTL_SEC } from "../mesh/wire";
 import meshSendDescription from "../prompts/tools/mesh-send.md" with { type: "text" };
@@ -127,10 +127,9 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 		if (kind === "reply" && !params.replyTo) throw argumentError(kind, "`replyTo` is required.");
 		if (kind === "watch" && !params.event) throw argumentError(kind, "`event` (idle | turn_end) is required.");
 
-		const resolution = resolveMeshPeer(engine.peers(), params.to);
+		const resolution = resolveMeshSendTarget(engine.peers(), params.to, engine.instanceId);
 		if (!resolution.ok) throw new ToolError(resolution.message);
-		const to = resolution.peer;
-		const label = meshPeerLabel(to);
+		const { target: to, label } = resolution;
 		const fromAgentId = this.#session.getAgentId?.() ?? MAIN_AGENT_ID;
 		const outbound = frontend.outbound;
 		const details: MeshSendDetails = { kind, to: to.instanceId };
@@ -162,10 +161,16 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 					if (!result.ok) throw refused(label, result);
 					details.msgId = result.msgId;
 					const msgId = meshPeerText(result.msgId);
+					if (kind === "note") {
+						return done(
+							`Note accepted by ${label} (msgId ${msgId}); shown to its user, who may decline it.`,
+							details,
+						);
+					}
 					return done(
-						kind === "steer"
-							? `Steer delivered to ${label} (msgId ${msgId}). A reply, if any, arrives later as a message.`
-							: `Note accepted by ${label} (msgId ${msgId}); shown to its user, who may decline it.`,
+						result.pending === "approval"
+							? `Steer to ${label} is waiting for its user's approval (msgId ${msgId}); a denial or reply arrives later as a message.`
+							: `Steer delivered to ${label} (msgId ${msgId}). A reply, if any, arrives later as a message.`,
 						details,
 					);
 				}
@@ -203,7 +208,7 @@ export class MeshSendTool implements AgentTool<typeof meshSendSchema, MeshSendDe
 		} catch (error) {
 			if (error instanceof MeshEngineError) {
 				throwIfAborted(signal);
-				throw new ToolError(`${label} unreachable: ${error.code}: ${meshPeerText(error.message)}`);
+				throw new ToolError(`${label} ${error.code}: ${meshPeerText(error.message)}`);
 			}
 			throw error;
 		}

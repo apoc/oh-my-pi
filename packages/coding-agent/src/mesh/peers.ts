@@ -4,10 +4,16 @@
  */
 import { formatAge, truncate } from "@oh-my-pi/pi-utils";
 import type { MeshEngine, MeshPeerView } from "./engine";
+import type { MeshSendTarget } from "./outbound";
 import { meshPeerText } from "./text";
 import type { MeshSnapshot } from "./wire";
 
 type MeshPeerResolution = { ok: true; peer: MeshPeerView } | { ok: false; message: string };
+
+type MeshSendTargetResolution = { ok: true; target: MeshSendTarget; label: string } | { ok: false; message: string };
+
+/** A well-formed instance id: 16 lowercase letters or digits (`pi_instances::is_instance_id`). */
+const MESH_INSTANCE_ID = /^[a-z0-9]{16}$/;
 
 /** How long a freshly started engine needs before its peer list means "these are all the peers". */
 export const MESH_DISCOVERY_WINDOW_MS = 2500;
@@ -31,12 +37,17 @@ export function meshPeerLabel(peer: MeshPeerView): string {
 	return meshPeerText(name ? `${name} (${peer.instanceId})` : peer.instanceId);
 }
 
-/** `local`, or `remote <ip> · <dns name | hostname>`. */
+/** `local`, or `remote <ip>:<port> · <dns name | hostname>` (IPv6 bracketed; address omitted when unknown). */
 export function formatMeshEndpoint(peer: MeshPeerView): string {
 	const endpoint = peer.endpoint;
 	if (endpoint.kind === "local") return "local";
+	const parts = ["remote"];
+	if (endpoint.address) {
+		const host = endpoint.address.includes(":") ? `[${endpoint.address}]` : endpoint.address;
+		parts.push(endpoint.port ? `${host}:${endpoint.port}` : host);
+	}
 	const name = endpoint.dnsName ?? endpoint.hostname;
-	return name ? `remote ${endpoint.address} · ${name}` : `remote ${endpoint.address}`;
+	return name ? `${parts.join(" ")} · ${name}` : parts.join(" ");
 }
 
 /**
@@ -71,6 +82,28 @@ export function resolveMeshPeer(peers: readonly MeshPeerView[], to: string): Mes
 	}
 	const known = listed.length > 0 ? ` Known peers: ${listed.map(meshPeerLabel).join(", ")}.` : " No peers are known.";
 	return { ok: false, message: `No mesh peer matches "${escaped}".${known}` };
+}
+
+/**
+ * Resolve a send's `to`: like {@link resolveMeshPeer}, except that a well-formed instance id no
+ * listed peer has (a crashed or not yet discovered instance) addresses that instance directly, so
+ * the engine reports it unreachable instead of the send failing to resolve. A known but unverified
+ * peer keeps its block flag. This instance's own id never resolves.
+ */
+export function resolveMeshSendTarget(
+	peers: readonly MeshPeerView[],
+	to: string,
+	ownInstanceId: string,
+): MeshSendTargetResolution {
+	const query = to.trim();
+	if (query === ownInstanceId) return { ok: false, message: `${meshPeerText(query)} is this instance's own id.` };
+	if (MESH_INSTANCE_ID.test(query)) {
+		const known = peers.find(peer => peer.instanceId === query);
+		if (known?.snapshot) return { ok: true, target: known, label: meshPeerLabel(known) };
+		return { ok: true, target: { instanceId: query, blocked: known?.blocked ?? false }, label: query };
+	}
+	const resolution = resolveMeshPeer(peers, to);
+	return resolution.ok ? { ok: true, target: resolution.peer, label: meshPeerLabel(resolution.peer) } : resolution;
 }
 
 function flag(label: string, value: string | null | undefined): string | undefined {

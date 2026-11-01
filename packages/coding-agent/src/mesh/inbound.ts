@@ -2,7 +2,8 @@
  * Inbound mesh frontend: routes the requests the engine could not answer itself. Policy per message
  * kind (`mesh.inbound.<kind>`): `allow`, `ask` (TUI approval; denied when headless) or `deny`.
  * Thread kinds (status/ask/task) are acknowledged at once with `{accepted, msgId, thread}` and
- * answered later by a `reply` request to the sender. Nothing here sends mesh requests other than
+ * answered later by a `reply` request to the sender; an acknowledgement that still waits for the
+ * user's approval adds `pending: "approval"`. Nothing here sends mesh requests other than
  * those replies and `watch_event`s.
  */
 import { randomBytes } from "node:crypto";
@@ -215,15 +216,16 @@ export class MeshFrontend {
 			return meshError("denied", `This instance asks before accepting ${kind} messages and has no UI to ask.`);
 		}
 		if (kind === "note" && !hasUI) return meshError("denied", "This instance has no UI to show notes.");
-		// Approval outlives the inbound request, so it runs after the acknowledgement; a denial
-		// becomes the error of the reply.
+		// Approval outlives the inbound request, so it runs after the acknowledgement, which then says
+		// it is still pending; a denial becomes the error of the reply.
 		const approve = () => (policy === "ask" ? this.#requestApproval(from, kind, text) : undefined);
+		const pending = policy === "ask" ? { pending: "approval" as const } : {};
 
 		if (kind === "steer" || kind === "note") {
 			this.#deliverDirect(kind, from, msgId, text, approve()).catch(error =>
 				logger.warn("mesh: inbound delivery failed", { kind, error: toError(error).message }),
 			);
-			return meshOk({ accepted: true, msgId });
+			return meshOk({ accepted: true, msgId, ...pending });
 		}
 
 		let record: MeshThreadRecord;
@@ -245,7 +247,7 @@ export class MeshFrontend {
 		this.#runTurn(record, turnIndex, approve()).catch(error =>
 			logger.warn("mesh: thread turn failed", { thread: record.threadId, error: toError(error).message }),
 		);
-		return meshOk({ accepted: true, msgId, thread: record.threadId });
+		return meshOk({ accepted: true, msgId, thread: record.threadId, ...pending });
 	}
 
 	#requestApproval(from: MeshSender, kind: MeshMessageKind, text: string): Promise<boolean> {

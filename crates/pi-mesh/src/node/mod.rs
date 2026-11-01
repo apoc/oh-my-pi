@@ -34,7 +34,7 @@ use tokio::{
 
 use self::{
 	inbound::{Admission, Limits, Pending, admit},
-	peers::{MdnsEndpoint, PeerTable},
+	peers::{Departed, MdnsEndpoint, PeerTable},
 	replies::{AwaitStart, Effects, Inflight, KeyTaken, Replies, ReplyOp},
 };
 pub use self::{
@@ -60,7 +60,8 @@ use crate::{
 
 /// Peers-changed notifications are coalesced over this window.
 const PEERS_DEBOUNCE: Duration = Duration::from_millis(50);
-/// Agent id the engine uses for its own requests (snapshot fetch/probe).
+/// Agent id the engine uses for its own requests (snapshot fetch/probe), and
+/// the sender agent of the answer it makes up for a peer that left.
 const ENGINE_AGENT_ID: &str = "Main";
 /// Liveness check deadline per registry entry on the local poll (checks run
 /// concurrently).
@@ -163,12 +164,14 @@ pub enum NodeEvent {
 		envelope:   Box<MeshEnvelope>,
 		origin:     Origin,
 	},
-	/// An answer to a tracked request nobody waits for.
+	/// An answer to a tracked request nobody waits for (including the error
+	/// answer made up for a peer that left before answering).
 	Reply {
 		ticket:   String,
 		envelope: Box<MeshEnvelope>,
 	},
-	/// Tracked requests dropped by TTL, the size cap or [`MeshNode::close`].
+	/// Tracked requests dropped by TTL, the size cap, [`MeshNode::close`], or
+	/// ended because their peer left the mesh.
 	PendingDropped {
 		tickets: Vec<String>,
 	},
@@ -286,7 +289,24 @@ struct State {
 	static_specs:   Vec<String>,
 	/// Static spec -> (address that answered, instance id it reported).
 	static_learned: HashMap<String, (SocketAddr, String)>,
+	/// Peers only a local listing dropped while requests to them were
+	/// tracked, until the registry confirms them gone or they return.
+	suspects:       HashMap<String, Suspect>,
 	closed:         bool,
+}
+
+/// Registry checks in a row that must miss a suspect's entry before its
+/// tracked requests are answered (one runs on each local poll). Polls can run
+/// back to back (`refresh`, wake-ups), so a poll interval plus a probe
+/// timeout must also have passed since the first miss.
+const SUSPECT_MISSES: u8 = 2;
+
+struct Suspect {
+	departed:   Departed,
+	/// Consecutive checks that found no entry.
+	misses:     u8,
+	/// When the first of them ran.
+	first_miss: Option<Instant>,
 }
 
 impl State {
@@ -434,6 +454,7 @@ impl MeshNode {
 				mdns:           None,
 				static_specs:   Vec::new(),
 				static_learned: HashMap::new(),
+				suspects:       HashMap::new(),
 				closed:         false,
 			}),
 			instance_id,
@@ -631,15 +652,13 @@ impl MeshNode {
 		let MeshResponse::Ok(data) = &response else {
 			return response;
 		};
-		let (key, malformed, taken) = match expected.op {
-			ReplyOp::Reply => (
-				parse_message_ack(data)
-					.map(|ack| ack.msg_id)
-					.filter(|id| id == msg_id),
-				MALFORMED_MESSAGE_ACK,
-				KEY_TAKEN_MESSAGE,
-			),
-			ReplyOp::WatchEvent => (parse_watch_ack(data), MALFORMED_WATCH_ACK, KEY_TAKEN_WATCH),
+		let (key, thread, malformed, taken) = match expected.op {
+			ReplyOp::Reply => {
+				let ack = parse_message_ack(data).filter(|ack| ack.msg_id == msg_id);
+				let (key, thread) = ack.map_or((None, None), |ack| (Some(ack.msg_id), ack.thread));
+				(key, thread, MALFORMED_MESSAGE_ACK, KEY_TAKEN_MESSAGE)
+			},
+			ReplyOp::WatchEvent => (parse_watch_ack(data), None, MALFORMED_WATCH_ACK, KEY_TAKEN_WATCH),
 		};
 		let Some(key) = key else {
 			return MeshResponse::error(MeshErrorCode::Internal, malformed);
@@ -655,6 +674,7 @@ impl MeshNode {
 			key,
 			expected.op,
 			to.to_owned(),
+			thread,
 			track.ticket,
 			track.hold,
 			expected.ttl,
@@ -680,6 +700,117 @@ impl MeshNode {
 			let _ = self
 				.events
 				.send(NodeEvent::PendingDropped { tickets: fx.dropped });
+		}
+	}
+
+	/// Answers the tracked requests to peers that left the table. One only a
+	/// local listing dropped stays a suspect until the registry confirms it
+	/// gone ([`Self::confirm_suspects`]): a live peer the listing could not
+	/// check in time is dropped the same way. Call with the state lock held.
+	fn settle_departed(&self, st: &mut State) {
+		for departed in st.table.take_departed() {
+			if !st.replies.tracks(&departed.instance_id, Instant::now()) {
+				continue;
+			}
+			if departed.unlisted {
+				st.suspects.insert(departed.instance_id.clone(), Suspect {
+					departed,
+					misses: 0,
+					first_miss: None,
+				});
+			} else {
+				st.suspects.remove(&departed.instance_id);
+				self.peer_left(st, &departed);
+			}
+		}
+	}
+
+	/// Re-checks the suspects against the registry: answers for those whose
+	/// entry was missing on [`SUSPECT_MISSES`] checks in a row spanning a
+	/// poll interval plus a probe timeout (a live peer whose entry was
+	/// briefly pruned republishes it within a poll), forgets those back in
+	/// the table or no longer tracked.
+	async fn confirm_suspects(&self, ids: Vec<String>) {
+		if ids.is_empty() {
+			return;
+		}
+		let dir = self.instances.dir().to_owned();
+		let checked: Vec<(String, bool)> = tokio::task::spawn_blocking(move || {
+			ids.into_iter()
+				.map(|id| {
+					let registered = pi_instances::is_registered(&dir, &id, instance::NAMESPACE);
+					(id, registered)
+				})
+				.collect()
+		})
+		.await
+		.unwrap_or_default();
+		let now = Instant::now();
+		let settle = self.seams.local_poll + LOCAL_PROBE_TIMEOUT;
+		let mut st = self.state.lock();
+		let State { suspects, table, replies, .. } = &mut *st;
+		suspects.retain(|id, _| !table.contains(id) && replies.tracks(id, now));
+		for (id, registered) in checked {
+			let Some(suspect) = st.suspects.get_mut(&id) else {
+				continue;
+			};
+			if registered {
+				suspect.misses = 0;
+				suspect.first_miss = None;
+				continue;
+			}
+			suspect.misses = suspect.misses.saturating_add(1);
+			let first_miss = *suspect.first_miss.get_or_insert(now);
+			if suspect.misses >= SUSPECT_MISSES
+				&& now.duration_since(first_miss) >= settle
+				&& let Some(suspect) = st.suspects.remove(&id)
+			{
+				self.peer_left(&mut st, &suspect.departed);
+			}
+		}
+	}
+
+	/// `departed` left the mesh: its unanswered messages are answered with an
+	/// error reply from it (to waiters, else as [`NodeEvent::Reply`]) and its
+	/// watches dropped. Call with the state lock held.
+	fn peer_left(&self, st: &mut State, departed: &Departed) {
+		let now = Instant::now();
+		if !st.replies.tracks(&departed.instance_id, now) {
+			return;
+		}
+		let label = departed.label();
+		let name = label
+			.display_name
+			.as_deref()
+			.unwrap_or(&departed.instance_id);
+		let error = format!("{name} left the mesh before answering.");
+		let from = MeshSender {
+			instance_id:  departed.instance_id.clone(),
+			agent_id:     ENGINE_AGENT_ID.to_owned(),
+			display_name: name.to_owned(),
+			host:         label.host.as_deref().unwrap_or("unknown").to_owned(),
+			lan_port:     None,
+		};
+		let effects = st
+			.replies
+			.peer_left(&departed.instance_id, now, |key, thread| {
+				Box::new(MeshEnvelope {
+					v:       PROTOCOL_VERSION,
+					msg_id:  random_hex(12),
+					sent_at: now_ms(),
+					hop:     0,
+					from:    from.clone(),
+					to:      self.instance_id.clone(),
+					body:    MeshRequest::Reply {
+						reply_to: key.to_owned(),
+						thread:   thread.map(str::to_owned),
+						text:     String::new(),
+						error:    Some(error.clone()),
+					},
+				})
+			});
+		for fx in effects {
+			self.emit(fx);
 		}
 	}
 
@@ -737,11 +868,12 @@ impl MeshNode {
 		let (TransportError::Misdirected, Endpoint::Local(entry)) = (err, endpoint) else {
 			return;
 		};
-		let dropped = self
-			.state
-			.lock()
-			.table
-			.drop_local_if(id, &entry.endpoint, &entry.token);
+		let dropped = {
+			let mut st = self.state.lock();
+			let dropped = st.table.drop_local_if(id, &entry.endpoint, &entry.token);
+			self.settle_departed(&mut st);
+			dropped
+		};
 		let Some(stale) = dropped else {
 			return;
 		};
@@ -1015,6 +1147,7 @@ impl MeshNode {
 			st.pending.clear();
 			st.status = NodeStatus::OFF;
 			let dropped = st.replies.clear();
+			st.suspects.clear();
 			self.emit(Effects { late: None, dropped });
 		}
 		for task in self.background.lock().drain(..) {
@@ -1283,12 +1416,14 @@ impl MeshNode {
 		)
 		.await
 		.unwrap_or_default();
-		let (changed, fresh) = {
+		let (changed, fresh, suspects) = {
 			let mut st = self.state.lock();
 			if !st.local_on {
 				return;
 			}
-			st.table.set_local_listing(&listing, now_ms())
+			let (changed, fresh) = st.table.set_local_listing(&listing, now_ms());
+			self.settle_departed(&mut st);
+			(changed, fresh, st.suspects.keys().cloned().collect())
 		};
 		if changed {
 			self.mark_peers_dirty();
@@ -1296,6 +1431,7 @@ impl MeshNode {
 		for id in fresh {
 			self.on_new_endpoint(&id);
 		}
+		self.confirm_suspects(suspects).await;
 	}
 
 	async fn refresh_all(&self) {
@@ -1332,7 +1468,13 @@ impl MeshNode {
 			fetches.spawn(async move { node.verify_candidate(&id, addr).await });
 		}
 		while fetches.join_next().await.is_some() {}
-		if self.state.lock().table.sweep(Instant::now()) {
+		let changed = {
+			let mut st = self.state.lock();
+			let changed = st.table.sweep(Instant::now());
+			self.settle_departed(&mut st);
+			changed
+		};
+		if changed {
 			self.mark_peers_dirty();
 		}
 	}
