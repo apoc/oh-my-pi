@@ -35,12 +35,36 @@ pub const MESH_KEY_BYTES: usize = 32;
 /// The group tag is broadcast unauthenticated over mDNS and lets anyone test
 /// guesses offline, so short phrases are refused outright.
 pub const MIN_PASSPHRASE_CHARS: usize = 12;
+/// Passphrases shorter than this (same count) are accepted but flagged weak.
+pub const STRONG_PASSPHRASE_CHARS: usize = 16;
 const GROUP_TAG_BYTES: usize = 8;
 const GCM_TAG_BYTES: usize = 16;
 const INFO_GROUP: &[u8] = b"mesh-group";
 const INFO_SEAL: &[u8] = b"mesh-seal";
 /// Bytes `seal` adds on top of the plaintext.
 pub const SEAL_OVERHEAD: usize = NONCE_LEN + GCM_TAG_BYTES;
+
+/// How a passphrase would fare in [`derive_mesh_key`] (for live feedback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassphraseCheck {
+	/// Unicode scalar values after NFC + trim.
+	pub chars: usize,
+	/// At least [`MIN_PASSPHRASE_CHARS`]: [`derive_mesh_key`] accepts it.
+	pub valid: bool,
+	/// Below [`STRONG_PASSPHRASE_CHARS`].
+	pub weak:  bool,
+}
+
+/// Counts `passphrase` the way [`derive_mesh_key`] does.
+pub fn check_passphrase(passphrase: &str) -> PassphraseCheck {
+	let normalized: String = passphrase.nfc().collect();
+	let chars = normalized.trim().chars().count();
+	PassphraseCheck {
+		chars,
+		valid: chars >= MIN_PASSPHRASE_CHARS,
+		weak: chars < STRONG_PASSPHRASE_CHARS,
+	}
+}
 
 /// Derive the stored mesh key from a passphrase: same phrase, same key on
 /// every machine.
@@ -391,6 +415,21 @@ mod tests {
 		assert_eq!(derive_mesh_key("  caf\u{e9}-meshes  "), Err(KeyError::WeakPassphrase));
 		assert_eq!(derive_mesh_key("cafe\u{301}-meshes"), Err(KeyError::WeakPassphrase));
 		assert!(derive_mesh_key("caf\u{e9}-meshes!").is_ok());
+	}
+
+	#[test]
+	fn check_counts_like_derive() {
+		let check = |p: &str| {
+			let c = check_passphrase(p);
+			(c.chars, c.valid, c.weak)
+		};
+		assert_eq!(check("  cafe\u{301}-meshes  "), (11, false, true));
+		assert_eq!(check("caf\u{e9}-meshes!"), (12, true, true));
+		assert_eq!(check("x".repeat(16).as_str()), (16, true, false));
+		assert_eq!(check(" \t"), (0, false, true));
+		for phrase in ["cafe\u{301}-meshes", "caf\u{e9}-meshes!", "  y"] {
+			assert_eq!(check_passphrase(phrase).valid, derive_mesh_key(phrase).is_ok(), "{phrase}");
+		}
 	}
 
 	#[test]

@@ -2,18 +2,22 @@
 //!
 //! Reconciles the configured sides (the `mesh` namespace of the instance
 //! host, LAN listener + mDNS + static peers), keeps the peer table fresh,
-//! admits inbound envelopes and routes outbound requests.
+//! admits inbound envelopes, routes outbound requests and correlates answers
+//! (`reply`, `watch_event`) with the requests that asked for them.
 //!
 //! The frontend drives it through [`MeshNode`] and receives [`NodeEvent`]s:
-//! coalesced `Peers` changes, `Status` changes, and `Inbound` requests it must
-//! answer with [`MeshNode::respond`].
+//! coalesced `Peers` changes, `Status` changes, `Inbound` requests it must
+//! answer with [`MeshNode::respond`], and `Reply` / `PendingDropped` for
+//! tracked requests.
 
 mod inbound;
 mod peers;
+mod replies;
 #[cfg(test)]
 mod tests;
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, HashSet},
 	net::{IpAddr, Ipv4Addr, SocketAddr},
 	sync::{Arc, Weak},
@@ -25,14 +29,18 @@ use pi_instances::{InstanceHost, Registration};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
-	sync::{Notify, mpsc},
+	sync::{Notify, mpsc, oneshot},
 	task::{JoinHandle, JoinSet},
 };
 
-pub use self::peers::{EndpointKind, PeerInfo, PeerSource, PeerState};
 use self::{
 	inbound::{Admission, Limits, Pending, admit},
 	peers::{MdnsEndpoint, PeerTable},
+	replies::{AwaitStart, Effects, Inflight, KeyTaken, Replies, ReplyOp},
+};
+pub use self::{
+	peers::{EndpointKind, PeerInfo, PeerSource, PeerState},
+	replies::{EARLY_TTL, MAX_EARLY, MAX_PENDING_REPLIES, PENDING_TTL},
 };
 use crate::{
 	discovery::{DiscoveryEvent, MdnsConfig, MdnsDiscovery},
@@ -41,7 +49,8 @@ use crate::{
 	net::{self, ReverseDns},
 	protocol::{
 		ANY_INSTANCE, MAX_ENVELOPE_BYTES, MeshEnvelope, MeshErrorCode, MeshRequest, MeshResponse,
-		MeshSender, PROTOCOL_VERSION, parse_snapshot,
+		MeshSender, MessageKind, PROTOCOL_VERSION, is_thread_id, parse_message_ack, parse_snapshot,
+		parse_watch_ack,
 	},
 	transport::{
 		BoxFuture, Endpoint, InboundSink, MeshClient, Origin, OriginKind, TransportError,
@@ -143,6 +152,7 @@ impl NodeStatus {
 	};
 }
 
+/// Engine event for the frontend.
 #[derive(Debug, Clone)]
 pub enum NodeEvent {
 	/// The peer list changed; read [`MeshNode::peers`].
@@ -155,7 +165,31 @@ pub enum NodeEvent {
 		envelope:   Box<MeshEnvelope>,
 		origin:     Origin,
 	},
+	/// An answer to a tracked request nobody waits for.
+	Reply {
+		ticket:   String,
+		envelope: Box<MeshEnvelope>,
+	},
+	/// Tracked requests dropped by TTL, the size cap or [`MeshNode::close`].
+	PendingDropped {
+		tickets: Vec<String>,
+	},
 }
+
+/// Correlate a `message` (non-note) or `watch` request's answers under the
+/// frontend's `ticket` once the peer acknowledged it.
+#[derive(Debug, Clone)]
+pub struct Track {
+	pub ticket: String,
+	/// Keep the first answer for an [`MeshNode::await_reply`] about to start
+	/// instead of emitting it.
+	pub hold:   bool,
+}
+
+const MALFORMED_MESSAGE_ACK: &str = "Peer acknowledged with a missing or malformed message id.";
+const MALFORMED_WATCH_ACK: &str = "Peer accepted the watch with a missing or malformed watch id.";
+const KEY_TAKEN_MESSAGE: &str = "Peer acknowledged with a message id already in use.";
+const KEY_TAKEN_WATCH: &str = "Peer accepted the watch with a watch id already in use.";
 
 /// mDNS discovery as the node uses it (seam for tests).
 pub(crate) trait MdnsStarter: Send + Sync + 'static {
@@ -252,6 +286,7 @@ struct State {
 	table:          PeerTable,
 	limits:         Limits,
 	pending:        Pending,
+	replies:        Replies,
 	client:         MeshClient,
 	local_on:       bool,
 	remote_on:      bool,
@@ -415,6 +450,7 @@ impl MeshNode {
 				table:          PeerTable::new(&instance_id),
 				limits:         Limits::default(),
 				pending:        Pending::default(),
+				replies:        Replies::default(),
 				client:         MeshClient::new(None),
 				local_on:       false,
 				remote_on:      false,
@@ -548,6 +584,12 @@ impl MeshNode {
 	/// Sends `body` to peer `to` (local endpoint preferred) and waits for its
 	/// response. Drop the future to abort.
 	///
+	/// A `message` / `watch` acknowledgement must carry a valid `msgId` /
+	/// `watchId` (else the result is an `internal` error response). With
+	/// `track`, a `message` (other than a note) or `watch` is then tracked:
+	/// its answers go to [`Self::await_reply`] or out as [`NodeEvent::Reply`]
+	/// with the ticket.
+	///
 	/// # Errors
 	/// `unreachable` for unknown peers or failed delivery, `timeout`,
 	/// `bad_response`.
@@ -557,6 +599,7 @@ impl MeshNode {
 		from_agent_id: &str,
 		body: MeshRequest,
 		timeout: Duration,
+		track: Option<Track>,
 	) -> Result<MeshResponse, TransportError> {
 		let (endpoint, client) = {
 			let st = self.state.lock();
@@ -566,7 +609,18 @@ impl MeshNode {
 				.ok_or_else(|| TransportError::Unreachable(format!("no reachable mesh peer {to}")))?;
 			(endpoint, st.client.clone())
 		};
+		let expected = Expected::of(&body);
 		let env = self.envelope(to, from_agent_id, body);
+		// Answers may overtake the acknowledgement only for tracked requests in
+		// flight.
+		let inflight = track.as_ref().and_then(|_| match expected {
+			Expected::Message { tracked: true } => {
+				Some(Inflight::Message(to.to_owned(), env.msg_id.clone()))
+			},
+			Expected::Watch { .. } => Some(Inflight::Watch(to.to_owned())),
+			_ => None,
+		});
+		let _inflight = inflight.map(|inflight| InflightGuard::new(self, inflight));
 		let result = client.request(&endpoint, &env, timeout).await;
 		let ok = match &result {
 			Ok(MeshResponse::Err { code: MeshErrorCode::Unauthorized, .. }) => false,
@@ -577,7 +631,108 @@ impl MeshNode {
 			},
 		};
 		self.note_outcome(to, ok);
-		result
+		Ok(self.on_ack(to, &env.msg_id, expected, track, result?))
+	}
+
+	/// Validates a `message` / `watch` acknowledgement (a message's must echo
+	/// `msg_id`) and tracks the request.
+	fn on_ack(
+		&self,
+		to: &str,
+		msg_id: &str,
+		expected: Expected,
+		track: Option<Track>,
+		response: MeshResponse,
+	) -> MeshResponse {
+		let data = match &response {
+			MeshResponse::Err { .. } => return response,
+			MeshResponse::Ok(value) => Cow::Borrowed(value),
+			MeshResponse::OkRaw(json) => Cow::Owned(serde_json::from_str(json).unwrap_or_default()),
+		};
+		let tracked = match expected {
+			Expected::Other => None,
+			Expected::Message { tracked } => match parse_message_ack(&data) {
+				Some(ack) if ack.msg_id == msg_id => {
+					tracked.then_some(Ok((ack.msg_id, ReplyOp::Reply, PENDING_TTL, KEY_TAKEN_MESSAGE)))
+				},
+				_ => Some(Err(MALFORMED_MESSAGE_ACK)),
+			},
+			Expected::Watch { ttl } => Some(
+				parse_watch_ack(&data)
+					.map(|id| (id, ReplyOp::WatchEvent, ttl, KEY_TAKEN_WATCH))
+					.ok_or(MALFORMED_WATCH_ACK),
+			),
+		};
+		// Ends the borrow of `response` (`Cow` has drop glue).
+		drop(data);
+		let (key, op, ttl, taken) = match tracked {
+			None => return response,
+			Some(Err(message)) => return MeshResponse::error(MeshErrorCode::Internal, message),
+			Some(Ok(tracked)) => tracked,
+		};
+		let Some(track) = track else {
+			return response;
+		};
+		let mut st = self.state.lock();
+		if st.closed {
+			return response;
+		}
+		let (fx, registered) =
+			st.replies
+				.register(key, op, to.to_owned(), track.ticket, track.hold, ttl, Instant::now());
+		self.emit(fx);
+		match registered {
+			Ok(()) => response,
+			// The key is another peer's tracked request: never reroute its answers.
+			Err(KeyTaken) => MeshResponse::error(MeshErrorCode::Internal, taken),
+		}
+	}
+
+	/// Sends a [`Replies`] change's events. Call with the state lock held, so
+	/// events leave in the order the changes happened.
+	fn emit(&self, fx: Effects) {
+		if let Some(late) = fx.late {
+			let _ = self
+				.events
+				.send(NodeEvent::Reply { ticket: late.ticket, envelope: late.answer });
+		}
+		if !fx.dropped.is_empty() {
+			let _ = self
+				.events
+				.send(NodeEvent::PendingDropped { tickets: fx.dropped });
+		}
+	}
+
+	/// Waits up to `timeout` for the next answer to the tracked request `key`
+	/// (`msgId` / `watchId`); a held answer that already arrived is returned
+	/// at once. `None` when untracked, out of time, replaced by a newer wait
+	/// or dropped. Answers after that go out as [`NodeEvent::Reply`] (one that
+	/// raced the end of the wait included). Drop the future to abort.
+	pub async fn await_reply(&self, key: &str, timeout: Duration) -> Option<Box<MeshEnvelope>> {
+		let (id, ticket, rx) = {
+			let mut st = self.state.lock();
+			match st.replies.await_start(key) {
+				AwaitStart::Missing => return None,
+				AwaitStart::Ready(answer, ended) => {
+					if let Some(ticket) = ended {
+						self.emit(Effects { late: None, dropped: vec![ticket] });
+					}
+					return Some(answer);
+				},
+				AwaitStart::Wait { id, ticket, rx } => (id, ticket, rx),
+			}
+		};
+		let mut guard = WaitGuard { node: self, key, id, ticket, rx };
+		let answer = tokio::time::timeout(timeout, &mut guard.rx)
+			.await
+			.ok()?
+			.ok()?;
+		Some(answer)
+	}
+
+	/// Stops tracking the requests of `tickets` (their waits end empty).
+	pub fn forget_pending(&self, tickets: &[String]) {
+		self.state.lock().replies.forget(tickets);
 	}
 
 	fn note_outcome(&self, id: &str, ok: bool) {
@@ -884,6 +1039,8 @@ impl MeshNode {
 			st.closed = true;
 			st.pending.clear();
 			st.status = NodeStatus::OFF;
+			let dropped = st.replies.clear();
+			self.emit(Effects { late: None, dropped });
 		}
 		for task in self.background.lock().drain(..) {
 			task.abort();
@@ -1057,6 +1214,29 @@ impl MeshNode {
 				},
 				Admission::Dispatch => {},
 			}
+			match &env.body {
+				MeshRequest::Reply { .. } | MeshRequest::WatchEvent { .. } => {
+					self.learn_contact(&mut st, &env, origin);
+					let (response, fx) = st.replies.deliver(env, Instant::now());
+					self.emit(fx);
+					return response;
+				},
+				// Thread kinds only: steers and notes ignore `thread`, as the frontend does.
+				MeshRequest::Message {
+					kind: MessageKind::Status | MessageKind::Ask | MessageKind::Task,
+					thread: Some(thread),
+					..
+				}
+				| MeshRequest::Thread { thread }
+					if !is_thread_id(thread) =>
+				{
+					return MeshResponse::error(
+						MeshErrorCode::UnknownThread,
+						format!("Unknown thread {thread}."),
+					);
+				},
+				_ => {},
+			}
 			let Some(slot) = st.pending.insert() else {
 				return MeshResponse::error(MeshErrorCode::Busy, "too many pending mesh requests");
 			};
@@ -1214,6 +1394,71 @@ impl MeshNode {
 				}
 			},
 		}
+	}
+}
+
+/// What the acknowledgement of an outbound request must carry.
+#[derive(Clone, Copy)]
+enum Expected {
+	Other,
+	/// `msgId` (+ optional thread); tracked unless a note.
+	Message {
+		tracked: bool,
+	},
+	/// `watchId`; tracked for the watch's lifetime.
+	Watch {
+		ttl: Duration,
+	},
+}
+
+impl Expected {
+	fn of(body: &MeshRequest) -> Self {
+		match body {
+			MeshRequest::Message { kind, .. } => Self::Message { tracked: *kind != MessageKind::Note },
+			MeshRequest::Watch { ttl_sec, .. } => {
+				Self::Watch { ttl: Duration::from_secs(u64::from(*ttl_sec)) }
+			},
+			_ => Self::Other,
+		}
+	}
+}
+
+/// Ends an [`MeshNode::await_reply`] wait; an answer handed to it that it
+/// never received (timeout or abort racing delivery) goes out late.
+struct WaitGuard<'a> {
+	node:   &'a MeshNode,
+	key:    &'a str,
+	id:     u64,
+	ticket: String,
+	rx:     oneshot::Receiver<Box<MeshEnvelope>>,
+}
+
+impl Drop for WaitGuard<'_> {
+	fn drop(&mut self) {
+		let mut st = self.node.state.lock();
+		let fx = st
+			.replies
+			.end_wait(self.key, self.id, &self.ticket, &mut self.rx);
+		self.node.emit(fx);
+	}
+}
+
+/// Marks a tracked request in flight until it completed (any outcome).
+struct InflightGuard<'a> {
+	node:     &'a MeshNode,
+	inflight: Inflight,
+}
+
+impl<'a> InflightGuard<'a> {
+	fn new(node: &'a MeshNode, inflight: Inflight) -> Self {
+		node.state.lock().replies.begin_inflight(&inflight);
+		Self { node, inflight }
+	}
+}
+
+impl Drop for InflightGuard<'_> {
+	fn drop(&mut self) {
+		self.node.state.lock().replies.end_inflight(&self.inflight);
 	}
 }
 

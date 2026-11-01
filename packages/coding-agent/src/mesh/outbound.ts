@@ -1,44 +1,31 @@
 /**
  * Sender side of mesh messaging. Thread kinds and steers are acknowledged immediately and answered
- * later by a separate `reply` request; watches fire one `watch_event`. This class remembers which
- * local agent sent each message, hands an answer to a caller waiting on it, and otherwise delivers
- * it late to the asking agent: Main and live subagents get a hidden `mesh:reply` (or `mesh:watch`) message, a
- * finished subagent's answer goes to Main naming the agent, the TUI user's answer to the UI.
+ * later by a separate `reply` request; watches fire one `watch_event`. The engine correlates those
+ * answers with their requests; this class decides who receives them: every tracked send carries a
+ * ticket naming the local agent that sent it, and an answer nobody awaits is delivered late to that
+ * agent. Main and live subagents get a hidden `mesh:reply` (or `mesh:watch`) message, a finished
+ * subagent's answer goes to Main naming the agent, the TUI user's answer to the UI.
  */
-import { isRecord, logger, toError } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isLocalAgentSession } from "../session/agent-session-handle";
 import type { CustomMessagePayload } from "../session/messages";
 import { buildMeshReplyMessage, buildMeshWatchEventMessage, type MeshDeliveryTarget, type MeshUiHooks } from "./bridge";
-import type { MeshEngine } from "./engine";
-import { isValidMeshThreadId } from "./threads";
+import type { MeshEngine, MeshIncomingReply } from "./engine";
 import { meshToolRefs } from "./tool-refs";
 import {
-	MESH_ANY_INSTANCE,
 	type MeshErrorCode,
 	type MeshMessageKind,
+	type MeshMessageResult,
 	type MeshRequest,
 	type MeshResponse,
-	type MeshSender,
 	type MeshWatchEvent,
+	type MeshWatchResult,
 	meshError,
-	meshOk,
 } from "./wire";
 
 /** `agentId` of messages the human sends from the TUI. */
 export const MESH_USER_AGENT_ID = "user";
-/** How long a sent message keeps routing its replies to the asking agent. */
-const PENDING_TTL_MS = 2 * 60 * 60 * 1000;
-const MAX_PENDING = 1024;
-/** Answers that overtook their own acknowledgement wait this long to be claimed. */
-const EARLY_TTL_MS = 60 * 1000;
-const MAX_EARLY = 64;
-/** Wire-level id shape (Rust `is_msg_id`); acks carrying anything else are refused. */
-const MESH_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-
-export type MeshIncomingReply =
-	| { op: "reply"; from: MeshSender; replyTo: string; thread?: string; text: string; error?: string }
-	| { op: "watch_event"; from: MeshSender; watchId: string; event: MeshWatchEvent; detail?: string };
 
 export type MeshSendResult =
 	| { ok: true; msgId: string; thread?: string }
@@ -46,19 +33,15 @@ export type MeshSendResult =
 
 export type MeshWatchSendResult = { ok: true; watchId: string } | { ok: false; code: MeshErrorCode; message: string };
 
-interface PendingEntry {
-	op: MeshIncomingReply["op"];
-	peerInstanceId: string;
+/** Who receives the answers to one tracked send. */
+interface Ticket {
 	agentId: string;
 	/** Main session bound when the message was sent: late answers go there, never to a later rebind. */
 	main: MeshDeliveryTarget;
 	/** `main.conversationId` at send time; a later `/new`, context reset, resume or fork there makes the answer stale. */
 	conversationId: string;
-	expiresAt: number;
-	/** Keep answers for an `awaitReply` the caller is about to start instead of delivering them late. */
-	held: boolean;
-	stored?: MeshIncomingReply;
-	waiter?: (reply: MeshIncomingReply | undefined) => void;
+	/** The peer acknowledged the send. */
+	acked: boolean;
 }
 
 export interface MeshOutboundOptions {
@@ -82,15 +65,22 @@ export class MeshOutbound {
 	#main: MeshDeliveryTarget;
 	readonly #ui: MeshUiHooks | undefined;
 	readonly #resolveAgent: (agentId: string) => MeshDeliveryTarget | undefined;
-	readonly #pending = new Map<string, PendingEntry>();
-	readonly #early = new Map<string, { reply: MeshIncomingReply; expiresAt: number }>();
+	/** Tickets the engine may name in a reply event; minted before the request leaves. */
+	readonly #tickets = new Map<string, Ticket>();
 	readonly #blockedSenders = new Set<string>();
+	readonly #unsubscribe: (() => void)[];
 
 	constructor(options: MeshOutboundOptions) {
 		this.#engine = options.engine;
 		this.#main = options.main;
 		this.#ui = options.ui;
 		this.#resolveAgent = options.resolveAgent ?? liveRegistrySession;
+		this.#unsubscribe = [
+			this.#engine.onReply((ticket, reply) => this.#onReply(ticket, reply)),
+			this.#engine.onPendingDropped(tickets => {
+				for (const ticket of tickets) this.#tickets.delete(ticket);
+			}),
+		];
 	}
 
 	/** Refuse sends from `agentId` and its descendants (mesh responders: hop limit). */
@@ -103,11 +93,11 @@ export class MeshOutbound {
 		this.#main = main;
 	}
 
-	/** Engine stop: release every waiter and forget all pending messages. */
+	/** Engine stop: forget every tracked send (their waits resolve `undefined`). */
 	dispose(): void {
-		for (const entry of this.#pending.values()) entry.waiter?.(undefined);
-		this.#pending.clear();
-		this.#early.clear();
+		for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+		this.#engine.forgetPending([...this.#tickets.keys()]);
+		this.#tickets.clear();
 	}
 
 	/**
@@ -131,23 +121,15 @@ export class MeshOutbound {
 			text: args.text,
 			...(args.thread ? { thread: args.thread } : {}),
 		};
-		const sent = { main: this.#main, conversationId: this.#main.conversationId };
-		const response = await this.#request(args.to, args.fromAgentId, body, args);
-		if (!response.ok) return response;
-		const data = response.data;
-		if (
-			!isRecord(data) ||
-			typeof data.msgId !== "string" ||
-			!MESH_ID_RE.test(data.msgId) ||
-			(data.thread !== undefined && (typeof data.thread !== "string" || !isValidMeshThreadId(data.thread)))
-		) {
-			return { ok: false, code: "internal", message: "Peer acknowledged with a missing or malformed message id." };
-		}
 		// Notes are for the peer's human: nothing answers them, not even a declined approval.
-		if (args.kind !== "note") {
-			this.#track("reply", data.msgId, args.to, args.fromAgentId, args.awaitReply === true, sent);
-		}
-		return { ok: true, msgId: data.msgId, ...(typeof data.thread === "string" ? { thread: data.thread } : {}) };
+		const response =
+			args.kind === "note"
+				? await this.#request(args.to, args.fromAgentId, body, args)
+				: await this.#tracked(args.to, args.fromAgentId, body, args);
+		if (!response.ok) return response;
+		// The engine validated the acknowledgement (`msgId`, `thread`).
+		const { msgId, thread } = response.data as MeshMessageResult;
+		return { ok: true, msgId, ...(thread !== undefined ? { thread } : {}) };
 	}
 
 	/** Register a one-shot watch on the peer; its event routes like a reply, keyed by `watchId`. */
@@ -160,32 +142,14 @@ export class MeshOutbound {
 		timeoutMs?: number;
 		signal?: AbortSignal;
 	}): Promise<MeshWatchSendResult> {
-		const sent = { main: this.#main, conversationId: this.#main.conversationId };
-		const response = await this.#request(
+		const response = await this.#tracked(
 			args.to,
 			args.fromAgentId,
 			{ op: "watch", event: args.event, ttlSec: args.ttlSec },
 			args,
 		);
 		if (!response.ok) return response;
-		const data = response.data;
-		if (!isRecord(data) || typeof data.watchId !== "string" || !MESH_ID_RE.test(data.watchId)) {
-			return {
-				ok: false,
-				code: "internal",
-				message: "Peer accepted the watch with a missing or malformed watch id.",
-			};
-		}
-		this.#track(
-			"watch_event",
-			data.watchId,
-			args.to,
-			args.fromAgentId,
-			args.awaitReply === true,
-			sent,
-			args.ttlSec * 1000,
-		);
-		return { ok: true, watchId: data.watchId };
+		return { ok: true, watchId: (response.data as MeshWatchResult).watchId };
 	}
 
 	/** Answer a peer's message (`replyTo` = its msgId), e.g. Main replying to a steer. */
@@ -211,77 +175,59 @@ export class MeshOutbound {
 	 * answers arriving after that are delivered late to the asking agent.
 	 */
 	awaitReply(key: string, timeoutMs: number, signal?: AbortSignal): Promise<MeshIncomingReply | undefined> {
-		const entry = this.#pending.get(key);
-		if (!entry) return Promise.resolve(undefined);
-		if (entry.stored) {
-			const stored = entry.stored;
-			entry.stored = undefined;
-			entry.held = false;
-			return Promise.resolve(stored);
-		}
-		entry.waiter?.(undefined);
-		const { promise, resolve } = Promise.withResolvers<MeshIncomingReply | undefined>();
-		const finish = (reply: MeshIncomingReply | undefined) => {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
-			if (entry.waiter === finish) entry.waiter = undefined;
-			entry.held = false;
-			resolve(reply);
-		};
-		const onAbort = () => finish(undefined);
-		const timer = setTimeout(onAbort, timeoutMs);
-		entry.waiter = finish;
-		if (signal?.aborted) onAbort();
-		else signal?.addEventListener("abort", onAbort, { once: true });
-		return promise;
+		return this.#engine.awaitReply(key, timeoutMs, signal);
 	}
 
-	/** Inbound `reply` / `watch_event` from `from`. */
-	deliverIncomingReply(body: Extract<MeshRequest, { op: "reply" | "watch_event" }>, from: MeshSender): MeshResponse {
-		const reply: MeshIncomingReply = { ...body, from };
-		const key = reply.op === "reply" ? reply.replyTo : reply.watchId;
-		const entry = this.#pending.get(key);
-		if (!entry) {
-			// The answer can overtake the acknowledgement of its own request.
-			this.#pruneEarly();
-			if (this.#early.size >= MAX_EARLY) return meshError("busy", "Too many unclaimed replies.");
-			this.#early.set(key, { reply, expiresAt: Date.now() + EARLY_TTL_MS });
-			return meshOk({ accepted: true });
+	/** A send whose answers the engine tracks under a ticket minted here first, so every event names a known ticket. */
+	async #tracked(
+		to: string,
+		fromAgentId: string,
+		body: MeshRequest,
+		options: { awaitReply?: boolean; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<MeshResponse> {
+		this.#pruneClosedSessions();
+		const main = this.#main;
+		const ticket = Snowflake.next();
+		const entry: Ticket = { agentId: fromAgentId, main, conversationId: main.conversationId, acked: false };
+		this.#tickets.set(ticket, entry);
+		let response: MeshResponse;
+		try {
+			response = await this.#request(to, fromAgentId, body, {
+				...options,
+				ticket,
+				hold: options.awaitReply === true,
+			});
+		} catch (error) {
+			this.#forget(ticket);
+			throw error;
 		}
-		if (!this.#accepts(entry, reply)) return meshError("bad_request", `No pending message ${key} for this peer.`);
-		this.#dispatch(entry, reply);
-		return meshOk({ accepted: true });
-	}
-
-	#accepts(entry: PendingEntry, reply: MeshIncomingReply): boolean {
-		return (
-			entry.op === reply.op &&
-			(entry.peerInstanceId === MESH_ANY_INSTANCE || entry.peerInstanceId === reply.from.instanceId)
-		);
-	}
-
-	#dispatch(entry: PendingEntry, reply: MeshIncomingReply): void {
-		if (entry.waiter) {
-			entry.waiter(reply);
-			return;
+		if (!response.ok) {
+			// Nothing was tracked for a refused send.
+			this.#tickets.delete(ticket);
+			return response;
 		}
-		if (entry.held && !entry.stored) {
-			entry.stored = reply;
-			return;
-		}
-		void this.#deliverLate(entry, reply);
+		entry.acked = true;
+		// The asking conversation was replaced, or its session closed and was pruned, while the request
+		// was in flight; nobody waits for this answer. Forgetting tells the engine, which tracked it on the ack.
+		if (!this.#tickets.has(ticket) || this.#isStale(entry)) this.#forget(ticket);
+		return response;
 	}
 
 	async #request(
 		to: string,
 		fromAgentId: string,
 		body: MeshRequest,
-		options: { timeoutMs?: number; signal?: AbortSignal },
+		options: { timeoutMs?: number; signal?: AbortSignal; ticket?: string; hold?: boolean },
 	): Promise<MeshResponse> {
 		if (this.#isBlocked(fromAgentId)) {
 			return meshError("denied", "Mesh responders cannot send mesh requests.");
 		}
-		return this.#engine.request(to, fromAgentId, body, { timeoutMs: options.timeoutMs, signal: options.signal });
+		return this.#engine.request(to, fromAgentId, body, {
+			timeoutMs: options.timeoutMs,
+			signal: options.signal,
+			ticket: options.ticket,
+			hold: options.hold,
+		});
 	}
 
 	#isBlocked(agentId: string): boolean {
@@ -294,59 +240,42 @@ export class MeshOutbound {
 		return false;
 	}
 
-	#track(
-		op: PendingEntry["op"],
-		key: string,
-		peerInstanceId: string,
-		agentId: string,
-		held: boolean,
-		/** Bound Main and its conversation when the request left; a rebind or switch during the round trip does not move it. */
-		sent: { main: MeshDeliveryTarget; conversationId: string },
-		ttlMs = PENDING_TTL_MS,
-	): void {
-		// The asking conversation was replaced while the request was in flight; nobody waits for this answer.
-		if (agentId !== MESH_USER_AGENT_ID && sent.main.conversationId !== sent.conversationId) return;
-		this.#prunePending();
-		const entry: PendingEntry = {
-			op,
-			peerInstanceId,
-			agentId,
-			main: sent.main,
-			conversationId: sent.conversationId,
-			held,
-			expiresAt: Date.now() + ttlMs,
-		};
-		this.#pending.set(key, entry);
-		const early = this.#early.get(key);
-		if (!early) return;
-		this.#early.delete(key);
-		if (early.expiresAt >= Date.now() && this.#accepts(entry, early.reply)) this.#dispatch(entry, early.reply);
+	/** An agent's send whose conversation was replaced; the TUI user's keeps routing to the UI. */
+	#isStale(entry: Ticket): boolean {
+		return entry.agentId !== MESH_USER_AGENT_ID && entry.main.conversationId !== entry.conversationId;
 	}
 
-	#prunePending(): void {
-		const now = Date.now();
-		for (const [key, entry] of this.#pending) {
-			if (entry.waiter) continue;
-			// An agent's question dies with its closed session; the TUI user's keeps routing to the UI.
-			const closed = entry.agentId !== MESH_USER_AGENT_ID && entry.main.isDisposed;
-			if (closed || entry.expiresAt < now) this.#pending.delete(key);
-		}
-		// Oldest first: Map iteration follows insertion order.
-		for (const [key, entry] of this.#pending) {
-			if (this.#pending.size < MAX_PENDING) break;
-			entry.waiter?.(undefined);
-			this.#pending.delete(key);
-		}
+	#forget(ticket: string): void {
+		this.#tickets.delete(ticket);
+		this.#engine.forgetPending([ticket]);
 	}
 
-	#pruneEarly(): void {
-		const now = Date.now();
-		for (const [key, early] of this.#early) {
-			if (early.expiresAt < now) this.#early.delete(key);
+	/** An agent's question dies with its closed session; the TUI user's keeps routing to the UI. */
+	#pruneClosedSessions(): void {
+		const closed: string[] = [];
+		for (const [ticket, entry] of this.#tickets) {
+			if (entry.agentId !== MESH_USER_AGENT_ID && entry.main.isDisposed) closed.push(ticket);
 		}
+		if (closed.length === 0) return;
+		for (const ticket of closed) this.#tickets.delete(ticket);
+		this.#engine.forgetPending(closed);
 	}
 
-	async #deliverLate(entry: PendingEntry, reply: MeshIncomingReply): Promise<void> {
+	#onReply(ticket: string, reply: MeshIncomingReply): void {
+		const entry = this.#tickets.get(ticket);
+		if (!entry) {
+			logger.debug("mesh: dropped an answer to a forgotten send", { from: reply.from.instanceId });
+			return;
+		}
+		// An answer that overtook its acknowledgement: apply the in-flight conversation check now.
+		if (!entry.acked && this.#isStale(entry)) {
+			this.#forget(ticket);
+			return;
+		}
+		void this.#deliverLate(entry, reply);
+	}
+
+	async #deliverLate(entry: Ticket, reply: MeshIncomingReply): Promise<void> {
 		const { agentId, main, conversationId } = entry;
 		try {
 			if (agentId === MESH_USER_AGENT_ID) {

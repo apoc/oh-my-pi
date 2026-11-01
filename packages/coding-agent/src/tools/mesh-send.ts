@@ -9,8 +9,8 @@ import type {
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
-import { MeshEngineError } from "../mesh/engine";
-import type { MeshIncomingReply, MeshOutbound } from "../mesh/outbound";
+import { MeshEngineError, type MeshIncomingReply } from "../mesh/engine";
+import type { MeshOutbound } from "../mesh/outbound";
 import { meshPeerLabel, resolveMeshPeer } from "../mesh/peers";
 import { cfgMeshAutoBackgroundEnabled, cfgMeshAutoBackgroundThresholdMs } from "../mesh/settings";
 import { MAX_TEXT_CHARS, MAX_WATCH_TTL_SEC, type MeshErrorCode } from "../mesh/wire";
