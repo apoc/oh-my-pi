@@ -138,6 +138,10 @@
 ### Added
 
 - macOS `ax()` lines show what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for unlabeled window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
+- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ### Changed
 
