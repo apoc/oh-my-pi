@@ -6419,7 +6419,7 @@ dependencies = [
 
 [[package]]
 name = "pi-instances"
-version = "18.17.0"
+version = "18.18.0"
 dependencies = [
  "libc",
  "parking_lot",
@@ -6435,7 +6435,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ipc"
-version = "18.17.0"
+version = "18.18.0"
 dependencies = [
  "libc",
  "memchr",
@@ -6459,7 +6459,7 @@ dependencies = [
 
 [[package]]
 name = "pi-mesh"
-version = "18.17.0"
+version = "18.18.0"
 dependencies = [
  "base64 0.23.1",
  "dns-lookup",
