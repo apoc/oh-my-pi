@@ -140,6 +140,10 @@
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+- Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block and compose actions
+- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
+- Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
+- Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
 ### Changed
 
@@ -163,10 +167,6 @@
 ### Added
 
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
-- Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block and compose actions
-- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
-- Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
-- Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
 ### Changed
 

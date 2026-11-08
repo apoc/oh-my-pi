@@ -125,6 +125,10 @@
 
 - Added Zig syntax highlighting for fenced Zig code in Markdown.
 - Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
+- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ### Fixed
 
@@ -138,20 +142,12 @@
 ### Added
 
 - macOS `ax()` lines show what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for unlabeled window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
-- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
-- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
-- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
-- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ### Changed
 
 - macOS `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
-- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
-- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
-- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
-- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ### Fixed
 

@@ -31,13 +31,13 @@
 
 - Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
 - Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
+- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ### Fixed
 
 - Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
 - Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
-- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
-- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ## [18.18.0] - 2026-11-07
 

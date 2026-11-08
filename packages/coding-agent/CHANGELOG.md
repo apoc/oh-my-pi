@@ -444,6 +444,17 @@
 - The shell's `ls` builtin supports macOS/BSD `-O`: a long listing gains the file-flags column (`hidden`, `compressed`, `uchg`, `restricted`, …) instead of rejecting the option, so `ls -lO` works and flags are visible again.
 - The shell ships `sd` as a builtin, so `sd FIND REPLACE [FILES]…` find-and-replace (regex or `-F` literal, in place or `-p` preview) works without the binary installed.
 - Added `omp gc --strip` (or `gc.strip`), which removes provider replay data (thinking signatures, encrypted reasoning, cached native responses, request controls) from sessions idle for `gc.stripAfterDays` (default 30, `--strip-after-days`), including subagent and archived transcripts; stripped sessions still resume on any model.
+- Added oh my pi mesh (`mesh.enabled`, off by default): running omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`, mDNS plus static `mesh.peers`, sealed with a key from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, governed per kind by `mesh.inbound.*` policies; answers are accepted only for messages and watches this instance sent, and the key phrase is counted the way the key is derived (Unicode NFC, trimmed) ([docs](../../docs/mesh.md))
+- Added `/mesh`, a manager for mesh peers, pending approvals, mode, key phrase, hide/block and composing messages, plus a `mesh: N local · M remote` status line
+- Added the `xd://mesh_peers` and `xd://mesh_send` tools so the main agent can list peers (optionally ranked by relevance to a need) and message them
+- Added the read-only `mesh://` scheme for peer snapshots and the threads this instance opened with a peer
+- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
+- Mesh traffic now shows in the TUI transcript as IRC-style `MESH ← peer` / `MESH → peer` cards: incoming questions, notes, steers and replies, plus the answers this instance sends back
+- Mesh `ask` responders can delegate read-only research to `scout` subagents, which keep URL fetching and web search off and see only this session's history, never other peers' threads
+- `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
+- Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks and opens that dialog on the new thread, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
+- `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
+- The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`); an agent is announced once its session has a name and a summary, which comes after 3 model turns. While the mesh is on, the system prompt tells the agent to consult a peer whose work matters to its task, and to coordinate before editing files a peer on the same branch may be editing
 
 ### Changed
 
@@ -471,6 +482,7 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
+- Local Collab host discovery (`omp collab list`, `omp collab link`, `/collab list`) now runs on the shared same-machine instance registry `~/.omp/run/instances` instead of `~/.omp/run/collab-hosts`: a host's instance ID is its process's instance ID, the registry directory is restricted to the current user on Windows too (no longer inheriting the configuration root's ACL), and hosts published by older omp builds are not listed (nor do they list newer ones) ([docs](../../docs/collab.md))
 
 ### Fixed
 
@@ -522,25 +534,6 @@
 - omp's built-in shell (`omp bash`/`omp zsh` and the bash tool) parses scripts about a third faster, sources large function libraries about 20% faster, and re-runs a repeated `eval` or `source` without recompiling it.
 - The `computer` tool's `el.perform()` takes any spelling of an action `ax()` lists (`perform("open")`), and `computer.backgroundFallback: refuse` refuses every spelling of a raise, open, context menu or popup press ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - The `computer` tool no longer takes over your screen for a macOS `win.drag` across the text of a native text view, such as a TextEdit document; it selects that text in the background and returns the selection ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-- Added oh my pi mesh (`mesh.enabled`, off by default): running omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`, mDNS plus static `mesh.peers`, sealed with a key from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, governed per kind by `mesh.inbound.*` policies; answers are accepted only for messages and watches this instance sent, and the key phrase is counted the way the key is derived (Unicode NFC, trimmed) ([docs](../../docs/mesh.md))
-- Added `/mesh`, a manager for mesh peers, pending approvals, mode, key phrase, hide/block and composing messages, plus a `mesh: N local · M remote` status line
-- Added the `xd://mesh_peers` and `xd://mesh_send` tools so the main agent can list peers (optionally ranked by relevance to a need) and message them
-- Added the read-only `mesh://` scheme for peer snapshots and the threads this instance opened with a peer
-- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
-- Mesh traffic now shows in the TUI transcript as IRC-style `MESH ← peer` / `MESH → peer` cards: incoming questions, notes, steers and replies, plus the answers this instance sends back
-- Mesh `ask` responders can delegate read-only research to `scout` subagents, which keep URL fetching and web search off and see only this session's history, never other peers' threads
-- `/mesh` renders natively on Tern as a picker sheet with peer details, approval and compose buttons, and an input card for messages and the key phrase
-- Added `/ask` to talk to a mesh agent like `/btw`: bare `/ask` picks a peer and opens a conversation dialog (text and Tern) with follow-ups in the same thread, `/ask <agent> <message>` asks and opens that dialog on the new thread, agents autocomplete by session name, and `/mesh` gains an Ask action (`q`); `/ask` is available only while `mesh.enabled` is on ([docs](../../docs/mesh.md#ask))
-- `mesh_send` `status`/`ask`/`task` no longer block the agent: an answer not back within `mesh.autoBackground.thresholdMs` (default 10s), or a user message arriving meanwhile, moves the wait to a background `mesh` job, and the answer is delivered as a follow-up message that wakes the agent; the job shows in `proc://`, `wait` blocks on it, and it counts toward the background-job cap (`mesh.autoBackground.enabled` turns it off)
-- The main agent now knows who else is on the mesh: it is told which other agents are there (name, session, cwd, branch, summary), and agents that join or leave are announced with the next prompt or mid-run after a tool batch, without waking an idle agent or adding model calls (`mesh.announcePeers`); an agent is announced once its session has a name and a summary, which comes after 3 model turns. While the mesh is on, the system prompt tells the agent to consult a peer whose work matters to its task, and to coordinate before editing files a peer on the same branch may be editing
-
-### Changed
-
-- Local Collab host discovery (`omp collab list`, `omp collab link`, `/collab list`) now runs on the shared same-machine instance registry `~/.omp/run/instances` instead of `~/.omp/run/collab-hosts`: a host's instance ID is its process's instance ID, the registry directory is restricted to the current user on Windows too (no longer inheriting the configuration root's ACL), and hosts published by older omp builds are not listed (nor do they list newer ones) ([docs](../../docs/collab.md))
 
 ### Fixed
 
