@@ -683,7 +683,8 @@ impl MeshNode {
 		self.emit(fx);
 		match registered {
 			Ok(()) => response,
-			// The key is another peer's tracked request: never reroute its answers.
+			// The key is another peer's tracked request: never reroute its
+			// answers.
 			Err(KeyTaken) => MeshResponse::error(MeshErrorCode::Internal, taken),
 		}
 	}
@@ -1327,7 +1328,8 @@ impl MeshNode {
 					self.emit(fx);
 					return response;
 				},
-				// Thread kinds only: steers and notes ignore `thread`, as the frontend does.
+				// Thread kinds only: steers and notes ignore `thread`, as the
+				// frontend does.
 				MeshRequest::Message {
 					kind: MessageKind::Status | MessageKind::Ask | MessageKind::Task,
 					thread: Some(thread),
