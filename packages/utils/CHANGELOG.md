@@ -5,6 +5,8 @@
 ### Added
 
 - Added `mixHex` for blending two hex colors ([#19167](https://github.com/can1357/oh-my-pi/pull/19167) by [@materemias](https://github.com/materemias))
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
+- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ## [18.19.0] - 2026-11-12
 
@@ -31,8 +33,6 @@
 
 - Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
 - Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
-- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
-- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ### Fixed
 

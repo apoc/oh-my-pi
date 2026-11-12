@@ -69,6 +69,12 @@
 - Fixed Linux `press()` refusing with "AT-SPI action 'press' is unavailable" on Chromium and Electron menu items, list options and tabs, and on page elements whose only action is `doDefault`: a press now takes their `select` or `doDefault` action, as it already took `click` and `activate` ([#18921](https://github.com/can1357/oh-my-pi/pull/18921) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
+### Added
+
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
+- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ## [18.19.0] - 2026-11-12
 
@@ -125,10 +131,6 @@
 
 - Added Zig syntax highlighting for fenced Zig code in Markdown.
 - Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
-- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
-- Added `meshDeriveKey` and the `MeshNode` class, the native engine behind oh my pi mesh: same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots and request/response messaging
-- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
-- Added `meshPassphraseCheck(phrase)` (`{ chars, valid, weak, minChars, strongChars }`, counted like `meshDeriveKey`), and answer tracking to `MeshNode`: `request(to, fromAgentId, bodyJson, { timeoutMs, ticket?, hold? }, signal?)` validates `message` / `watch` acknowledgements and tracks their answers under the caller's ticket, `awaitReply(key, timeoutMs, signal?)` waits for the next answer, `forgetPending(tickets)` stops tracking, and `reply` / `pending_dropped` events carry answers nobody awaits and dropped tickets
 
 ### Fixed
 

@@ -18,6 +18,10 @@
 - Fixed `grep` tool results in ANSI and native Tern views to show a `binary matches` warning on both zero-match and matching searches ([#18988](https://github.com/can1357/oh-my-pi/pull/18988) by [@alphastorm](https://github.com/alphastorm))
 - The `/resume` picker deletes sessions through the `app.session.delete` action (default Backspace or Delete) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; a bound key that also deletes backward, such as Backspace or Ctrl+W, still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938), [#18961](https://github.com/can1357/oh-my-pi/pull/18961) by [@wolfiesch](https://github.com/wolfiesch))
 - Typing `/job` lists the `jobs` command first again instead of jumping whole-hyphen-segment skill matches like `skill:…-job-…` above it: inner-segment skill hits now tie (rather than outrank) command-prefix matches, so the tie keeps the popup command-first ([#18891](https://github.com/can1357/oh-my-pi/issues/18891), [#18916](https://github.com/can1357/oh-my-pi/pull/18916) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block and compose actions
+- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
+- Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
+- Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
 ## [18.19.0] - 2026-11-12
 
@@ -140,10 +144,6 @@
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
-- Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block and compose actions
-- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
-- Added an `onAsk` option to `MeshManagerComponent` offering a `q` / "Ask" action that closes the manager and hands the target peer to the host
-- Added `SlashCommand.isHidden()`: while it returns true, `CombinedAutocompleteProvider` leaves the command out of name, argument and inline-hint completion
 
 ### Changed
 
