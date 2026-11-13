@@ -648,9 +648,11 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen `/mesh` manager overlay. */
 	showMeshManager(): void;
-	/** `/ask [peer [message]]`: ask a mesh agent; no message opens the conversation dialog. False: nothing sent or opened. */
+	/** `/mesh ask [peer [message]]`: ask a mesh agent; no message opens the conversation dialog. False: nothing sent or opened. */
 	handleMeshAskCommand(args: string): Promise<boolean>;
-	/** Open the `/ask` conversation dialog with one mesh peer. */
+	/** `/mesh steer [peer [message]]`: steer a mesh agent's main session. False: nothing sent. */
+	handleMeshSteerCommand(args: string): Promise<boolean>;
+	/** Open the `/mesh ask` conversation dialog with one mesh peer. */
 	openMeshAsk(instanceId: string): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;

@@ -119,7 +119,7 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 | `r`       | Re-discover now                                                  |
 | `a` / `d` | Approve / deny the selected request                              |
 | `c`       | Compose to the selected peer: `status`, `ask`, `steer` or `note` |
-| `q`       | Ask the selected peer in the [`/ask`](#ask) dialog               |
+| `q`       | Ask the selected peer ([`/mesh ask`](#mesh-ask-and-mesh-steer))  |
 | `h` / `b` | Hide / block the selected peer                                   |
 | `v`       | Show hidden peers                                                |
 | `Esc`     | Back / close                                                     |
@@ -128,19 +128,22 @@ The manager overlay shows this instance (local/remote state, LAN port, engine er
 
 On Tern the manager is a native picker sheet: approvals and Local/Remote peer groups on the left, the selected peer or request on the right, and every key above as a button. Details open in the preview and Back (or Esc) leaves them; Approve acts only on the selected row, and activating an approval only selects it. The compose kind is a chip strip; the message and the key phrase are typed into a small input card (the key phrase masked). Terminals without native pickers keep the text overlay.
 
-## `/ask`
+## `/mesh ask` and `/mesh steer`
 
-A `/btw`-style side conversation answered by another instance: each question is a mesh `ask` (a read-only fork of the peer's session, see [Messages](#messages)) sent as the TUI user. `/ask` exists only while `mesh.enabled` is on: otherwise it is left out of autocomplete and, typed anyway, is not run (it falls through like any unknown `/…` input). Enable the mesh in `/mesh` (`e`).
+`/mesh ask` is a `/btw`-style side conversation answered by another instance: each question is a mesh `ask` (a read-only fork of the peer's session, see [Messages](#messages)) sent as the TUI user. `/mesh steer` sends a `steer` to the peer's main agent as the TUI user; its reply arrives as a `MESH` transcript card. Both need the mesh running; enable it in `/mesh` (`e`).
 
-| Command                  | Effect                                                                                   |
-| ------------------------ | ---------------------------------------------------------------------------------------- |
-| `/ask`                   | Pick a peer, then open the conversation dialog                                           |
-| `/ask <agent>`           | Open the dialog with that peer                                                           |
-| `/ask <agent> <message>` | Ask that peer and open the dialog on the new thread, like `/btw <question>`              |
+| Command                         | Effect                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `/mesh ask`                     | Pick a peer, then open the conversation dialog                              |
+| `/mesh ask <agent>`             | Open the dialog with that peer                                              |
+| `/mesh ask <agent> <message>`   | Ask that peer and open the dialog on the new thread, like `/btw <question>` |
+| `/mesh steer`                   | Pick a peer, then type the steer message                                    |
+| `/mesh steer <agent>`           | Type the steer message for that peer                                        |
+| `/mesh steer <agent> <message>` | Steer that peer's main agent                                                |
 
-`<agent>` resolves like `mesh_send`'s `to` (instance id, unique id prefix, or unique display/session name), except that it must be a listed peer with a snapshot: only `mesh_send` addresses an unlisted instance id directly (`mesh://<peer>` likewise needs a listed peer). Autocomplete lists peers by session name, with display name, short id, busy/idle and branch, and inserts the instance id.
+`<agent>` resolves like `mesh_send`'s `to` (instance id, unique id prefix, or unique display/session name), except that it must be a listed peer with a snapshot: only `mesh_send` addresses an unlisted instance id directly (`mesh://<peer>` likewise needs a listed peer). Autocomplete lists peers by session name, with display name, short id, busy/idle and branch, and inserts the instance id. A steer is subject to the peer's `mesh.inbound.steer` policy: under `ask` (the default) the status line says it awaits the peer user's approval, and a later denial arrives as an error `MESH` card. A send the peer refuses outright, or that fails, keeps the draft.
 
-The dialog reuses the BTW history panel, as text or as a Tern sheet: one entry per thread with that peer, newest first. With none it opens on a question composer; `n` starts a new thread, `f`/`Enter` follows up in the selected thread, `c` copies the answer. The answer waits up to 30 minutes. Esc (Tern: `x`) only stops waiting, since a peer cannot be cancelled; a later answer still arrives as a `MESH` card and completes the entry. A thread the peer has forgotten (session switch, TTL) refuses the follow-up; sending again starts a new thread. Conversations last for the process. `/mesh` → `q` opens the same dialog for the selected peer.
+The ask dialog reuses the BTW history panel, as text or as a Tern sheet: one entry per thread with that peer, newest first. With none it opens on a question composer; `n` starts a new thread, `f`/`Enter` follows up in the selected thread, `c` copies the answer. The answer waits up to 30 minutes. Esc (Tern: `x`) only stops waiting, since a peer cannot be cancelled; a later answer still arrives as a `MESH` card and completes the entry. A thread the peer has forgotten (session switch, TTL) refuses the follow-up; sending again starts a new thread. Conversations last for the process. `/mesh` → `q` opens the same dialog for the selected peer.
 
 ## `omp mesh list`
 
@@ -186,6 +189,6 @@ See [Settings → Mesh](./settings.md#mesh) for every `mesh.*` key.
 - [`src/mesh/outbound.ts`](../packages/coding-agent/src/mesh/outbound.ts), [`bridge.ts`](../packages/coding-agent/src/mesh/bridge.ts) — which session or UI receives an answer, and delivery into sessions
 - [`src/mesh/snapshot.ts`](../packages/coding-agent/src/mesh/snapshot.ts), [`summary.ts`](../packages/coding-agent/src/mesh/summary.ts) — what peers see
 - [`src/tools/mesh-peers.ts`](../packages/coding-agent/src/tools/mesh-peers.ts), [`mesh-send.ts`](../packages/coding-agent/src/tools/mesh-send.ts), [`src/internal-urls/mesh-protocol.ts`](../packages/coding-agent/src/internal-urls/mesh-protocol.ts) — agent surface
-- [`src/modes/controllers/mesh-ask-controller.ts`](../packages/coding-agent/src/modes/controllers/mesh-ask-controller.ts) — `/ask` conversations and dialog
+- [`src/modes/controllers/mesh-ask-controller.ts`](../packages/coding-agent/src/modes/controllers/mesh-ask-controller.ts) — `/mesh ask` conversations and dialog, `/mesh steer`
 - [`src/cli/mesh-cli.ts`](../packages/coding-agent/src/cli/mesh-cli.ts) — `omp mesh`
 - [`packages/tui/src/overlays/mesh-manager.ts`](../packages/tui/src/overlays/mesh-manager.ts) — `/mesh` overlay

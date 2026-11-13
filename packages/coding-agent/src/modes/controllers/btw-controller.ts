@@ -54,7 +54,7 @@ type BtwSheetOptions = Omit<
 	"spaceHoldKeys" | "spaceHold" | "requestRender" | "getHeight" | "escapeHides"
 >;
 
-/** Open and focus a fullscreen BTW history sheet (`/btw` history, `/ask`). */
+/** Open and focus a fullscreen BTW history sheet (`/btw` history, `/mesh ask`). */
 export function showBtwHistorySheet(
 	ctx: InteractiveModeContext,
 	options: BtwSheetOptions,

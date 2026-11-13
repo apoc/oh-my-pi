@@ -53,7 +53,7 @@ import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
-import { executeBuiltinSlashCommand, lookupTuiBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
@@ -210,7 +210,7 @@ const DETACHED_DRAFT_COMMANDS = new Set([
 	"guided-goal",
 	"tan",
 	"btw",
-	"ask",
+	"mesh",
 	"omfg",
 	"handoff",
 	"cleanse",
@@ -1189,10 +1189,7 @@ export class InputController {
 				hooksDone.resolve();
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached =
-				submittedMode !== undefined &&
-				DETACHED_DRAFT_COMMANDS.has(submittedMode) &&
-				lookupTuiBuiltinSlashCommand(submittedMode, { ctx: this.ctx }) !== undefined;
+			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
 			if (draftDetached) this.#dropSubmittedPending(submittedImages);
 
 			if (!text && !hasInputImages) return;
@@ -1563,10 +1560,7 @@ export class InputController {
 		}
 		if (!isSettingsInitialized() || !cfgBareSlashCommands.get(settings)) return undefined;
 		for (const token of folded === text ? [text] : [text, folded]) {
-			if (
-				lookupTuiBuiltinSlashCommand(token, { ctx: this.ctx }) ||
-				this.#isKnownNonBuiltinSlashCommandToken(token)
-			) {
+			if (lookupBuiltinSlashCommand(token) || this.#isKnownNonBuiltinSlashCommandToken(token)) {
 				return { command: `/${token}`, confirm: !emptySession && armed !== text };
 			}
 		}
@@ -1635,7 +1629,7 @@ export class InputController {
 	#matchesBuiltinSlashCommand(text: string): boolean {
 		const parsed = parseSlashCommand(text);
 		if (!parsed) return false;
-		const builtin = lookupTuiBuiltinSlashCommand(parsed.name, { ctx: this.ctx });
+		const builtin = lookupBuiltinSlashCommand(parsed.name);
 		return builtin !== undefined && (builtin.allowArgs === true || !parsed.args);
 	}
 
@@ -1668,7 +1662,7 @@ export class InputController {
 		}
 		if (text?.startsWith("/")) {
 			const parsed = parseSlashCommand(text);
-			const name = parsed && lookupTuiBuiltinSlashCommand(parsed.name, { ctx: this.ctx })?.name;
+			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
 			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
 				// writes it (with its own subagents), /jobs lists the focused agent's jobs
@@ -2997,7 +2991,7 @@ export class InputController {
 			return;
 		}
 		const parsedName = parseSlashCommand(text)?.name;
-		const builtin = parsedName ? lookupTuiBuiltinSlashCommand(parsedName, { ctx: this.ctx }) : undefined;
+		const builtin = parsedName ? lookupBuiltinSlashCommand(parsedName) : undefined;
 		if (builtin) commandUsage.record(builtin.name);
 	}
 

@@ -9608,6 +9608,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#meshAskController.handleCommand(args);
 	}
 
+	handleMeshSteerCommand(args: string): Promise<boolean> {
+		return this.#meshAskController.handleSteerCommand(args);
+	}
+
 	openMeshAsk(instanceId: string): void {
 		this.#meshAskController.openForPeer(instanceId);
 	}

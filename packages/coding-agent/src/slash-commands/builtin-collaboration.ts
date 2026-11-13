@@ -1,4 +1,4 @@
-import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -451,30 +451,42 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		name: "mesh",
 		icon: "globe",
 		description: "Manage the omp mesh: peers, approvals, mode, key phrase and messages",
+		subcommands: [
+			{ name: "ask", description: "Ask a mesh agent in a /btw-style dialog", usage: "[agent] [message]" },
+			{ name: "steer", description: "Steer a mesh agent's main session", usage: "[agent] [message]" },
+		],
+		subcommandOptional: true,
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			if (!cfgMeshEnabled.get(runtime.ctx.settings)) return "Mesh: disabled (open and press e to enable)";
 			const counts = meshPeerCountsText(runtime.ctx.settings, getMeshRuntime());
 			return counts === undefined ? "Mesh: not running" : `Mesh: ${counts}`;
 		},
-		handleTui: (_command, runtime) => {
-			clearSubmittedText(runtime);
-			runtime.ctx.showMeshManager();
-		},
-	},
-	{
-		name: "ask",
-		icon: "question",
-		description: "Ask a mesh agent in a /btw-style dialog: /ask [agent] [message]",
-		inlineHint: "[agent] [message]",
-		allowArgs: true,
-		// Exists only while the mesh is on: hidden from autocomplete and not run when typed.
-		isTuiHidden: runtime => !cfgMeshEnabled.get(runtime.ctx.settings),
 		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!verb) {
+				clearSubmittedText(runtime);
+				runtime.ctx.showMeshManager();
+				return;
+			}
+			const ctx = runtime.ctx;
+			const run =
+				verb === "ask"
+					? () => ctx.handleMeshAskCommand(rest)
+					: verb === "steer"
+						? () => ctx.handleMeshSteerCommand(rest)
+						: undefined;
+			if (!run) {
+				ctx.showError("Usage: /mesh [ask|steer] [agent] [message]");
+				// A detached draft already left the editor: give the mistyped command back, images included.
+				if (runtime.draftDetached) {
+					restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				}
+				return;
+			}
 			// Mesh messages carry text only.
 			if (refuseImages(command, runtime)) return;
-			await runWithDetachedDraft(command, runtime, () => runtime.ctx.handleMeshAskCommand(command.args), {
-				restoreText: true,
-			});
+			await runWithDetachedDraft(command, runtime, run, { restoreText: true });
 		},
 	},
 	{

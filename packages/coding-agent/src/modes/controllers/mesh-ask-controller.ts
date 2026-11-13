@@ -1,11 +1,14 @@
 /**
- * `/ask`: a /btw-style side conversation answered by another omp instance over the mesh.
+ * `/mesh ask`: a /btw-style side conversation answered by another omp instance over the mesh.
  * Each conversation is one mesh `ask` thread with one peer (a read-only fork of its session);
  * follow-ups continue the thread. The dialog reuses the BTW history panel (text and native).
  *
- * `/ask <peer> <message>` sends the question and opens the dialog on its thread, like `/btw <question>`.
+ * `/mesh ask <peer> <message>` sends the question and opens the dialog on its thread, like `/btw <question>`.
  * An answer nobody waits for any more (stopped, timed out) lands as a `MESH` transcript card and is
- * folded into its conversation, so `/ask <peer>` shows it.
+ * folded into its conversation, so `/mesh ask <peer>` shows it.
+ *
+ * `/mesh steer [peer] [message]` sends a steer to the peer's main agent as the TUI user; its answer
+ * arrives as a `MESH` transcript card.
  */
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
@@ -16,11 +19,17 @@ import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils"
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { toError } from "@oh-my-pi/pi-utils";
 import { MeshEngineError, type MeshIncomingReply, type MeshPeerView } from "../../mesh/engine";
-import { MESH_SEND_MAX_TIMEOUT_SEC, MESH_USER_AGENT_ID, type MeshSendResult } from "../../mesh/outbound";
+import {
+	MESH_SEND_MAX_TIMEOUT_SEC,
+	MESH_USER_AGENT_ID,
+	type MeshRefusal,
+	type MeshSendResult,
+} from "../../mesh/outbound";
 import { resolveMeshPeer, visibleMeshPeers } from "../../mesh/peers";
 import { getMeshRuntime, type MeshRuntime } from "../../mesh/runtime";
 import type { MeshSender, MeshSnapshot } from "../../mesh/wire";
 import { beginBtwTurn, patchLatestBtwTurn } from "../../session/btw-turn";
+import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
 import { parseSubcommand } from "../../slash-commands/helpers/parse";
 import type { InteractiveModeContext } from "../types";
 import { copyBtwAnswer, showBtwHistorySheet } from "./btw-controller";
@@ -71,26 +80,61 @@ export class MeshAskController {
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
-	/** `/ask [peer [message]]`; false when nothing was sent or opened, so the draft comes back. */
+	/** `/mesh ask [peer [message]]`; false when nothing was sent or opened, so the draft comes back. */
 	async handleCommand(args: string): Promise<boolean> {
 		const runtime = this.#runtime();
 		if (!runtime) return false;
 		const { verb: query, rest: message } = parseSubcommand(args);
 		if (!query) {
-			const picked = await this.#pickPeer(runtime);
-			// A dismissed picker is a choice, not a failure: a bare `/ask` is not worth restoring.
+			const picked = await this.#pickPeer(runtime, "Ask a mesh agent");
+			// A dismissed picker is a choice, not a failure: a bare `/mesh ask` is not worth restoring.
 			return picked ? this.openForPeer(picked) : true;
 		}
-		const resolution = resolveMeshPeer(runtime.engine.peers(), query);
-		if (!resolution.ok) {
-			this.ctx.showError(sanitizeErrorLine(resolution.message));
-			return false;
-		}
-		// `resolveMeshPeer` only returns peers that served a snapshot.
-		const peer = peerOf(resolution.peer, resolution.peer.snapshot!);
+		const peer = this.#resolvePeer(runtime, query);
+		if (!peer) return false;
 		if (!message) return this.#open(peer);
 		// Open only once the peer accepted the question; a refusal keeps the draft instead.
 		return (await this.#send(peer, message)) && this.#open(peer);
+	}
+
+	/**
+	 * `/mesh steer [peer [message]]`: a missing peer is picked, a missing message typed. False when an
+	 * inline message was not sent, so the draft comes back; a typed message that was not sent comes back
+	 * as a full `/mesh steer <id> <message>` draft. A dismissed picker or prompt is a choice, not a failure.
+	 */
+	async handleSteerCommand(args: string): Promise<boolean> {
+		const runtime = this.#runtime();
+		if (!runtime) return false;
+		const { verb: query, rest } = parseSubcommand(args);
+		let peer: MeshAskPeer | undefined;
+		if (query) {
+			peer = this.#resolvePeer(runtime, query);
+		} else {
+			const picked = await this.#pickPeer(runtime, "Steer a mesh agent");
+			if (!picked) return true;
+			const view = this.#liveView(runtime, picked, "That mesh peer");
+			peer = view && peerOf(view, view.snapshot!);
+		}
+		if (!peer) return false;
+		const inline = rest.trim();
+		if (inline) return this.#steer(peer, inline);
+		const typed = (await this.ctx.showHookInput(`Steer ${peerTitle(peer)}`, "Message for its main agent…"))?.trim();
+		if (!typed) return true;
+		if (await this.#steer(peer, typed)) return true;
+		// The submitted draft lacks the typed message (and a picked peer): give back the whole command instead.
+		restoreDetachedDraft(this.ctx.editor, `/mesh steer ${peer.instanceId} ${typed}`);
+		return true;
+	}
+
+	/** A listed peer named by id, id prefix or unique name; `undefined`, with the error shown, otherwise. */
+	#resolvePeer(runtime: MeshRuntime, query: string): MeshAskPeer | undefined {
+		const resolution = resolveMeshPeer(runtime.engine.peers(), query);
+		if (!resolution.ok) {
+			this.ctx.showError(sanitizeErrorLine(resolution.message));
+			return undefined;
+		}
+		// `resolveMeshPeer` only returns peers that served a snapshot.
+		return peerOf(resolution.peer, resolution.peer.snapshot!);
 	}
 
 	/** Open the conversation dialog with one peer (the picker, the `/mesh` Ask action). */
@@ -165,7 +209,7 @@ export class MeshAskController {
 	}
 
 	/** The picked peer's instance id; labels are disambiguated and mapped back by position. */
-	async #pickPeer(runtime: MeshRuntime): Promise<string | undefined> {
+	async #pickPeer(runtime: MeshRuntime, title: string): Promise<string | undefined> {
 		const views = visibleMeshPeers(runtime.engine);
 		if (views.length === 0) {
 			this.ctx.showStatus("No mesh peers found. Open /mesh to discover or check the key phrase.");
@@ -176,7 +220,7 @@ export class MeshAskController {
 			[],
 		);
 		const choice = await this.ctx.showHookSelector(
-			"Ask a mesh agent",
+			title,
 			views.map((view, index) => ({
 				label: labels[index]!,
 				description: meshDisplayText(
@@ -241,11 +285,7 @@ export class MeshAskController {
 				},
 			});
 		} catch (error) {
-			const message =
-				error instanceof MeshEngineError
-					? `${error.code}: ${error.message}`
-					: `unreachable: ${toError(error).message}`;
-			this.ctx.showError(sanitizeErrorLine(`${peerTitle(peer)} ${message}`));
+			this.#showSendError(peer, error);
 			return false;
 		} finally {
 			if (conversation) conversation.sending = false;
@@ -261,11 +301,7 @@ export class MeshAskController {
 				);
 				return false;
 			}
-			this.ctx.showError(
-				result.code === "blocked"
-					? `${peerTitle(peer)} is blocked: ${result.message}`
-					: sanitizeErrorLine(`${peerTitle(peer)} refused: ${result.code}: ${result.message}`),
-			);
+			this.#showRefusal(peer, result);
 			return false;
 		}
 		const { record } = beginBtwTurn(text, null, conversation?.record);
@@ -283,6 +319,49 @@ export class MeshAskController {
 		this.#refresh(target);
 		if (!conversation) this.#dialog?.panel.showRecord(target.record.id);
 		return true;
+	}
+
+	/** Steer the peer's main agent; its answer arrives later as a `MESH` card. True once the peer acknowledged it. */
+	async #steer(peer: MeshAskPeer, text: string): Promise<boolean> {
+		const runtime = this.#runtime();
+		if (!runtime) return false;
+		const view = this.#liveView(runtime, peer.instanceId, peerTitle(peer));
+		if (!view) return false;
+		let result: MeshSendResult;
+		try {
+			result = await runtime.frontend.outbound.send({
+				to: view,
+				fromAgentId: MESH_USER_AGENT_ID,
+				kind: "steer",
+				text,
+			});
+		} catch (error) {
+			this.#showSendError(peer, error);
+			return false;
+		}
+		if (!result.ok) {
+			this.#showRefusal(peer, result);
+			return false;
+		}
+		const pending = result.pending === "approval" ? ", awaiting its user's approval" : "";
+		this.ctx.showStatus(`Steer sent to ${peerTitle(peer)}${pending}; any reply appears in the transcript`);
+		return true;
+	}
+
+	#showSendError(peer: MeshAskPeer, error: unknown): void {
+		const message =
+			error instanceof MeshEngineError
+				? `${error.code}: ${error.message}`
+				: `unreachable: ${toError(error).message}`;
+		this.ctx.showError(sanitizeErrorLine(`${peerTitle(peer)} ${message}`));
+	}
+
+	#showRefusal(peer: MeshAskPeer, result: MeshRefusal): void {
+		this.ctx.showError(
+			result.code === "blocked"
+				? `${peerTitle(peer)} is blocked: ${result.message}`
+				: sanitizeErrorLine(`${peerTitle(peer)} refused: ${result.code}: ${result.message}`),
+		);
 	}
 
 	async #awaitAnswer(conversation: MeshAskConversation, msgId: string, runtime: MeshRuntime): Promise<void> {
@@ -308,7 +387,7 @@ export class MeshAskController {
 		// A dialog answer has no card: when its dialog is closed, say where it is.
 		if (this.#dialog?.peerId !== conversation.peer.instanceId) {
 			const title = peerTitle(conversation.peer);
-			this.ctx.showStatus(`Answer from ${title} ready · /ask ${conversation.peer.instanceId} to read it`);
+			this.ctx.showStatus(`Answer from ${title} ready · /mesh ask ${conversation.peer.instanceId} to read it`);
 		}
 	}
 

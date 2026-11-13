@@ -421,17 +421,25 @@ function currentMeshPeers(): readonly MeshPeerView[] {
 }
 
 /**
- * `/ask <agent>`: mesh peers matched by session name, display name or instance id. The
- * session name is shown so the agent is easy to pick; the inserted value is the instance id,
- * which always resolves to exactly that peer (names repeat and may hold spaces or glyphs).
- * Only the first argument completes; the message after it is free text.
+ * `/mesh [ask|steer] <agent>`: the subcommand completes while typed (the bare `/mesh` opens the
+ * manager), then mesh peers matched by session name, display name or instance id. The session
+ * name is shown so the agent is easy to pick; the inserted value is the instance id, which always
+ * resolves to exactly that peer (names repeat and may hold spaces or glyphs). The message after
+ * the agent is free text.
  */
-export function buildMeshPeerArgumentCompletions(
+export function buildMeshArgumentCompletions(
+	subcommands: SubcommandDef[],
 	getPeers: () => readonly MeshPeerView[] = currentMeshPeers,
 ): (argumentPrefix: string) => AutocompleteItem[] | null {
+	const subcommandCompletions = buildArgumentCompletions(subcommands, { optional: true });
 	return (argumentPrefix: string) => {
-		if (/\s/.test(argumentPrefix)) return null;
-		const query = argumentPrefix.toLowerCase();
+		const spaceIndex = argumentPrefix.indexOf(" ");
+		if (spaceIndex === -1) return subcommandCompletions(argumentPrefix);
+		const rawSubcommand = argumentPrefix.slice(0, spaceIndex);
+		if (!subcommands.some(sub => sub.name === rawSubcommand.toLowerCase())) return null;
+		const peerPrefix = argumentPrefix.slice(spaceIndex + 1);
+		if (/\s/.test(peerPrefix)) return null;
+		const query = peerPrefix.toLowerCase();
 		const matches: AutocompleteItem[] = [];
 		for (const peer of getPeers()) {
 			const snapshot = peer.snapshot;
@@ -449,7 +457,7 @@ export function buildMeshPeerArgumentCompletions(
 			const details = [name, peer.instanceId.slice(0, 8), snapshot.busy ? "busy" : "idle"];
 			if (snapshot.repo?.branch) details.push(meshDisplayText(snapshot.repo.branch));
 			matches.push({
-				value: `${peer.instanceId} `,
+				value: `${rawSubcommand} ${peer.instanceId} `,
 				label: meshDisplayText(sessionName) || name,
 				description: details.join(" · "),
 			});
