@@ -11,97 +11,38 @@ use std::{future::Future, io, sync::Arc, time::Duration};
 
 use memchr::memchr;
 use napi::{
-	Env, Error, JsError, JsString, JsTypeError, Result,
+	Env, Error, JsString, JsTypeError, Result,
 	bindgen_prelude::{Either, Function, PromiseRaw, Uint8Array},
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
+use omp_ipc::IpcError;
 use parking_lot::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::js;
+use crate::{js, task::coded};
 
 mod conn;
 mod cork;
-mod endpoint;
-mod lines;
 mod tcp;
-#[cfg(unix)]
-mod unix;
-#[cfg(windows)]
-mod windows;
-
-#[cfg(unix)]
-use unix as platform;
-#[cfg(windows)]
-use windows as platform;
 
 use self::conn::{FrameCallback, Framing, Shared, Stream};
-
-#[cfg(not(any(unix, windows)))]
-compile_error!("omp-natives IPC requires Unix or Windows");
 
 /// Default `maxFrameBytes` for `lines` framing.
 const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// Default connect deadline.
 const DEFAULT_CONNECT_TIMEOUT_MS: u32 = 3000;
 
-/// Transport failure carrying an errno-style code.
-pub struct IpcError {
-	code:    &'static str,
-	message: String,
-}
-
-impl IpcError {
-	fn new(code: &'static str, message: impl Into<String>) -> Self {
-		Self { code, message: message.into() }
-	}
-
-	fn io(error: &io::Error, context: &str) -> Self {
-		Self { code: io_error_code(error), message: format!("{context}: {error}") }
-	}
-
-	/// `onClose` reason text: `"<CODE>: <message>"`.
-	fn reason(&self) -> String {
-		format!("{}: {}", self.code, self.message)
-	}
-
-	/// JS `Error` whose `code` property is this error's code.
-	fn into_js(self, env: &Env) -> Error {
-		Error::from(JsError::from(Error::new(self.code, self.message)).into_unknown(*env))
-	}
+/// JS `Error` whose `code` property is `error`'s code.
+fn into_js(error: IpcError, env: &Env) -> Error {
+	let code = error.code();
+	coded(*env, code, error.into_message())
 }
 
 /// JS `TypeError` with `code`, for argument misuse.
 fn type_error(env: &Env, code: &str, message: &str) -> Error {
 	Error::from(JsTypeError::from(Error::new(code, message)).into_unknown(*env))
-}
-
-/// Errno-style name for `error`.
-fn io_error_code(error: &io::Error) -> &'static str {
-	if let Some(code) = error.raw_os_error().and_then(platform::os_error_code) {
-		return code;
-	}
-	match error.kind() {
-		io::ErrorKind::NotFound => "ENOENT",
-		io::ErrorKind::PermissionDenied => "EACCES",
-		io::ErrorKind::ConnectionRefused => "ECONNREFUSED",
-		io::ErrorKind::ConnectionReset => "ECONNRESET",
-		io::ErrorKind::ConnectionAborted => "ECONNABORTED",
-		io::ErrorKind::NotConnected => "ENOTCONN",
-		io::ErrorKind::AddrInUse => "EADDRINUSE",
-		io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
-		io::ErrorKind::BrokenPipe => "EPIPE",
-		io::ErrorKind::AlreadyExists => "EEXIST",
-		io::ErrorKind::WouldBlock => "EAGAIN",
-		io::ErrorKind::InvalidInput => "EINVAL",
-		io::ErrorKind::TimedOut => "ETIMEDOUT",
-		io::ErrorKind::Interrupted => "EINTR",
-		io::ErrorKind::Unsupported => "ENOTSUP",
-		io::ErrorKind::OutOfMemory => "ENOMEM",
-		_ => "EIO",
-	}
 }
 
 fn parse_framing(env: &Env, framing: &str) -> Result<Framing> {
@@ -157,15 +98,7 @@ pub struct IpcConnectOptions {
 /// Pure and deterministic: every process computes the same endpoint.
 #[napi(js_name = "ipcEndpoint")]
 pub fn ipc_endpoint(dir: String, name: String) -> String {
-	let resolved = endpoint::resolve_dir(&dir);
-	#[cfg(unix)]
-	{
-		endpoint::unix_endpoint(&resolved, &name, platform::euid(), endpoint::SUN_PATH_MAX)
-	}
-	#[cfg(windows)]
-	{
-		endpoint::windows_pipe_name(&resolved, &name)
-	}
+	omp_ipc::endpoint(&dir, &name)
 }
 
 type ConnectionCallback =
@@ -176,12 +109,12 @@ struct ServerState {
 	refed:         bool,
 	accept_task:   Option<JoinHandle<()>>,
 	cancel:        CancellationToken,
-	bound:         Option<platform::Bound>,
+	bound:         Option<omp_ipc::Bound>,
 }
 
 /// Listening socket of either transport.
 enum Listener {
-	Local(platform::Listener),
+	Local(omp_ipc::Listener),
 	Tcp(tokio::net::TcpListener),
 }
 
@@ -198,7 +131,7 @@ impl Listener {
 struct Bind {
 	listener: Listener,
 	/// Local endpoint to release on close (Unix socket file).
-	bound:    Option<platform::Bound>,
+	bound:    Option<omp_ipc::Bound>,
 	endpoint: String,
 	port:     Option<u16>,
 }
@@ -234,7 +167,7 @@ impl IpcServer {
 		on_connection: Function<'_, IpcConnection, UnknownReturnValue>,
 	) -> Result<PromiseRaw<'env, Self>> {
 		Self::serve(env, &options, &on_connection, async move {
-			let (listener, bound) = platform::listen(&endpoint).await?;
+			let (listener, bound) = omp_ipc::listen(&endpoint).await?;
 			Ok(Bind { listener: Listener::Local(listener), bound: Some(bound), endpoint, port: None })
 		})
 	}
@@ -296,7 +229,7 @@ impl IpcServer {
 			// Unlink while the listener is still open: no other process can
 			// have replaced the file, because its liveness probe still succeeds.
 			if let Some(bound) = state.bound.take() {
-				platform::release(bound);
+				omp_ipc::release(bound);
 			}
 			state.cancel.cancel();
 			(state.accept_task.take(), state.on_connection.take())
@@ -361,7 +294,7 @@ impl IpcServer {
 					Self { endpoint, port, state }
 				}))
 			},
-			|env, outcome| outcome.map_err(|error| error.into_js(env)),
+			|env, outcome| outcome.map_err(|error| into_js(error, env)),
 		)
 	}
 
@@ -433,7 +366,7 @@ impl IpcConnection {
 			Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS)));
 		env.spawn_future_with_callback(
 			async move {
-				let connected = tokio::time::timeout(timeout, platform::connect(&endpoint, timeout))
+				let connected = tokio::time::timeout(timeout, omp_ipc::connect(&endpoint, timeout))
 					.await
 					.map_err(|_| {
 						IpcError::new(
@@ -444,7 +377,7 @@ impl IpcConnection {
 					.flatten();
 				Ok(connected.map(|stream| Self::spawn(Stream::Local(stream), framing, max_frame_bytes)))
 			},
-			|env, outcome| outcome.map_err(|error| error.into_js(env)),
+			|env, outcome| outcome.map_err(|error| into_js(error, env)),
 		)
 	}
 
@@ -479,7 +412,7 @@ impl IpcConnection {
 					.flatten();
 				Ok(connected.map(|stream| Self::spawn(Stream::Tcp(stream), framing, max_frame_bytes)))
 			},
-			|env, outcome| outcome.map_err(|error| error.into_js(env)),
+			|env, outcome| outcome.map_err(|error| into_js(error, env)),
 		)
 	}
 
@@ -542,15 +475,16 @@ impl IpcConnection {
 			));
 		}
 		if !self.shared.is_started() {
-			return Err(
-				IpcError::new("ERR_INVALID_STATE", "upgradeRaw() requires a started connection")
-					.into_js(env),
-			);
+			return Err(into_js(
+				IpcError::new("ERR_INVALID_STATE", "upgradeRaw() requires a started connection"),
+				env,
+			));
 		}
 		if self.shared.upgrade.is_active() {
-			return Err(
-				IpcError::new("ERR_INVALID_STATE", "connection already upgraded").into_js(env),
-			);
+			return Err(into_js(
+				IpcError::new("ERR_INVALID_STATE", "connection already upgraded"),
+				env,
+			));
 		}
 		self.shared.upgrade_raw(on_chunk.create_ref()?);
 		Ok(())
@@ -667,7 +601,10 @@ impl IpcConnection {
 			return Err(type_error(env, "ERR_INVALID_ARG_TYPE", message));
 		}
 		if self.shared.is_started() {
-			return Err(IpcError::new("ERR_INVALID_STATE", "connection already started").into_js(env));
+			return Err(into_js(
+				IpcError::new("ERR_INVALID_STATE", "connection already started"),
+				env,
+			));
 		}
 		Ok(())
 	}

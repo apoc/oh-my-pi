@@ -496,6 +496,78 @@ describe("BtwHistoryPanel native events", () => {
 		expect(metas[1]).toMatch(/^Follow-up · Nov 5, 2026\D+09:15$/);
 		expect(metas[2]).toMatch(/^Follow-up · Nov 5, 2026\D+11:00$/);
 	});
+
+	it("starts a new topic from an empty panel with custom texts, natively and in text", async () => {
+		const started = Promise.withResolvers<void>();
+		const accepted = Promise.withResolvers<boolean>();
+		const onStart = vi.fn((_question: string, _signal: AbortSignal) => {
+			started.resolve();
+			return accepted.promise;
+		});
+		const settled = Promise.withResolvers<void>();
+		let accepting = false;
+		const history: BtwHistoryPanel = new BtwHistoryPanel({
+			records: [],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			requestRender: () => {
+				if (accepting) settled.resolve();
+			},
+			getHeight: () => 30,
+			texts: { heading: "Ask peer", role: "omp.overlay.ask", emptyTitle: "No questions yet", emptyHint: "Press n." },
+			onStart,
+		});
+		expect(history.nativeOverlay).toMatchObject({ role: "omp.overlay.ask", head: "Ask peer", size: "md" });
+		const empty = history.describe();
+		expect(findNode(empty, node => node.key === "empty")).toBeDefined();
+		expect(findNode(empty, node => node.key === "start")).toBeDefined();
+		const screen = Bun.stripANSI(history.render(80).join("\n"));
+		expect(screen).toContain("Ask peer");
+		expect(screen).toContain("No questions yet");
+		expect(screen).toContain("n new");
+
+		history.handleNativeEvent({ type: "action", key: "", act: "start", mods: [] });
+		expect(history.openStart()).toBe(false);
+		expect(findNode(history.describe(), node => node.key === "composer")).toBeDefined();
+		expect(Bun.stripANSI(history.render(80).join("\n"))).not.toContain("Topic:");
+		// A record update never drops the new-topic composer.
+		history.update([]);
+		expect(findNode(history.describe(), node => node.key === "composer")).toBeDefined();
+		expect(history.acceptsImages).toBe(false);
+
+		history.pasteText("what changed?");
+		history.handleInput("\r");
+		await started.promise;
+		expect(onStart.mock.calls[0]?.[0]).toBe("what changed?");
+		// The host adds and shows the new record before accepting.
+		history.update([record("n", "what changed?")]);
+		history.showRecord("n");
+		accepting = true;
+		accepted.resolve(true);
+		await settled.promise;
+		const described = history.describe();
+		expect(findNode(described, node => node.key === "composer")).toBeUndefined();
+		expect(findNode(described, node => node.k === "md" && node.p?.text === "what changed?")).toBeDefined();
+	});
+
+	it("keeps the default empty state and offers no new topic without onStart", () => {
+		const history = new BtwHistoryPanel({
+			records: [],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		expect(history.openStart()).toBe(false);
+		history.handleInput("n");
+		const described = history.describe();
+		expect(findNode(described, node => node.key === "composer")).toBeUndefined();
+		expect(JSON.stringify(described)).toContain("/btw <question>");
+		expect(findNode(described, node => node.key === "start")).toBeUndefined();
+		expect(Bun.stripANSI(history.render(80).join("\n"))).toContain("Use /btw QUESTION to start one.");
+	});
 });
 
 describe("CodexResetFireworks under a native surface", () => {

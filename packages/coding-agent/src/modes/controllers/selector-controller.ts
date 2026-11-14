@@ -165,7 +165,15 @@ async function loadProviderAuthUi() {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
+type MenuKind =
+	| "settings"
+	| "model-picker"
+	| "model-hub"
+	| "agents-dashboard"
+	| "agent-hub"
+	| "usage-dashboard"
+	/** Menus opened through {@link SelectorController.openFullscreenMenu}. */
+	| `custom:${string}`;
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -703,6 +711,31 @@ export class SelectorController {
 			throw error;
 		}
 		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
+	}
+
+	/**
+	 * Open a single-instance fullscreen menu owned outside this controller; a repeat `kind` request
+	 * focuses the open one. `create` receives the close callback that hides the overlay, frees `kind`
+	 * and hands focus back to the editor area.
+	 */
+	openFullscreenMenu(kind: string, create: (close: () => void) => Component): void {
+		const key: MenuKind = `custom:${kind}`;
+		if (this.#focusOpenMenu(key)) return;
+		const menu = this.#claimMenu(key);
+		let component: Component;
+		try {
+			component = create(() => {
+				menu.handle?.hide();
+				this.#releaseMenu(key, menu);
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			});
+		} catch (error) {
+			// A menu that never opened must not block the next request for the same kind.
+			this.#releaseMenu(key, menu);
+			throw error;
+		}
+		this.#mountMenu(menu, component, () => this.#showFullscreenMenu(component));
 	}
 
 	/**

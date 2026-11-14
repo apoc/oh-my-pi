@@ -349,6 +349,7 @@ import { LiveCommandController } from "./controllers/live-command-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
+import { type InteractiveMesh, installMesh } from "./components/mesh/interactive-mesh";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
@@ -1930,6 +1931,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
 	#recorderStarting = false;
+	mesh: InteractiveMesh | undefined;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -2691,6 +2693,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
+				await this.mesh?.dispose();
 				await this.#btwController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -2972,6 +2975,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				void this.#syncSessionPinned();
 			}),
 		);
+		this.mesh = installMesh(this, this.#selectorController);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
 		// The startup composer is already visible. Commit the complete runtime

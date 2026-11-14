@@ -1,9 +1,12 @@
 /**
- * `<` of a harness tag: `irc`, `tangent-notice`, or a `system-*` name
- * (`system-notice`, `system-reminder`, `system-interrupt`, …), opening or
- * closing. The system prompt tells the model these blocks are harness-authored.
+ * `<` of a harness tag: `irc`, `tangent-notice`, a hyphenated `mesh-*` envelope
+ * (`mesh-message`, `mesh-reply`, …; plain `<mesh>` is react-three-fiber JSX and stays
+ * untouched) or a `system-*` name (`system-notice`, `system-reminder`,
+ * `system-interrupt`, …), opening or closing. The system prompt tells the model these
+ * blocks are harness-authored, so untrusted text inside them must neither close them
+ * nor forge new ones.
  */
-const HARNESS_TAG_START_RE = /<(?=\s*\/?\s*(?:irc|tangent-notice|system-[a-z][a-z-]*)(?![\w-]))/gi;
+const HARNESS_TAG_START_RE = /<(?=\s*\/?\s*(?:irc|tangent-notice|mesh-[a-z][a-z-]*|system-[a-z][a-z-]*)(?![\w-]))/gi;
 
 /**
  * Keep agent- or job-authored text from closing the harness block it is

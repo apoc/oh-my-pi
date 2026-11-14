@@ -1,0 +1,28 @@
+[package]
+name = "omp-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+dns-lookup.workspace = true
+if-addrs.workspace = true
+mdns-sd.workspace = true
+parking_lot.workspace = true
+omp-instances.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+tokio.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

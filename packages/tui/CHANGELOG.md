@@ -11,6 +11,8 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added `MeshManagerComponent` (`overlays/mesh-manager`), the `/mesh` overlay listing mesh peers and pending approvals with mode, key phrase, hide/block, compose and, with `onAsk`, a `q` / "Ask" action that hands the target peer to the host
+- Added `texts` and `onStart` options plus `openStart()` to `BtwHistoryPanel`, so hosts can relabel the panel and start a new topic from a composer (`n`, native "New question")
 
 ### Changed
 

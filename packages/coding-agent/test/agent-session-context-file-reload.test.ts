@@ -11,6 +11,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSessionContextView } from "@oh-my-pi/pi-coding-agent/session/context-view";
+import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 import * as repoContext from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
 import type { WorkspaceTree } from "@oh-my-pi/pi-coding-agent/workspace-tree";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -185,6 +186,81 @@ describe("AgentSession context-file reload on session reset", () => {
 			expect(observedAtRepoCompletion[0]).toBe(true);
 			return reset;
 		});
+	});
+});
+
+describe("AgentSession conversationId across a context reset", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("changes as soon as the conversation is emptied, before the memory reset settles", async () => {
+		using tempDir = TempDir.createSync("@pi-conversation-id-");
+		const { session, close } = await openReloadSession(tempDir, tempDir.path());
+		const memoryReset = Promise.withResolvers<void>();
+		try {
+			const before = session.conversationId;
+			const memoryResetEntered = Promise.withResolvers<void>();
+			vi.spyOn(SessionMemory.prototype, "resetContextForNewTranscript").mockImplementation(async () => {
+				memoryResetEntered.resolve();
+				await memoryReset.promise;
+			});
+
+			const reset = session.resetSessionContext();
+			await Promise.race([
+				memoryResetEntered.promise,
+				reset.then(() => {
+					throw new Error("reset settled before the memory reset");
+				}),
+			]);
+			// The conversation is already empty here; a reply to the old one must not match.
+			expect(session.conversationId).not.toBe(before);
+
+			memoryReset.resolve();
+			expect(await reset).toBeTruthy();
+			expect(session.conversationId).not.toBe(before);
+		} finally {
+			memoryReset.resolve();
+			await close();
+		}
+	});
+
+	it("stays changed when the memory reset throws", async () => {
+		using tempDir = TempDir.createSync("@pi-conversation-id-");
+		const { session, close } = await openReloadSession(tempDir, tempDir.path());
+		try {
+			const before = session.conversationId;
+			vi.spyOn(SessionMemory.prototype, "resetContextForNewTranscript").mockRejectedValue(new Error("memory down"));
+
+			await expect(session.resetSessionContext()).rejects.toThrow("memory down");
+			expect(session.conversationId).not.toBe(before);
+		} finally {
+			await close();
+		}
+	});
+
+	it("keeps the id when the current session is reloaded from disk", async () => {
+		using tempDir = TempDir.createSync("@pi-conversation-id-");
+		const cwd = tempDir.path();
+		const { session, close } = await openReloadSession(tempDir, cwd, {
+			sessionManager: SessionManager.create(cwd, tempDir.join("sessions")),
+		});
+		try {
+			await session.sendCustomMessage(
+				{ customType: "note", content: "persist the session", display: true },
+				{ triggerTurn: false },
+			);
+			await session.sessionManager.ensureOnDisk();
+			await session.sessionManager.flush();
+			const original = session.conversationId;
+			expect(await session.resetSessionContext()).toBeTruthy();
+			expect(session.conversationId).not.toBe(original);
+			const before = session.conversationId;
+			await session.reload();
+			expect(session.conversationId).toBe(before);
+		} finally {
+			await close();
+		}
 	});
 });
 

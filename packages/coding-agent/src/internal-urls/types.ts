@@ -168,6 +168,8 @@ export interface SchemeHost {
 	crossInstanceAgents?: boolean;
 	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
 	subagent: boolean;
+	/** `mesh_peers` is in this prompt's tool set (directly or as an xd device). */
+	mesh: boolean;
 }
 
 /**
@@ -299,6 +301,12 @@ export interface ResolveContext {
 	 * as a second exact identity alongside {@link sessionFile}.
 	 */
 	sessionId?: string;
+	/**
+	 * Source artifacts dir of a confined-fork caller (editor completion binding).
+	 * History completions may use this scalar without constructing a tool
+	 * session; tool resolution reads {@link session}.forkSourceArtifactsDir.
+	 */
+	forkSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
 	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */

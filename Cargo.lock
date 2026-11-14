@@ -4520,6 +4520,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ignore"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5339,6 +5349,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da5ac363534dce5fabf69949225e174fbf111a498bf0ff794c8ea1fba9f3dda"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "mdns-sd"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6743ed743ff2bada2b8651ef298d3f98addb0b74844f19cdd57137d8bd0219e"
+dependencies = [
+ "fastrand",
+ "flume",
+ "if-addrs",
+ "mio",
+ "socket-pktinfo",
+ "socket2 0.6.5",
 ]
 
 [[package]]
@@ -6281,6 +6305,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-instances"
+version = "19.0.1"
+dependencies = [
+ "libc",
+ "omp-ipc",
+ "parking_lot",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "omp-ipc"
+version = "19.0.1"
+dependencies = [
+ "libc",
+ "memchr",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "omp-iso"
 version = "19.0.1"
 dependencies = [
@@ -6291,6 +6343,25 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "xutf",
+]
+
+[[package]]
+name = "omp-mesh"
+version = "19.0.1"
+dependencies = [
+ "base64 0.23.1",
+ "dns-lookup",
+ "if-addrs",
+ "mdns-sd",
+ "omp-instances",
+ "parking_lot",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -6343,7 +6414,10 @@ dependencies = [
  "omp-builtins",
  "omp-diff",
  "omp-edit",
+ "omp-instances",
+ "omp-ipc",
  "omp-iso",
+ "omp-mesh",
  "omp-predict",
  "omp-shell",
  "omp-vcs",
@@ -8167,6 +8241,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "socket-pktinfo"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "512f5c35377cf69f350b106df2366c3a1df6bd01b047a7a58c8390b70d28838d"
+dependencies = [
+ "libc",
+ "socket2 0.6.5",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

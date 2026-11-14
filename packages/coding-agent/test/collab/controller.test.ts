@@ -6,9 +6,9 @@
  * session switch revokes the old room before its successor is published; and
  * the published access level caps what `omp collab link` can obtain.
  *
- * Real CollabHost/CollabSocket run over the in-memory relay; the registry's
- * real Unix-socket IPC is redirected into a temp dir via a spy on
- * `publishCollabHost`, exactly as in host-registry.test.ts.
+ * Real CollabHost/CollabSocket run over the in-memory relay; the process's
+ * shared instance host is replaced by a real one in a temp dir (rooms of
+ * "other processes" get their own), exactly as in host-registry.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -27,6 +27,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import * as instances from "@oh-my-pi/pi-coding-agent/instances";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -38,6 +39,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
@@ -230,9 +232,21 @@ async function settled(publishSpy: Mock<typeof registry.publishCollabHost>, call
 	await Promise.all(publishSpy.mock.results.map(result => result.value));
 }
 
+/** A room in "another process": its own instance host in the shared registry dir. */
+function otherInstanceHost(): InstanceHost {
+	const host = new InstanceHost({ dir: tmp });
+	otherHosts.push(host);
+	return host;
+}
+
 let tmp: string;
 let configRootSpy: Mock<typeof utils.getConfigRootDir>;
 let publishSpy: Mock<typeof registry.publishCollabHost>;
+let sharedSpy: Mock<typeof instances.sharedInstanceHost>;
+/** Stands in for this process's shared instance host. */
+let instanceHost: InstanceHost;
+/** Instance hosts of rooms that model another omp process. */
+const otherHosts: InstanceHost[] = [];
 let controller: CollabController | undefined;
 const guestCleanups: (() => void)[] = [];
 const publishWaiters: (() => void)[] = [];
@@ -255,9 +269,11 @@ beforeEach(async () => {
 		}
 	};
 	globalThis.WebSocket = Capturing as unknown as typeof WebSocket;
+	instanceHost = new InstanceHost({ dir: tmp });
+	sharedSpy = spyOn(instances, "sharedInstanceHost").mockReturnValue(instanceHost);
 	const real = registry.publishCollabHost;
 	publishSpy = spyOn(registry, "publishCollabHost").mockImplementation((source, options) => {
-		const publication = real(source, { ...options, dir: tmp });
+		const publication = real(source, options);
 		for (const wake of publishWaiters.splice(0)) wake();
 		return publication;
 	});
@@ -270,6 +286,9 @@ afterEach(async () => {
 	uninstallInMemoryRelay();
 	configRootSpy?.mockRestore();
 	publishSpy?.mockRestore();
+	sharedSpy?.mockRestore();
+	for (const host of otherHosts.splice(0)) await host.close();
+	await instanceHost.close();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	setInteractiveHost(savedInteractiveHost);
 	clearOmpExtensionCliRoots();
@@ -372,7 +391,7 @@ describe("interactive collaboration startup", () => {
 			persistence.mockRestore();
 			expect(testSession.sessionManager.getSessionId()).not.toBe(first.sessionId);
 			if (command === "/join") {
-				const remote = new CollabHost(makeControllerContext().ctx);
+				const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 				remoteHosts.push(remote);
 				await remote.start(RELAY_URL);
 				await executeBuiltinSlashCommand("/join " + remote.link, { ctx: mode });
@@ -431,7 +450,7 @@ describe("interactive collaboration startup", () => {
 		await testSession.sessionManager.ensureOnDisk();
 		await testSession.sessionManager.flush();
 		const localFile = testSession.sessionManager.getSessionFile();
-		const remote = new CollabHost(makeControllerContext().ctx);
+		const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 		remoteHosts.push(remote);
 		await remote.start(RELAY_URL);
 		const render = InteractiveMode.prototype.renderInitialMessages;
@@ -453,16 +472,12 @@ describe("interactive collaboration startup", () => {
 			expect(this.sessionManager.getSessionFile()).toBe(localFile);
 			expect(this.session.messages).toMatchObject([{ role: "user", content: "dedicated local transcript" }]);
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					host => host.instanceId === this.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(host => host.instanceId === instanceHost.instanceId),
 			).toMatchObject([{ access: "view", generation: 1 }]);
 			await this.session.newSession();
 			await this.collabController.idle();
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					host => host.instanceId === this.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(host => host.instanceId === instanceHost.instanceId),
 			).toMatchObject([{ access: "view", generation: 2, sessionId: this.sessionManager.getSessionId() }]);
 			throw finished;
 		});
@@ -515,7 +530,7 @@ describe("interactive collaboration startup", () => {
 		await mode.init({ suppressWelcomeIntro: true, autoStartCollab: true });
 		await mode.collabController.idle();
 		await executeBuiltinSlashCommand("/collab stop", { ctx: mode });
-		const remote = new CollabHost(makeControllerContext().ctx);
+		const remote = new CollabHost(makeControllerContext().ctx, { instanceHost: otherInstanceHost() });
 		remoteHosts.push(remote);
 		await remote.start(RELAY_URL);
 		return { local: mode, remote, localFile };
@@ -537,9 +552,7 @@ describe("interactive collaboration startup", () => {
 		await local.collabController.idle();
 		expect(local.sessionManager.getSessionFile()).toBe(localFile);
 		expect(
-			(await registry.listCollabHosts({ dir: tmp })).filter(
-				row => row.instanceId === local.collabController.instanceId,
-			),
+			(await registry.listCollabHosts({ dir: tmp })).filter(row => row.instanceId === instanceHost.instanceId),
 		).toEqual([]);
 	});
 
@@ -559,9 +572,7 @@ describe("interactive collaboration startup", () => {
 			expect(local.collabGuest).toBeDefined();
 			expect(local.collabHost).toBeUndefined();
 			expect(
-				(await registry.listCollabHosts({ dir: tmp })).filter(
-					h => h.instanceId === local.collabController.instanceId,
-				),
+				(await registry.listCollabHosts({ dir: tmp })).filter(h => h.instanceId === instanceHost.instanceId),
 			).toEqual([]);
 		} finally {
 			gate.resolve();
@@ -921,7 +932,7 @@ describe("CollabController", () => {
 		await settled(publishSpy, 1);
 		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
 		expect(snapshot).toMatchObject({
-			instanceId: controller.instanceId,
+			instanceId: instanceHost.instanceId,
 			generation: 1,
 			access: "control",
 			inputRequired: true,
@@ -960,7 +971,11 @@ describe("CollabController", () => {
 		await settled(publishSpy, 1);
 
 		const [snapshot] = await registry.listCollabHosts({ dir: tmp });
-		expect(snapshot).toMatchObject({ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId });
+		expect(snapshot).toMatchObject({
+			instanceId: instanceHost.instanceId,
+			generation: 1,
+			sessionId: state.sessionId,
+		});
 	});
 
 	it("reports an auto-start failure without throwing into startup", async () => {
@@ -1006,10 +1021,14 @@ describe("CollabController", () => {
 		expect(second).not.toBe(first);
 		const hosts = await registry.listCollabHosts({ dir: tmp });
 		expect(hosts).toHaveLength(1);
-		expect(hosts[0]).toMatchObject({ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId });
+		expect(hosts[0]).toMatchObject({
+			instanceId: instanceHost.instanceId,
+			generation: 2,
+			sessionId: state.sessionId,
+		});
 		// A card that still names generation 1 cannot obtain the new room.
 		await expect(
-			registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp }).then(link => link.generation),
+			registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp }).then(link => link.generation),
 		).resolves.toBe(2);
 		expect(second!.webLink).not.toBe(first.webLink);
 	});
@@ -1035,7 +1054,7 @@ describe("CollabController", () => {
 		// The moved session is shared again and the old registry entry is gone.
 		expect(ctx.collabHost?.sessionId).toBe(state.sessionId);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId },
+			{ instanceId: instanceHost.instanceId, generation: 2, sessionId: state.sessionId },
 		]);
 	});
 
@@ -1063,9 +1082,9 @@ describe("CollabController", () => {
 		if (!viewRoom) throw new Error("view room missing");
 
 		await expect(
-			registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp }),
+			registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp }),
 		).rejects.toMatchObject({ code: "access_unavailable" });
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "view", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "view", { dir: tmp })).url).toBe(
 			viewRoom.webViewLink,
 		);
 
@@ -1077,7 +1096,7 @@ describe("CollabController", () => {
 		const hosts = await registry.listCollabHosts({ dir: tmp });
 		expect(hosts).toHaveLength(1);
 		expect(hosts[0]).toMatchObject({ generation: 2, access: "control" });
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp })).url).toBe(
 			controlRoom.webLink,
 		);
 	});
@@ -1319,7 +1338,7 @@ describe("CollabController", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
 			{ sessionId: "upgraded-session", access: "control" },
 		]);
-		expect((await registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp })).url).toBe(
+		expect((await registry.resolveCollabHostLink(instanceHost.instanceId, "control", { dir: tmp })).url).toBe(
 			room.webLink,
 		);
 	});
@@ -1542,7 +1561,7 @@ describe("CollabController", () => {
 		expect(replacement).not.toBe(first);
 		expect(controller.host).toBe(replacement);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId, access: "control" },
+			{ instanceId: instanceHost.instanceId, generation: 2, sessionId: state.sessionId, access: "control" },
 		]);
 		await joinAsWriter(replacement!);
 	});
@@ -1583,7 +1602,7 @@ describe("CollabController", () => {
 			expect(hostAttempts).toBe(2);
 			expect(controller.host).toBe(ctx.collabHost);
 			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
-				{ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
+				{ instanceId: instanceHost.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
 			]);
 		});
 	});

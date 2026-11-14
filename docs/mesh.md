@@ -1,0 +1,194 @@
+# Mesh: Talking to Other omp Instances
+
+oh my pi mesh lets running omp instances find each other — on the same PC, and on the LAN — and message each other's main agent (or its human). An agent can ask another instance what it is working on, ask it a question answered from that session's context, steer it, delegate a task to it, or wait until it goes idle. Nothing leaves the machine or the LAN: there is no relay and no internet transport.
+
+The mesh is off by default. Only top-level hosts join it: the interactive TUI, RPC mode and ACP (the newest open session). Print mode, the SDK and subagents never do.
+
+## Quick start
+
+Same PC:
+
+```yaml
+# ~/.omp/agent/config.yml
+mesh:
+  enabled: true # mode defaults to local
+```
+
+or open `/mesh` and press `e`. Every omp process of the same user on this machine now appears in `/mesh` and in `xd://mesh_peers`.
+
+Across the LAN, on every machine:
+
+```
+omp mesh set-key        # or /mesh → k; same phrase everywhere
+omp config set mesh.mode both
+```
+
+## Modes
+
+`mesh.mode` picks which sides run. Two instances can talk only over a side both have on.
+
+| Mode     | Same PC (local side) | LAN (remote side)                      |
+| -------- | -------------------- | -------------------------------------- |
+| `local`  | yes                  | no network listener                    |
+| `remote` | no                   | yes; needs a key, status `no-key` else |
+| `both`   | yes                  | yes; needs a key, status `no-key` else |
+
+Changing `mesh.enabled`, `mesh.mode`, `mesh.key`, `mesh.port`, `mesh.peers` or the display name reconfigures the running engine live; no restart.
+
+## Key phrase
+
+The LAN side is protected by a shared key derived from a key phrase. Set it with `/mesh` → `k` (typed twice, masked) or `omp mesh set-key` (prompts twice on a TTY; reads the first stdin line otherwise: `echo phrase | omp mesh set-key`).
+
+- The phrase is NFC-normalized and trimmed, then stretched with PBKDF2-HMAC-SHA256 (600k iterations, fixed salt `omp-mesh/v1`) into a 32-byte key stored in the credential setting `mesh.key`. The phrase itself is never stored or printed.
+- Phrases shorter than 12 characters are rejected; both entry points warn below 16. Anyone on the LAN can see the group tag derived from the key and test guesses offline, so use a long phrase.
+- Every machine that should join uses the same phrase. Instances with another key are invisible to each other.
+
+## Discovery
+
+**Same PC.** Each instance serves the `mesh` namespace of its process's instance host, which has one entry in the owner-only instance registry `~/.omp/run/instances/` (`PI_CONFIG_DIR` replaces `.omp`): instance id, PID, endpoint nonce, endpoint, a random bearer token and the namespaces served (`capabilities`). The endpoint is a Unix socket `<id>-<nonce>.sock` inside that directory (directory `0700`, socket `0600`; under `/tmp/omp-<uid>/` when the path is too long for a socket) or, on Windows, a named pipe `\\.\pipe\omp-<id>-<nonce>-<hash>` whose DACL grants only the current user and which refuses remote (SMB) clients. Other accounts cannot connect, and before sending the token a client checks that the endpoint's server runs as the same OS user (peer uid on Unix, the server process's token user on Windows) and, on Windows, that the pipe is served by the entry's PID. The registry is shared with Collab; its listing, pruning, connection limit and Windows elevation caveat are described in [Collab → Listing active local hosts](./collab.md#listing-active-local-hosts).
+
+**LAN.** The remote side binds a TCP listener on all interfaces (`mesh.port`, `0` = free port) and announces it over mDNS DNS-SD as `_omp-mesh._tcp.local` with TXT `v` (protocol), `id` (instance id), `g` (public group tag derived from the key) and `n` (display name). Virtual adapters (Hyper-V/WSL, Docker, bridges, VirtualBox/VMware, …) are skipped unless nothing else is up. Browsing ignores other groups and our own id, and drops announcements from this machine: same-PC instances are reached through the local side only. An mDNS address is only a candidate until a sealed snapshot fetched over it names the expected instance.
+
+**Static peers.** `mesh.peers` lists `host:port` endpoints dialed directly, for networks where mDNS does not pass (other subnets, VPNs). They are never same-machine filtered, so `127.0.0.1:<port>` reaches another instance's LAN listener on this PC.
+
+**Contacts.** A remote instance that messages this one is learned as a peer (origin address + its advertised port) and listed once a snapshot verifies it.
+
+Peers known through several sources are merged, local first. A peer that fails three contacts in a row is `stale` and disappears two minutes later. Peers that have not served a snapshot are unverified and never listed.
+
+## Messages
+
+Every request carries the sender's instance id, agent id (`Main`, a subagent id, or `user` for the TUI human), display name and host.
+
+| Kind     | Reaches                                                                                                               | Answer                                             | Default policy |
+| -------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------------- |
+| `status` | An ephemeral side turn over the main context, no tools                                                                | Thread reply                                       | `allow`        |
+| `ask`    | A read-only fork of the main session (`read`/`grep`/`glob`/`find`), which may delegate to read-only `scout` subagents | Thread reply                                       | `allow`        |
+| `task`   | The bundled `task` agent, fresh context, in the recipient's cwd, with write tools; it may spawn any subagent          | Thread reply                                       | `deny`         |
+| `steer`  | The main agent's own conversation (wakes it if idle)                                                                  | Optional `reply` sent by that agent with `replyTo` | `ask`          |
+| `note`   | The human only, as a `MESH` transcript card; never the agent                                                          | None                                               | `allow`        |
+| `watch`  | One-shot notification on `idle` or `turn_end`                                                                         | `watch_event` when it fires                        | always on      |
+| `reply`  | Answers a `steer` (or delivers a thread answer)                                                                       | —                                                  | always on      |
+
+**Threads and follow-ups.** `status`, `ask` and `task` are acknowledged at once with a message id and a thread id; the answer comes later as a separate `reply` request to the sender. `xd://mesh_send` waits for it (default 300 s, max 1800 s); on timeout it returns the thread id and the answer later arrives as a hidden `mesh:reply` message to the asking agent, waking it if idle. With `mesh.autoBackground.enabled` (default on), a wait still unanswered after `mesh.autoBackground.thresholdMs` (default 10 s) moves to a background `mesh` job instead, so the call returns and the answer arrives as an `async-result` follow-up ([details](./tools/mesh_send.md#outputs)). If the peer is known to have left before answering, the asking side gets an error answer from it in place of the reply, and its open watches end: a same-machine peer whose local endpoint now serves another instance, at once; one whose registry entry stays gone across local polls for a poll interval plus a probe timeout (about 10–15 s); a LAN peer reached by static address or contact once it expires as stale (three failed contacts, then 2 minutes). A LAN peer found through mDNS gets no early answer — mDNS dropping it never counts, since a TTL expiry, a key change and our own discovery restarting look alike — so waits on it run to their timeout as before. A message already answered, or tracked past its 2 h limit, is never answered this way. A late answer is dropped when the asking session has closed or its conversation was replaced (`/new`, context reset, resume, fork). Passing `thread` continues an existing thread; omitting it starts a new one. A thread runs one turn at a time; follow-ups queue. An `ask` follow-up continues the same fork while the peer's main session has not moved on; otherwise it re-forks the current head and replays the earlier question/answer pairs. `status` follow-ups replay the thread history.
+
+Threads belong to the recipient's current session: they are persisted under the session's artifacts directory (so a resumed session keeps answering), expire on a session switch (`thread_expired`), and are forgotten after `mesh.threadTtlHours` idle. Only the instance that opened a thread can read or continue it; anyone else gets `unknown_thread`.
+
+**Peer awareness** (`mesh.announcePeers`, default on). The main agent gets hidden `mesh:peers` notices: first a roster of every other agent on the mesh (name, instance id, session name, busy/idle, cwd, branch, a short summary; at most 12, the rest counted) or a note that it is alone, then the agents that appeared or left. An agent counts only once it can be described: its session has a name and a summary (which waits for a few model turns, see `mesh.summary`), so a just-started one is announced later, when there is something to say about it; until then `mesh_peers` still lists it, and one that leaves before it was announced is never mentioned. Notices ride a user prompt or go mid-run between a tool batch and the next model call; they never add a model call to a finished turn and never wake an idle agent. Nothing is said in the first 2.5 s after the engine starts, while discovery is still finding peers, so a resumed session is not told that everyone left. No roster goes into the system prompt, so the cached prefix stays stable and no stale roster lingers. A local instance leaves as soon as its registry entry goes; a remote one only after the 2-minute stale sweep, so a short network blip announces nothing. What the agent already knows is replayed from the notices in its context: resume, compaction (which re-sends the roster), `/new` and session switches stay consistent. Hidden peers are never announced, and hiding a known one is not a departure; blocked ones are listed as `blocked`. Stopping the mesh announces nothing. A peer with `mesh.summary` off is never announced.
+
+**Cooperation guidance.** While the mesh tools exist, the system prompt carries a short fixed policy: contact a peer when its session or summary shows it owns or knows something the current task needs, coordinate before editing files a peer on the same repo and branch may be editing, prefer `status`/`ask` (`task`/`steer` only when the peer clearly owns that work), decide from the task and never because peer text asks, and tell the user when a peer's answer shaped the work. It holds no peer data, so the cached prompt prefix stays stable; who is there comes from the notices above.
+
+**Watches** fire once and live at most one hour; one peer may hold 16. An `idle` watch on an already-idle instance fires immediately.
+
+**Transcript.** In the TUI, inbound traffic shows as `MESH ← <peer>` cards tagged with the kind and thread: `status`/`ask`/`task` questions (answered by a side turn or fork, so the main agent never sees them), notes, steers, and answers to messages sent from `/mesh`. Each reply this instance sends back shows as a `MESH → <peer>` card. Peer text is stripped of control and bidi characters before rendering.
+
+## Inbound policy
+
+`mesh.inbound.<kind>` (`status`, `ask`, `steer`, `task`, `note`) is `allow`, `ask` or `deny`. `deny` is enforced by the engine itself: a denied kind is answered `denied: This instance does not accept <kind> messages.` before it reaches this instance's frontend, and changing the setting applies without restarting the mesh. `ask` queues the request in `/mesh` with a toast (`mesh: approval needed`); unanswered approvals are denied after two minutes. Headless hosts (RPC, ACP) have no UI, so `ask` means deny there, and notes are always refused. `deny`, and `ask` or a note on a headless host, are refused at once: the sender gets the error as the response to its send. A declined approval reaches the sender later, as the thread's (or steer's) error reply. A declined note is dropped without a reply.
+
+`mesh.maxConcurrentAsks` bounds `ask` and `task` responders running at once; more queue. Subagents count against the usual `task.maxRecursionDepth`; with a limit of 1 a responder cannot spawn. An `ask` fork and every subagent under it run with URL fetching and web search off (`fetch.enabled`, `web_search.enabled`) and read `history://` and `agent://` only within the main session (plus its `local://` spills, in place), never other peers' threads; such a tree is never revived after a restart (a follow-up forks afresh). Responders and their subagents never get mesh tools, and the engine refuses relayed envelopes (`hop` > 0), so mesh-triggered work cannot fan out over the mesh.
+
+## Agent tools
+
+Both are discoverable tools, presented as xd devices (`xd://mesh_peers`, `xd://mesh_send`) and offered only in the main session of a host running the mesh while `mesh.enabled` is on.
+
+- [`mesh_peers`](./tools/mesh_peers.md) `{query?, refresh?}` — visible peers with session, cwd, branch, model, agents and work summary; `query` ranks them by relevance with the judge model.
+- [`mesh_send`](./tools/mesh_send.md) `{to, kind, message, thread?, replyTo?, timeoutSec?, event?}` — send any kind above. `to` is an instance id, a unique id prefix, or a unique display/session name.
+
+## `mesh://`
+
+Read-only, served in the same sessions as the tools:
+
+| URL                          | Result                                         |
+| ---------------------------- | ---------------------------------------------- |
+| `mesh://`                    | Visible peers, as `mesh_peers` without a query |
+| `mesh://<peer>`              | Peer facts and its last snapshot (JSON)        |
+| `mesh://<peer>/threads`      | Threads this instance opened with that peer    |
+| `mesh://<peer>/threads/<id>` | One thread's question/answer transcript        |
+
+## `/mesh`
+
+The manager overlay shows this instance (local/remote state, LAN port, engine error), verified peers and pending approvals. The status line reads `mesh: N local · M remote` (plus `K pending`).
+
+| Key       | Action                                                           |
+| --------- | ---------------------------------------------------------------- |
+| `↑` `↓`   | Select                                                           |
+| `Enter`   | Peer details: snapshot, summary, agents, threads it opened here  |
+| `e`       | Enable / disable the mesh (`mesh.enabled`)                       |
+| `m`       | Cycle `mesh.mode`                                                |
+| `k`       | Set the key phrase                                               |
+| `r`       | Re-discover now                                                  |
+| `a` / `d` | Approve / deny the selected request                              |
+| `c`       | Compose to the selected peer: `status`, `ask`, `steer` or `note` |
+| `q`       | Ask the selected peer ([`/mesh ask`](#mesh-ask-and-mesh-steer))  |
+| `h` / `b` | Hide / block the selected peer                                   |
+| `v`       | Show hidden peers                                                |
+| `Esc`     | Back / close                                                     |
+
+`e`, `m` and `k` change the global settings (`config.yml`), not this instance alone: every instance using that config follows. Answers to messages sent from `/mesh` appear as `MESH` transcript cards. Hidden peers are left out of tool listings; requests from blocked peers are refused by the engine with `denied: sender is blocked` before they reach this instance's frontend. Both flags last for the process only.
+
+On Tern the manager is a native picker sheet: approvals and Local/Remote peer groups on the left, the selected peer or request on the right, and every key above as a button. Details open in the preview and Back (or Esc) leaves them; Approve acts only on the selected row, and activating an approval only selects it. The compose kind is a chip strip; the message and the key phrase are typed into a small input card (the key phrase masked). Terminals without native pickers keep the text overlay.
+
+## `/mesh ask` and `/mesh steer`
+
+`/mesh ask` is a `/btw`-style side conversation answered by another instance: each question is a mesh `ask` (a read-only fork of the peer's session, see [Messages](#messages)) sent as the TUI user. `/mesh steer` sends a `steer` to the peer's main agent as the TUI user; its reply arrives as a `MESH` transcript card. Both need the mesh running; enable it in `/mesh` (`e`).
+
+| Command                         | Effect                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `/mesh ask`                     | Pick a peer, then open the conversation dialog                              |
+| `/mesh ask <agent>`             | Open the dialog with that peer                                              |
+| `/mesh ask <agent> <message>`   | Ask that peer and open the dialog on the new thread, like `/btw <question>` |
+| `/mesh steer`                   | Pick a peer, then type the steer message                                    |
+| `/mesh steer <agent>`           | Type the steer message for that peer                                        |
+| `/mesh steer <agent> <message>` | Steer that peer's main agent                                                |
+
+`<agent>` resolves like `mesh_send`'s `to` (instance id, unique id prefix, or unique display/session name), except that it must be a listed peer with a snapshot: only `mesh_send` addresses an unlisted instance id directly (`mesh://<peer>` likewise needs a listed peer). Autocomplete lists peers by session name, with display name, short id, busy/idle and branch, and inserts the instance id. A steer is subject to the peer's `mesh.inbound.steer` policy: under `ask` (the default) the status line says it awaits the peer user's approval, and a later denial arrives as an error `MESH` card. A send the peer refuses outright, or that fails, keeps the draft.
+
+The ask dialog reuses the BTW history panel, as text or as a Tern sheet: one entry per thread with that peer, newest first. With none it opens on a question composer; `n` starts a new thread, `f`/`Enter` follows up in the selected thread, `c` copies the answer. The answer waits up to 30 minutes. Esc (Tern: `x`) only stops waiting, since a peer cannot be cancelled; a later answer still arrives as a `MESH` card and completes the entry. A thread the peer has forgotten (session switch, TTL) refuses the follow-up; sending again starts a new thread. Conversations last for the process. `/mesh` → `q` opens the same dialog for the selected peer.
+
+## `omp mesh list`
+
+```
+omp mesh list           # peers found with the current settings
+omp mesh list --json    # {"status": {...}, "peers": [...]}
+```
+
+Starts a short-lived engine with the current `mesh.*` settings (any free LAN port), discovers for 2.5 s, prints each peer (instance id, name, session, cwd, smol summary as one line cut to the terminal width or to 200 characters when piped, endpoint, source, state, host, PID, busy, model) and exits. It lists even while `mesh.enabled` is off. The listing node is itself unverified to running instances, so it does not appear in their peer lists.
+
+## Security model
+
+- **Transport.** One connection per request. LAN: a framed request/response protocol; the envelope is AES-256-GCM sealed with an HKDF subkey of the mesh key, plaintext routing info (version, msgId, sentAt, sender, recipient) is bound as associated data and must match the sealed copy, and each response is bound to its request's msgId and recipient. Same PC: one JSON request line (`mesh.envelope`, the envelope as body) and one response line over the instance host's endpoint, authenticated by the registry's bearer token and not sealed: only the same OS account can reach the endpoint, the client verifies the server's OS user (and, on Windows, the entry's PID) before sending the token, and a same-account process could read the token anyway.
+- **Trust group.** Local: the same OS account on the same machine. Remote: everyone holding the key. A key holder can do anything your inbound policies allow — guard the phrase like a password and keep `task` at `deny` unless every key holder is trusted to run code in your project.
+- **Sender ids are self-claimed.** Within the trust group nothing proves which instance sent a message: any key holder (or same-account process) can claim another peer's instance id toward this instance, including listing and reading the threads that peer opened here and answering requests sent to it. The mesh key, not the instance id, is the trust boundary.
+- **Replay and freshness (LAN).** Messages outside a ±60 s clock window or repeating a sender + msgId already seen are rejected. Same-PC requests carry no replay guard: a process able to replay one holds the token and can send anew.
+- **Limits.** 60 non-snapshot requests per minute per sender id and 180 per source IP; 64 concurrent connections per LAN listener, 8 per LAN source IP, and 64 per instance host shared by its namespaces; 256 KiB envelopes, 64 KiB text, 1024-character fields; 256 requests awaiting an answer; 16 active watches per sender id and 256 in total. Answers (`reply`, `watch_event`) are accepted only for messages and watches this instance sent to that peer. The engine tracks at most 1024 sent messages and watches for their answers (the oldest dropped beyond that): a message for 2 h, a watch for its own `ttlSec` (at most 1 h); it holds at most 64 answers that arrive before their send is acknowledged, for 60 s (more are answered `busy`), and 4 such early watch events per peer.
+- **Registry location.** The instance registry lives under the configuration root, and a project `.env` can set `PI_CONFIG_DIR` and so move it, even outside your home directory. Tokens stay safe either way, since both ends check the peer's OS user, but instances started from such a project list a different registry: local discovery can be split, or denied when the directory turns out to be another user's. If a parent of the relocated directory is writable by another local user, that user can redirect listing into one of your directories, where it deletes `*.json` files that are not instance entries; tokens and URLs stay safe.
+- **Unauthenticated on the LAN.** mDNS announcements (instance id, group tag, display name, port) and the transport's pre-auth rejections. Forging them can hide or misdirect peers (denial of service), not read or send messages.
+- **What peers see.** Any peer in the trust group can fetch this instance's snapshot: instance id, display name, host name, PID, omp version, session id and name, cwd, repo (origin remote with credentials redacted, branch, short head sha), model, busy flag, agent roster (id, kind, name, status, task), start time, and — unless `mesh.summary` is off — a smol-model summary of what the session is about (≤ 400 characters, first generated once the session made 3 model turns, then regenerated at most every two minutes after a turn ends, stored beside the session). Session transcripts are never shared; `status`/`ask` answers are produced by your agent and may quote context.
+- Peer-supplied text is untrusted: it is harness-tag escaped before reaching an agent and stripped of control sequences before rendering.
+
+## Limitations
+
+- LAN only: mDNS is link-local and IPv4-only; other subnets need `mesh.peers`. No NAT traversal or internet relay.
+- LAN machines' clocks must agree within 60 s.
+- Hide/block flags are not persisted.
+- Headless hosts deny `ask`-policy kinds and notes.
+- One mesh host per process; ACP serves its newest session.
+
+## Settings
+
+See [Settings → Mesh](./settings.md#mesh) for every `mesh.*` key.
+
+## Implementation files
+
+- [`crates/mesh`](../crates/mesh/src/) — engine: keys, wire protocol, LAN transport, `mesh` namespace, mDNS, peer table, inbound admission, answer correlation (replies and watch events matched to the requests that asked)
+- [`crates/instances`](../crates/instances/src/) — same-machine instance registry and host endpoint
+- [`crates/natives/src/mesh.rs`](../crates/natives/src/mesh.rs), [`instances.rs`](../crates/natives/src/instances.rs) — N-API bindings (`MeshNode`, `meshDeriveKey`, `meshPassphraseCheck`, `InstanceHost`)
+- [`src/instances.ts`](../packages/coding-agent/src/instances.ts) — the process's shared instance host
+- [`src/mesh/host.ts`](../packages/coding-agent/src/mesh/host.ts), [`native-engine.ts`](../packages/coding-agent/src/mesh/native-engine.ts) — host wiring, settings → engine
+- [`src/mesh/inbound.ts`](../packages/coding-agent/src/mesh/inbound.ts), [`responder.ts`](../packages/coding-agent/src/mesh/responder.ts), [`threads.ts`](../packages/coding-agent/src/mesh/threads.ts), [`approvals.ts`](../packages/coding-agent/src/mesh/approvals.ts) — inbound policy, answering, threads
+- [`src/mesh/outbound.ts`](../packages/coding-agent/src/mesh/outbound.ts), [`bridge.ts`](../packages/coding-agent/src/mesh/bridge.ts) — which session or UI receives an answer, and delivery into sessions
+- [`src/mesh/snapshot.ts`](../packages/coding-agent/src/mesh/snapshot.ts), [`summary.ts`](../packages/coding-agent/src/mesh/summary.ts) — what peers see
+- [`src/tools/mesh-peers.ts`](../packages/coding-agent/src/tools/mesh-peers.ts), [`mesh-send.ts`](../packages/coding-agent/src/tools/mesh-send.ts), [`src/internal-urls/mesh-protocol.ts`](../packages/coding-agent/src/internal-urls/mesh-protocol.ts) — agent surface
+- [`src/modes/controllers/mesh-ask-controller.ts`](../packages/coding-agent/src/modes/controllers/mesh-ask-controller.ts) — `/mesh ask` conversations and dialog, `/mesh steer`
+- [`src/cli/mesh-cli.ts`](../packages/coding-agent/src/cli/mesh-cli.ts) — `omp mesh`
+- [`packages/tui/src/overlays/mesh-manager.ts`](../packages/tui/src/overlays/mesh-manager.ts) — `/mesh` overlay

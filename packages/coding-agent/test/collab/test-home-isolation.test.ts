@@ -12,7 +12,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { collabHostsRuntimeDir, listCollabHosts } from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { listCollabHosts } from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { instanceRegistryDir } from "@oh-my-pi/pi-coding-agent/instances";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as utils from "@oh-my-pi/pi-utils";
@@ -195,8 +196,9 @@ describe("collab test home isolation", () => {
 			expect(pathIsWithin(realConfigDir(), switchedReplicaPath, { throughMissing: true })).toBe(false);
 			expect(await Bun.file(switchedReplicaPath).exists()).toBe(true);
 
-			const runtimeDir = collabHostsRuntimeDir();
-			expect(runtimeDir).toBe(path.join(isolatedHome, getConfigDirName(), "run", "collab-hosts"));
+			// `bun test` processes publish into a per-user temp registry, never the real `~/.omp/run`.
+			const runtimeDir = instanceRegistryDir();
+			expect(pathIsWithin(os.tmpdir(), runtimeDir)).toBe(true);
 			expect(pathIsWithin(realConfigDir(), runtimeDir, { throughMissing: true })).toBe(false);
 			const hosts = await listCollabHosts();
 			expect(hosts.map(entry => entry.instanceId)).toContain(host.instanceId);

@@ -592,6 +592,38 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
 	});
 
+	it("Enter /mesh ask with an image keeps the draft once and does not run", async () => {
+		const h = await createHarness(() => {});
+		const showWarning = vi.fn();
+		Object.assign(h.session, { customCommands: [], promptTemplates: [] });
+		const run = vi.fn(async () => true);
+		Object.assign(h.ctx, { showWarning, mesh: { ask: run } });
+		h.draftWithImage("/mesh ask carol look at this [Image #1]");
+
+		await h.pressSubmit(ENTER);
+
+		expect(run).not.toHaveBeenCalled();
+		expect(showWarning).toHaveBeenCalledTimes(1);
+		expect(h.editor.getExpandedText()).toBe("/mesh ask carol look at this [Image #1]");
+		expect(h.editor.pendingImages).toEqual([originalImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://original.png"]);
+	});
+
+	it("Enter /mesh with an unknown verb gives the draft and its image back", async () => {
+		const h = await createHarness(() => {});
+		const showError = vi.fn();
+		Object.assign(h.session, { customCommands: [], promptTemplates: [] });
+		Object.assign(h.ctx, { showError, mesh: {} });
+		h.draftWithImage("/mesh tel carol look at this [Image #1]");
+
+		await h.pressSubmit(ENTER);
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(h.editor.getExpandedText()).toBe("/mesh tel carol look at this [Image #1]");
+		expect(h.editor.pendingImages).toEqual([originalImage]);
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
 	it("Enter /tan as a collab guest gives the draft and its image back", async () => {
 		const h = await createHarness(() => {});
 		Object.assign(h.session, { customCommands: [], promptTemplates: [] });

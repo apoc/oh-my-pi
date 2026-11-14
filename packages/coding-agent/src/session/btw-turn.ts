@@ -69,18 +69,19 @@ export function runBtwTurn(
 		conversationKey: string;
 		onTextDelta: (delta: string) => void;
 		signal: AbortSignal;
+		/** Wraps each question (replayed and current) for the model; defaults to the `/btw` envelope. */
+		renderQuestion?: (question: string) => string;
 	},
 ): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
 	const model = session.model;
 	if (!model) throw new Error("No active model available for /btw.");
+	const renderQuestion =
+		args.renderQuestion ?? ((question: string) => prompt.render(btwUserPrompt, { question, inject: args.inject }));
 	const history: Message[] = [];
 	for (const turn of args.history ?? []) {
 		history.push({
 			role: "user",
-			content: [
-				{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question, inject: args.inject }) },
-				...(turn.images ?? []),
-			],
+			content: [{ type: "text", text: renderQuestion(turn.question) }, ...(turn.images ?? [])],
 			attribution: "agent",
 			timestamp: turn.createdAt,
 		});
@@ -106,7 +107,7 @@ export function runBtwTurn(
 		});
 	}
 	return session.runEphemeralTurn({
-		promptText: prompt.render(btwUserPrompt, { question: args.question, inject: args.inject }),
+		promptText: renderQuestion(args.question),
 		promptImages: args.images,
 		history,
 		conversationKey: args.conversationKey,

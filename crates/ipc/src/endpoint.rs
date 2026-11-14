@@ -13,6 +13,25 @@ use std::{
 
 use xxhash_rust::xxh64::xxh64;
 
+/// Platform endpoint for `name` scoped to directory `dir`.
+///
+/// Unix: `<dir>/<stem>.sock`; when that path does not fit `sun_path` (104 bytes
+/// on macOS/BSD, 108 on Linux, including NUL), `/tmp/omp-<euid>/<hash16>.sock`.
+/// Windows: `\\.\pipe\omp-<stem>-<hash16(lowercase(resolve(dir)))>`.
+/// `stem` is `name` with every char outside `[A-Za-z0-9._-]` replaced by "_".
+/// Pure and deterministic: every process computes the same endpoint.
+pub fn endpoint(dir: &str, name: &str) -> String {
+	let resolved = resolve_dir(dir);
+	#[cfg(unix)]
+	{
+		unix_endpoint(&resolved, name, crate::unix::euid(), SUN_PATH_MAX)
+	}
+	#[cfg(windows)]
+	{
+		windows_pipe_name(&resolved, name)
+	}
+}
+
 /// `name` with every char outside `[A-Za-z0-9._-]` replaced by `_`.
 pub fn sanitize_stem(name: &str) -> String {
 	name

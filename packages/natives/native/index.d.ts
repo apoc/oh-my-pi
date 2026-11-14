@@ -28,6 +28,22 @@ export declare class AudioPlayback {
   stop(): void
 }
 
+/** A host published under the `collab` namespace. `close()` withdraws it. */
+export declare class CollabRegistration {
+  /**
+   * Answer query `requestId`: `answer` read in one tick from the host's
+   * state, or `null` when the host cannot vouch for its session. Unknown or
+   * late ids (past the 5 s deadline) are ignored.
+   */
+  respond(requestId: string, answer?: CollabHostAnswer | undefined | null): void
+  /**
+   * Stop serving `collab` on the host (the host itself stays open). From
+   * the call on, no query reaches `onQuery` and pending ones fail.
+   * Idempotent.
+   */
+  close(): Promise<void>
+}
+
 /** Persistent, serialized native desktop capture/input/accessibility session. */
 export declare class DesktopSession {
   constructor(options?: DesktopSessionOptions | undefined | null)
@@ -347,6 +363,34 @@ export declare class HighlightStream {
   push(chunk: string): string
 }
 
+/**
+ * A same-machine instance.
+ *
+ * Nothing is bound or written until a namespace registers (e.g. a
+ * `MeshNode` with a local side); the entry then lives until `close()` /
+ * `withdrawSync()`. A closed host is terminal: later registrations fail.
+ */
+export declare class InstanceHost {
+  /** A host publishing into `opts.dir`. */
+  constructor(opts: InstanceHostOptions)
+  /**
+   * This process's host in `dir`, created with a random id on the first
+   * call. Throws when a later call names a different directory.
+   */
+  static shared(dir: string): InstanceHost
+  get instanceId(): string
+  /**
+   * Withdraw the entry, stop the listener and remove the endpoint.
+   * Idempotent.
+   */
+  close(): Promise<void>
+  /**
+   * `close()` for exit handlers: removes the entry, the socket and its
+   * bind lock synchronously and leaves the host closed.
+   */
+  withdrawSync(): void
+}
+
 /** One accepted or dialed IPC connection. */
 export declare class IpcConnection {
   /**
@@ -544,6 +588,84 @@ export declare class MacOSFrontApp {
   keepInFront(durationMs: number): Promise<number>
 }
 export type MacosFrontApp = MacOSFrontApp
+
+/**
+ * One mesh participant: local registry + LAN listener, discovery, peer
+ * table, snapshot serving and request/response messaging.
+ */
+export declare class MeshNode {
+  /**
+   * Create an idle node (mode `off` until `configure`).
+   *
+   * `close()` is required: the node keeps listening, publishing and
+   * announcing until it is closed, and the callback holds a strong
+   * reference to `onEvent` (and whatever it captures), so an unclosed node
+   * is never garbage-collected. "Weak" applies only to the event loop: an
+   * idle node does not keep the process alive.
+   */
+  static create(opts: MeshNodeOptions, onEvent: (event: MeshEvent) => void): MeshNode
+  get instanceId(): string
+  /**
+   * Reconcile local/LAN sides, discovery and static peers with `cfg`.
+   * Idempotent.
+   */
+  configure(cfg: MeshConfig): Promise<MeshStatus>
+  status(): MeshStatus
+  /**
+   * Replace the snapshot served for `snapshot` requests (must carry this
+   * node's instanceId).
+   */
+  setSnapshot(snapshotJson: string): void
+  /**
+   * Listed peers. `snapshotJson` is included only for peers whose
+   * `snapshotRevision` is greater than `sinceRevision` (omitted = 0 = every
+   * snapshot), so a caller that cached the JSON of the revisions it has
+   * seen crosses the boundary only for snapshots that changed.
+   */
+  peers(sinceRevision?: number | undefined | null): Array<MeshPeerInfo>
+  /**
+   * Status-line counts: peers with a snapshot that are neither hidden,
+   * blocked nor stale, per endpoint kind.
+   */
+  peerCounts(): MeshPeerCounts
+  /** Re-list local peers, query mDNS and refresh snapshots now. */
+  refresh(): void
+  /** Set the in-memory hide/block flags; an omitted flag keeps its value. */
+  setPeerFlags(instanceId: string, hidden?: boolean | undefined | null, blocked?: boolean | undefined | null): void
+  /**
+   * Send `bodyJson` (a `MeshRequest`) to peer `to` as `fromAgentId`;
+   * resolves to the `MeshResponse` JSON. A request the protocol rejects is
+   * not sent: it resolves to a `too_large` (size caps) or `bad_request`
+   * error response. A `message` / `watch` acknowledgement without a valid
+   * `msgId` / `watchId` resolves to an `internal` error response. Rejects
+   * with a JS error whose `code` is `unreachable`, `timeout`,
+   * `bad_response` or `aborted`.
+   */
+  request(to: string, fromAgentId: string, bodyJson: string, options: MeshRequestOptions, signal?: AbortSignal): Promise<string>
+  /**
+   * Wait up to `timeoutMs` for the next answer to the tracked request `key`
+   * (`msgId` / `watchId`); resolves to the answer's envelope JSON, or
+   * `null` when untracked, out of time, aborted, replaced by a newer
+   * `awaitReply` for the same key, or dropped. A held answer that already
+   * arrived resolves at once. Answers after the wait arrive as `reply`
+   * events.
+   */
+  awaitReply(key: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null>
+  /** Stop tracking the requests of `tickets` (their waits resolve `null`). */
+  forgetPending(tickets: Array<string>): void
+  /**
+   * Answer an `inbound` event with `responseJson` (a `MeshResponse`). Late or
+   * unknown ids are ignored. A response the protocol rejects is replaced by
+   * a `too_large` (size caps) or `internal` error answer, so the peer is not
+   * left waiting, and the rejection is still thrown.
+   */
+  respond(requestId: string, responseJson: string): void
+  /**
+   * Withdraw from the mesh and stop all background work. Required before
+   * dropping the node (see `create`). Idempotent.
+   */
+  close(): Promise<void>
+}
 
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
@@ -1650,6 +1772,90 @@ export interface ClipboardImage {
  * the host calls this from its exit handler.
  */
 export declare function closeDesktopEventTaps(): void
+
+/**
+ * A source's answer, read in one tick: the snapshot (`null` when the host
+ * cannot vouch for its session) and, for `link`, the URL for the requested
+ * access (`null` when that access is not published).
+ */
+export interface CollabHostAnswer {
+  snapshot: CollabHostSnapshot | null
+  url: string | null
+}
+
+/**
+ * One request a published host must answer via its registration's
+ * `respond()`.
+ */
+export interface CollabHostQuery {
+  requestId: string
+  op: 'snapshot' | 'link'
+  /** For `link`: the access whose URL is wanted. */
+  access?: 'view' | 'control'
+}
+
+/**
+ * Non-capability host state, computed by the host at query time. Free-form
+ * strings (session id and name, cwd, model) are bounded to 1024 UTF-16 code
+ * units on the wire.
+ */
+export interface CollabHostSnapshot {
+  /**
+   * The publishing host's instance id (listers take it from the registry
+   * entry, whatever the source reported).
+   */
+  instanceId: string
+  /** Increments every time the process starts a new room (≥ 1). */
+  generation: number
+  /** Host process id (listers take it from the registry entry). */
+  pid: number
+  /** Session id of the hosted conversation. */
+  sessionId: string
+  /** Human-readable session name, when one is set. */
+  sessionName: string | null
+  /** Host working directory. */
+  cwd: string
+  /** Model the host session is using, when one is selected. */
+  model: CollabModel | null
+  /** Epoch milliseconds when the host first connected to the relay. */
+  startedAt: number
+  /** Participant count, including the host. */
+  participants: number
+  /** Whether the host holds an open relay connection. */
+  relayConnected: boolean
+  /**
+   * Whether a host-side question waits for an answer a writable guest
+   * could give.
+   */
+  inputRequired: boolean
+  /**
+   * Whether the session is running a turn (streaming or executing tools).
+   * `null` when the host does not report it; unknown is not idle.
+   */
+  busy: boolean | null
+  /** Highest access the host hands out. */
+  access: 'view' | 'control'
+}
+
+export interface CollabLookupOptions {
+  /** Registry directory. */
+  dir: string
+  /** Per-host deadline in milliseconds (default 1500). */
+  timeoutMs?: number
+}
+
+export interface CollabModel {
+  provider: string
+  id: string
+}
+
+/** One resolved capability. */
+export interface CollabResolvedLink {
+  instanceId: string
+  generation: number
+  access: 'view' | 'control'
+  url: string
+}
 
 /** A context line (before or after a match). */
 export interface ContextLine {
@@ -2948,6 +3154,13 @@ export interface InlineSloppyRegion {
  */
 export declare function installSqliteLockShim(): boolean
 
+export interface InstanceHostOptions {
+  /** Registry directory (created owner-only on the first registration). */
+  dir: string
+  /** 16 lowercase ASCII letters or digits; random when omitted. */
+  instanceId?: string
+}
+
 /** Options for `IpcConnection.connect` / `IpcConnection.connectTcp`. */
 export interface IpcConnectOptions {
   /**
@@ -3141,6 +3354,16 @@ export interface LineRange {
 }
 
 /**
+ * Live Collab hosts in `options.dir`, sorted by `startedAt`, pid, then
+ * instance id.
+ *
+ * Dead and malformed entries are pruned on the way; the result carries no
+ * URLs. Rejects (code `registry_dir`) when the directory is insecure or
+ * unreadable; a missing directory lists nothing.
+ */
+export declare function listCollabHosts(options: CollabLookupOptions): Promise<CollabHostSnapshot[]>
+
+/**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
@@ -3317,6 +3540,153 @@ export interface MermaidTheme {
   bg?: string
   corner?: string
   junction?: string
+}
+
+export interface MeshConfig {
+  mode: 'off' | 'local' | 'remote' | 'both'
+  /** Stored mesh key; the remote side reports `no-key` without it. */
+  key?: string
+  /** LAN listener port (0 = any). */
+  lanPort: number
+  /** `host:port` peers probed directly. */
+  staticPeers: Array<string>
+  displayName: string
+  /**
+   * Message kinds the engine refuses with `denied` itself, never raising
+   * `inbound`. Changing only these restarts nothing.
+   */
+  deniedKinds: Array<'status' | 'ask' | 'task' | 'steer' | 'note'>
+}
+
+/**
+ * Derive the stored mesh key (unpadded base64url, 32 bytes) from a
+ * passphrase.
+ *
+ * The phrase is NFC-normalized and trimmed, then stretched with
+ * PBKDF2-SHA256 (600k rounds). Rejects a blank passphrase or one shorter
+ * than 12 characters.
+ */
+export declare function meshDeriveKey(passphrase: string): Promise<string>
+
+/**
+ * Engine notification.
+ *
+ * `peers`: re-read `peers()`. `status`: re-read `status()`. `inbound`:
+ * answer `requestId` via `respond()` within 30 s. `reply`: an answer
+ * (`envelopeJson`) to the tracked request of `ticket` nobody awaits
+ * (including the error answer made up for a peer that left before
+ * answering). `pending_dropped`: `tickets` are no longer tracked (TTL, size
+ * cap, close, or their peer left the mesh).
+ */
+export interface MeshEvent {
+  kind: 'peers' | 'status' | 'inbound' | 'reply' | 'pending_dropped'
+  requestId?: string
+  envelopeJson?: string
+  originKind?: 'local' | 'remote'
+  /** Source IP of a remote sender (absent for local senders). */
+  originAddress?: string
+  ticket?: string
+  tickets?: Array<string>
+}
+
+export declare function meshLimits(): MeshLimits
+
+/**
+ * Protocol size/lifetime caps (`omp_mesh::protocol`): text fields hold at
+ * most `maxTextChars`, other string fields `maxFieldChars` Unicode scalar
+ * values; a watch lives at most `maxWatchTtlSec` seconds.
+ */
+export interface MeshLimits {
+  maxTextChars: number
+  maxFieldChars: number
+  maxWatchTtlSec: number
+}
+
+export interface MeshNodeOptions {
+  /**
+   * Same-machine instance: supplies the node's instance id and registry
+   * directory; the local side serves the `mesh` namespace on it. Closing
+   * the node leaves the host open.
+   */
+  host: InstanceHost
+  /** Machine host name sent in envelopes. */
+  hostName: string
+}
+
+export declare function meshPassphraseCheck(phrase: string): MeshPassphraseCheck
+
+/**
+ * Live feedback for a mesh key passphrase, counted exactly as
+ * `meshDeriveKey` counts it (NFC, trimmed, Unicode scalar values).
+ */
+export interface MeshPassphraseCheck {
+  chars: number
+  /** `meshDeriveKey` accepts it (at least `minChars`). */
+  valid: boolean
+  /** Shorter than `strongChars`: guessable by anyone on the LAN. */
+  weak: boolean
+  /** Shortest accepted phrase. */
+  minChars: number
+  /** Length from which a phrase is no longer flagged weak. */
+  strongChars: number
+}
+
+/**
+ * Status-line counts: peers with a snapshot that are neither hidden,
+ * blocked nor stale, per endpoint kind (a local endpoint wins).
+ */
+export interface MeshPeerCounts {
+  local: number
+  remote: number
+}
+
+export interface MeshPeerInfo {
+  instanceId: string
+  endpointKind: 'local' | 'remote'
+  address?: string
+  port?: number
+  hostname?: string
+  dnsName?: string
+  source: 'local' | 'mdns' | 'static' | 'contact'
+  state: 'online' | 'stale'
+  /** ms since the Unix epoch. */
+  lastSeen: number
+  hidden: boolean
+  blocked: boolean
+  /**
+   * Revision of the stored snapshot; 0 when the peer has none.
+   * Engine-wide monotonic: a new or changed snapshot always gets a
+   * revision above every earlier one.
+   */
+  snapshotRevision: number
+  /**
+   * Present only when `snapshotRevision > sinceRevision` (and the peer has
+   * a snapshot).
+   */
+  snapshotJson?: string
+}
+
+export interface MeshRequestOptions {
+  timeoutMs: number
+  /**
+   * Track the answers of a `message` (not a note) or `watch` under this
+   * frontend ticket once the peer acknowledged it: they resolve
+   * `awaitReply`, or arrive as `reply` events carrying the ticket.
+   */
+  ticket?: string
+  /**
+   * Keep the first answer for an `awaitReply` about to start instead of
+   * emitting it (with `ticket`).
+   */
+  hold?: boolean
+}
+
+export interface MeshStatus {
+  mode: 'off' | 'local' | 'remote' | 'both'
+  local: 'on' | 'off' | 'error'
+  remote: 'on' | 'off' | 'no-key' | 'error'
+  lanPort?: number
+  error?: string
 }
 
 /** N-API opt-in handle for the minimizer. */
@@ -3761,6 +4131,16 @@ export interface PtyStartOptions {
 }
 
 /**
+ * Serve the `collab` namespace on `host`.
+ *
+ * Every request calls `onQuery`, which must answer through the returned
+ * registration's `respond()` within 5 s. The first registration on a host
+ * binds its endpoint and writes its registry entry; rejects when `collab` is
+ * already served on `host` or the host is closed.
+ */
+export declare function publishCollab(host: InstanceHost, onQuery: (query: CollabHostQuery) => void): Promise<CollabRegistration>
+
+/**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
  * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
@@ -3858,6 +4238,13 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
  * JS-side re-encode.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
+
+/**
+ * One URL for the host `selector` names (exact instance id, else pid).
+ * Rejects with `code` `not_found`, `ambiguous`, `stale_generation`,
+ * `access_unavailable`, `unreachable`, or `registry_dir`.
+ */
+export declare function resolveCollabHostLink(selector: string, access: 'view' | 'control', options: CollabLookupOptions): Promise<CollabResolvedLink>
 
 /**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when

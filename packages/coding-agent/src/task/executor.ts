@@ -20,6 +20,7 @@ import {
 	prompt,
 	pushLoopPhase,
 	sanitizeText,
+	toError,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import {
@@ -132,6 +133,7 @@ import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
+import { type HostRestrictions, mergeHostRestrictions } from "../mesh/host-restrictions";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -146,6 +148,7 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "./types";
+import { forkIsolationOptions, type SubagentFork } from "../mesh/fork-isolation";
 import {
 	type AgentProgress,
 	type SingleResult,
@@ -467,6 +470,8 @@ export interface ExecutorOptions {
 	 */
 	steps?: string[];
 	assignment?: string;
+	/** Start the child as a confined read-only fork of a persisted session (see {@link SubagentFork}). */
+	fork?: SubagentFork;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
 	/**
@@ -621,6 +626,8 @@ export interface ExecutorOptions {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name `task.agentCompactionThresholdOverrides` pair selected by dispatch. */
 	compactionThresholdOverride?: CompactionThresholdPair;
+	/** Fork source the child session is confined to (its parent's); never set alongside {@link fork}. */
+	forkSource?: string;
 	/** Exact-name `task.agentAccountPools` entry selected by dispatch; see `CreateAgentSessionOptions.oauthAccountPools`. */
 	oauthAccountPools?: OAuthAccountPools;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
@@ -1212,15 +1219,18 @@ function inheritedSubagentServiceTiers(
  * root values, not an ancestor's override.
  */
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
+/** The chain's {@link HostRestrictions}: set by a confined fork, inherited by every descendant. */
+const kHostRestrictions = Symbol("task.hostRestrictions");
 
 /** Root compaction thresholds a subagent chain pins (see {@link kRootCompactionThresholds}). */
 export interface RootCompactionThresholds extends CompactionThresholdPair {
 	modelThresholdsEnabled: boolean;
 }
 
-/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
+/** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds and host restrictions. */
 interface SubagentChainSettings extends Settings {
 	[kRootCompactionThresholds]?: RootCompactionThresholds;
+	[kHostRestrictions]?: HostRestrictions;
 }
 
 /**
@@ -1251,10 +1261,15 @@ export function subagentLspWritethroughSettings(settings: Settings): Readonly<Re
 		: { "lsp.formatOnWrite": false, "lsp.diagnosticsOnWrite": false, "lsp.diagnosticsOnEdit": false };
 }
 
+/**
+ * `hostRestrictions` join the restrictions inherited from `baseSettings`; the merged set is applied
+ * after every other override, so no per-agent override in the chain can switch a restriction back on.
+ */
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
 	inheritedServiceTier?: ServiceTierByFamily | null,
+	hostRestrictions?: HostRestrictions,
 ): Settings {
 	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
 	// match the parent's live tiers when a live session supplied them, else the
@@ -1265,6 +1280,7 @@ export function createSubagentSettings(
 	// A parent subagent's own per-agent threshold must not leak to its children: descendants
 	// of a subagent pin the root's thresholds. A root parent's children read them through live.
 	const inheritedRootThresholds = baseSettings[kRootCompactionThresholds];
+	const restrictions = mergeHostRestrictions(baseSettings[kHostRestrictions], hostRestrictions);
 	const rootThresholds = inheritedRootThresholds ?? {
 		thresholdPercent: cfgCompactionThresholdPercent.get(baseSettings),
 		thresholdTokens: cfgCompactionThresholdTokens.get(baseSettings),
@@ -1307,10 +1323,12 @@ export function createSubagentSettings(
 			// rejected the context (#13211). A per-spawn override still wins.
 			"compaction.midTurnEnabled": true,
 			...overrides,
+			...restrictions,
 		},
 		{ derived: true },
 	);
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
+	subagentSettings[kHostRestrictions] = restrictions;
 	return subagentSettings;
 }
 
@@ -4286,6 +4304,8 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
+	/** A confined fork: its transcript's model selections belong to the source run, never to the fork. */
+	fork?: boolean;
 	prompt: SubagentPromptInputs;
 }
 
@@ -4425,15 +4445,22 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: RootCompactionThresholds | undefined;
+	hostRestrictions: HostRestrictions | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
-	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+	return {
+		parent,
+		layers: settings.overlayLayers(),
+		rootThresholds: settings[kRootCompactionThresholds],
+		hostRestrictions: settings[kHostRestrictions],
+	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	settings[kHostRestrictions] = recipe.hostRestrictions;
 	return settings;
 }
 
@@ -4532,9 +4559,11 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		capture.spec.prompt.reviving = true;
 		// A session-local switch since spawn (a prewalk handoff) owns the model and effort: the
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
-		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent.
+		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A
+		// confined fork's selections belong to its source run, never to the fork.
 		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
-		const sessionLocalModel = capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
+		const sessionLocalModel =
+			capture.spec.fork || capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
@@ -4654,6 +4683,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		signal,
 		onProgress,
 	} = options;
+	const fork = options.fork;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = usesYield(outputSchema);
 	const startTime = Date.now();
@@ -4701,10 +4731,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// spawn's owner is its parent subagent) and lands on the child's
 	// `modelRoles.advisor`. The expanded pattern is also what the session
 	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = resolveAgentAdvisorSelection({
-		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-		agentAdvisor: agent.advisor,
-	});
+	const advisorSelection = fork
+		? undefined
+		: resolveAgentAdvisorSelection({
+				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+				agentAdvisor: agent.advisor,
+			});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4722,6 +4754,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				: undefined),
 		},
 		options.parentServiceTier,
+		fork?.hostRestrictions,
 	);
 	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settings);
 	const maxRuntimeMs = Math.max(0, Math.trunc(Number(options.maxRuntimeMs ?? cfgTaskMaxRuntimeMs.get(settings)) || 0));
@@ -4731,7 +4764,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
-	const restrictToolNames = options.restrictToolNames === true;
+	const restrictToolNames = options.restrictToolNames === true || fork !== undefined;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
 	// Add tools if specified. Unstructured runs never get `yield`, even when
@@ -4769,6 +4802,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	}
 	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
+		!fork &&
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
@@ -4822,6 +4856,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	let releaseIrcWakes: (() => void) | undefined;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
+	let pendingSessionManager: Promise<SessionManager> | undefined;
+	let openedSessionManager: SessionManager | undefined;
+	let untrackedSession: AgentSession | undefined;
+	let pendingSessionDisposal: Promise<void> | undefined;
 	const wakeOptions: IrcWakeTurnMonitorOptions = {
 		id,
 		index,
@@ -5046,13 +5084,26 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
+			if (fork && !subtaskSessionFile) {
+				throw new Error("A confined session fork requires a persisted child session file.");
+			}
+			const sessionManagerPromise = fork
+				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, undefined, {
+						confined: true,
 						suppressBreadcrumb: true,
+						sessionFile: subtaskSessionFile,
+						resetInheritedCost: true,
+						repairInterruptedTail: true,
 					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							forkSource: options.forkSource,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd, undefined, { forkSource: options.forkSource }));
+			if (fork) pendingSessionManager = sessionManagerPromise;
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -5094,14 +5145,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const perCallModelGrants = options.perCallModelGrants;
 			let prewalk: Prewalk | undefined;
 			const judgmentUsage: JudgmentUsage[] = [];
-			const unconditionalPattern = perCallModelGrants
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
+			const unconditionalPattern =
+				fork || perCallModelGrants
+					? undefined
+					: resolveAgentPrewalkPattern({
+							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+						});
 			const autoEntry =
-				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
+				unconditionalPattern === undefined && !fork && !perCallModelGrants && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
 			const autoPattern = autoEntry
@@ -5247,7 +5299,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
+					// Fork isolation overrides every inherited field above in one place; a fork keeps only
+					// its own agent's spawn allow-list.
+					...(fork ? forkIsolationOptions(effectiveCwd, spawnsEnv) : {}),
 				},
+				fork: fork !== undefined,
 				prompt: {
 					id,
 					model: progress.resolvedModel,
@@ -5267,13 +5323,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			if (options.parentArtifactManager) {
+			if (fork) openedSessionManager = sessionManager;
+			if (options.parentArtifactManager && !fork) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
 			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
-			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
+			// A confined fork inherits the source's model roles; they describe the
+			// source run, not this fork, so the fork still pins its own chain.
+			const hasExistingModelRole = !fork && sessionManager.getLastModelChangeRole() !== undefined;
 			// Subscribe before the builder mints proxies so a manager change during
 			// session startup is replayed on bind instead of lost.
 			const mcpFollower = mcpManager
@@ -5300,6 +5359,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
+				if (fork) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5315,7 +5375,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
-				void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				if (fork) {
+					pendingSessionDisposal = sessionPromise
+						?.then(created => created.session.dispose())
+						.then(
+							() => {},
+							() => {},
+						);
+				} else {
+					void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				}
 				throw err;
 			}
 			mcpFollower?.bind(session);
@@ -5341,6 +5410,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			if (fork) untrackedSession = undefined;
 			// Neither the agent's patterns nor the parent's model resolved (the session
 			// says why): name the agent and the setting to fix instead of letting the
 			// first prompt fail with the generic `/login` error.
@@ -5386,7 +5456,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					spec: sessionSpec,
 					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),
-					parentArtifactManager: options.parentArtifactManager,
+					parentArtifactManager: fork ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
 					agentName: agent.name,
@@ -5615,7 +5685,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false) {
+				if (options.keepAlive !== false && (!fork || readyAt !== undefined)) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -5623,7 +5693,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false,
+					keepAlive: options.keepAlive !== false && (!fork || readyAt !== undefined),
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -5652,6 +5722,46 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						});
 					}
 				}
+			}
+			// Waits for fork cleanup until the shared deadline, then hands it to late cleanup.
+			const awaitForkCleanup = async (cleanup: Promise<void>, failure: string) => {
+				try {
+					await untilAborted(AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())), () => cleanup);
+				} catch (cleanupError) {
+					if (Date.now() >= cleanupDeadlineAt) deferCleanup(cleanup);
+					else logger.warn(failure, { id, error: toError(cleanupError).message });
+				}
+			};
+			if (fork && untrackedSession) {
+				const incompleteSession = untrackedSession;
+				untrackedSession = undefined;
+				const disposal = Promise.resolve().then(() => incompleteSession.dispose());
+				pendingSessionDisposal = disposal.then(
+					() => {},
+					() => {},
+				);
+				await awaitForkCleanup(disposal, "Incomplete subagent session disposal failed");
+			}
+			if (fork && readyAt === undefined) {
+				const removeFailedFork = (async () => {
+					await pendingSessionDisposal;
+					if (deferredSessionShutdown) await deferredSessionShutdown;
+					let manager = openedSessionManager;
+					if (!manager && pendingSessionManager) {
+						manager = await pendingSessionManager.catch(() => undefined);
+					}
+					if (manager) {
+						const ownedSessionFile = manager.getSessionFile();
+						if (ownedSessionFile) await manager.dropSession(ownedSessionFile);
+					}
+				})().catch(cleanupError => {
+					logger.warn("Failed to remove incomplete prepared session fork", {
+						id,
+						sessionFile: openedSessionManager?.getSessionFile(),
+						error: toError(cleanupError).message,
+					});
+				});
+				await awaitForkCleanup(removeFailedFork, "Incomplete prepared session fork cleanup failed");
 			}
 			if (lateCleanups.length > 0) {
 				const completion = Promise.allSettled(lateCleanups).then(() => {});

@@ -553,6 +553,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
+		// A confined fork reads its source's agent outputs in place, nothing else.
+		const forkDir = context?.session?.forkSourceArtifactsDir;
+		if (forkDir) return [forkDir];
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;

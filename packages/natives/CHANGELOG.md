@@ -11,6 +11,9 @@
 - Added `enableConsoleVtInput()` and `restoreConsoleInputMode()`, which turn Windows console VT input on and back off without `bun:ffi`
 - Added redirected files to `PipeStreams`: a regular file a run's command redirects its output into (`>`, `>>`, `&>`) is listed with `file: true` and read from disk
 - Added `translateWindowsAltGrSequence()`, which recovers the text an AltGr chord produced on the active Windows keyboard layout when the console host reported it as an Alt chord
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added the `MeshNode` class, the native engine behind oh my pi mesh (same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots, request/response messaging with tracked answers via `request`, `awaitReply` and `forgetPending`, and `peerCounts`), plus `meshDeriveKey`, `meshPassphraseCheck(phrase)` and `meshLimits()` (the protocol's text, field and watch-lifetime caps)
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
 
 ### Changed
 

@@ -171,6 +171,9 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
+		// A confined fork (or a subagent confined with it) is never cold-revived: its isolation and
+		// host restrictions live only in the spawning process, so a revival would drop them.
+		if (peek.forkSource !== undefined) return undefined;
 		// Isolated runs are never resumable: their worktree is merged + cleaned,
 		// and the parent was told messaging is impossible. A retained workspace
 		// (capture/persist failure) still exists on disk and would pass the cwd

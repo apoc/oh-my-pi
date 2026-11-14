@@ -369,6 +369,7 @@ import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
+import { onGatedToolsChanged } from "./tools/gated-tools-signal";
 import { imageGenTool } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
@@ -2724,6 +2725,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			},
 			restrictToolNames,
+			get forkSourceArtifactsDir() {
+				return sessionManager.getForkSourceArtifactsDir() ?? undefined;
+			},
+			get forkSource() {
+				return sessionManager.getForkSource() ?? undefined;
+			},
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
@@ -5711,6 +5718,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
 			// A judge rejecting the account withdraws `find` (and its hints) once no native judge is left.
 			session.addDisposer(onJudgeRejection(modelRegistry, () => void reconcileGatedTools({ refreshPrompt: false })));
+			// Some built-in tools are offered only while runtime state holds: follow its changes. The
+			// prompt reads that state only through the tool set, so refresh it only when that changes.
+			if (taskDepth === 0) {
+				session.addDisposer(
+					onGatedToolsChanged(() => {
+						if (!session.isDisposed) void reconcileGatedTools({ refreshPrompt: false });
+					}),
+				);
+			}
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

@@ -39,6 +39,7 @@ import * as ttsSettings from "../tts/settings";
 import * as sttSettings from "../stt/settings";
 import * as liveSettings from "../live/settings";
 import * as collabSettings from "../collab/settings";
+import * as meshSettings from "../mesh/settings";
 import * as commandsSettings from "../commands/settings";
 import * as streamSettings from "../stream/settings";
 import * as commitSettings from "../commit/settings";
@@ -82,6 +83,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	secretsSettings,
 	sttSettings,
 	collabSettings,
+	meshSettings,
 	commandsSettings,
 	streamSettings,
 	commitSettings,

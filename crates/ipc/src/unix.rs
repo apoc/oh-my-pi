@@ -14,12 +14,17 @@ use std::{
 		},
 	},
 	path::{Path, PathBuf},
+	pin::Pin,
+	task::{Context, Poll},
 	time::Duration,
 };
 
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+	io::{AsyncRead, AsyncWrite, ReadBuf},
+	net::{UnixListener, UnixStream},
+};
 
-use super::{IpcError, endpoint};
+use crate::{IpcError, endpoint};
 
 /// `listen()` backlog.
 const BACKLOG: libc::c_int = 512;
@@ -91,6 +96,28 @@ pub fn release(bound: Bound) {
 	}
 }
 
+/// Suffix of the sidecar a binder flocks from bind to listen.
+pub const BIND_LOCK_SUFFIX: &str = ".bind.lock";
+
+/// `<socket>.bind.lock`.
+pub fn bind_lock_path(socket: &Path) -> PathBuf {
+	let mut path = socket.as_os_str().to_owned();
+	path.push(BIND_LOCK_SUFFIX);
+	path.into()
+}
+
+/// Options opening a bind lock read/write, mode 0600 when created, never
+/// through a symlink; the caller picks the create mode.
+pub fn bind_lock_options() -> OpenOptions {
+	let mut options = OpenOptions::new();
+	options
+		.read(true)
+		.write(true)
+		.mode(0o600)
+		.custom_flags(libc::O_NOFOLLOW);
+	options
+}
+
 /// Accepting side of a bound socket.
 pub struct Listener(UnixListener);
 
@@ -113,10 +140,15 @@ impl Listener {
 	}
 }
 
-/// Bind `endpoint` (see `IpcServer.listen`).
+/// Bind `endpoint`.
+///
+/// Creates the parent dir (0700) if missing; under an exclusive flock on
+/// `<path>.bind.lock`, rejects EADDRINUSE when a live server answers,
+/// otherwise replaces the stale socket file; the socket is chmod 0600 before
+/// `listen()`. The lock file is left in place. Requires a Tokio runtime.
 pub async fn listen(endpoint: &str) -> Result<(Listener, Bound), IpcError> {
 	let path = PathBuf::from(endpoint);
-	let (std_listener, bound) = napi::bindgen_prelude::spawn_blocking(move || bind_locked(path))
+	let (std_listener, bound) = tokio::task::spawn_blocking(move || bind_locked(path))
 		.await
 		.map_err(|error| IpcError::new("EIO", format!("bind task failed: {error}")))??;
 	let listener = UnixListener::from_std(std_listener)
@@ -128,25 +160,27 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 	let display = path.display().to_string();
 	prepare_parent(&path)?;
 
-	let mut lock_path = path.clone().into_os_string();
-	lock_path.push(".bind.lock");
-	let lock = OpenOptions::new()
-		.read(true)
-		.write(true)
-		.create(true)
-		.truncate(false)
-		.mode(0o600)
-		.open(&lock_path)
-		.map_err(|error| {
-			IpcError::io(&error, &format!("open {}", Path::new(&lock_path).display()))
-		})?;
-	loop {
-		match lock.lock() {
-			Ok(()) => break,
-			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
-			Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
+	let lock_path = bind_lock_path(&path);
+	// A sweeper may unlink the lock file between our open and our flock;
+	// holding a lock on an unlinked inode excludes nobody, so retry until the
+	// locked file is the one at `lock_path`.
+	let lock = loop {
+		let lock = bind_lock_options()
+			.create(true)
+			.truncate(false)
+			.open(&lock_path)
+			.map_err(|error| IpcError::io(&error, &format!("open {}", lock_path.display())))?;
+		loop {
+			match lock.lock() {
+				Ok(()) => break,
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+				Err(error) => return Err(IpcError::io(&error, "lock bind sidecar")),
+			}
 		}
-	}
+		if is_same_file(&lock, &lock_path) {
+			break lock;
+		}
+	};
 
 	match fs::symlink_metadata(&path) {
 		Ok(meta) if !meta.file_type().is_socket() => {
@@ -159,17 +193,10 @@ fn bind_locked(path: PathBuf) -> Result<(std::os::unix::net::UnixListener, Bound
 					format!("{display} already has a live listener"),
 				));
 			},
-			Err(error)
-				if matches!(
-					error.kind(),
-					io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-				) =>
-			{
-				match fs::remove_file(&path) {
-					Ok(()) => {},
-					Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-					Err(error) => return Err(IpcError::io(&error, &format!("remove stale {display}"))),
-				}
+			Err(error) if is_refused(&error) => match fs::remove_file(&path) {
+				Ok(()) => {},
+				Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+				Err(error) => return Err(IpcError::io(&error, &format!("remove stale {display}"))),
 			},
 			Err(error) => return Err(IpcError::io(&error, &format!("probe {display}"))),
 		},
@@ -284,17 +311,104 @@ fn ensure_private_dir(dir: &Path, euid: u32) -> Result<(), IpcError> {
 	}
 	let meta = fs::symlink_metadata(dir)
 		.map_err(|error| IpcError::io(&error, &format!("stat {}", dir.display())))?;
-	if !meta.file_type().is_dir() || meta.uid() != euid {
+	let owned = tighten_owned_dir(dir, &meta)
+		.map_err(|error| IpcError::io(&error, &format!("chmod {}", dir.display())))?;
+	if !owned {
 		return Err(IpcError::new(
 			"EACCES",
 			format!("{} is not a directory owned by uid {euid}", dir.display()),
 		));
 	}
-	if meta.mode() & 0o077 != 0 {
-		fs::set_permissions(dir, Permissions::from_mode(0o700))
-			.map_err(|error| IpcError::io(&error, &format!("chmod {}", dir.display())))?;
-	}
 	Ok(())
+}
+
+/// Make `dir` owner-only (chmod 0700) when it is a directory we own.
+///
+/// `meta` is `dir`'s `symlink_metadata`, so a link is not a directory.
+/// Returns `false`, changing nothing, when `dir` is not a directory owned by
+/// our effective uid.
+pub fn tighten_owned_dir(dir: &Path, meta: &fs::Metadata) -> io::Result<bool> {
+	if !meta.file_type().is_dir() || meta.uid() != euid() {
+		return Ok(false);
+	}
+	if meta.mode() & 0o077 != 0 {
+		fs::set_permissions(dir, Permissions::from_mode(0o700))?;
+	}
+	Ok(true)
+}
+
+/// A connect error meaning nothing listens on the socket (it is stale).
+fn is_refused(error: &io::Error) -> bool {
+	matches!(error.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound)
+}
+
+/// Remove a dead Unix socket and its `.bind.lock` while holding that lock.
+///
+/// Only inside a private directory (a real directory owned by us without
+/// group/other access: e.g. an instance registry, or the `/tmp/omp-<euid>`
+/// relocation directory, which another user could have re-created after a
+/// reboot). Under the lock no binder is between bind and listen, so a refused
+/// or missing socket is dead for good. The lock must still be the file at its
+/// path (a lock taken on a file unlinked meanwhile excludes nobody). A live
+/// (or unknown) socket is kept. A lock file this sweep created is removed
+/// again; a pre-existing one only once `lock_grace` old, since a binder may
+/// have just created it and not locked it yet.
+pub fn sweep_stale(socket: &Path, lock_grace: Duration) {
+	if !socket.parent().is_some_and(is_private_dir) {
+		return;
+	}
+	let lock_path = bind_lock_path(socket);
+	let open = |create: bool| bind_lock_options().create_new(create).open(&lock_path);
+	let (lock, created) = match open(true) {
+		Ok(lock) => (lock, true),
+		Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match open(false) {
+			Ok(lock) => (lock, false),
+			Err(_) => return,
+		},
+		Err(_) => return,
+	};
+	if lock.try_lock().is_err() || !is_same_file(&lock, &lock_path) {
+		// A binder holds it (or opened the file we just created), or it was
+		// unlinked or replaced since we opened it: not ours to judge.
+		return;
+	}
+	let dead = match fs::symlink_metadata(socket) {
+		Err(error) => error.kind() == io::ErrorKind::NotFound,
+		Ok(meta) if meta.file_type().is_socket() => {
+			StdUnixStream::connect(socket).is_err_and(|error| is_refused(&error))
+				&& fs::remove_file(socket).is_ok()
+		},
+		Ok(_) => false,
+	};
+	let lock_aged = || {
+		lock
+			.metadata()
+			.ok()
+			.and_then(|meta| meta.modified().ok())
+			.and_then(|modified| modified.elapsed().ok())
+			.is_some_and(|age| age >= lock_grace)
+	};
+	if created || (dead && lock_aged()) {
+		let _ = fs::remove_file(&lock_path);
+	}
+}
+
+/// Whether `dir` is a real directory (not a link) owned by our effective uid
+/// with no group/other access. Check-only: nothing is created or changed.
+pub fn is_private_dir(dir: &Path) -> bool {
+	fs::symlink_metadata(dir).is_ok_and(|meta| {
+		meta.file_type().is_dir() && meta.uid() == euid() && meta.mode() & 0o077 == 0
+	})
+}
+
+/// Whether the open `file` is still the file at `path` (same device and
+/// inode, `path` not a link): a lock held on a file unlinked or replaced
+/// meanwhile guards nothing.
+pub fn is_same_file(file: &fs::File, path: &Path) -> bool {
+	match (file.metadata(), fs::symlink_metadata(path)) {
+		(Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+		_ => false,
+	}
 }
 
 /// Dial `endpoint` and verify the server runs as our effective uid.
@@ -307,10 +421,10 @@ pub async fn connect(endpoint: &str, _timeout: Duration) -> Result<Stream, IpcEr
 		.map_err(|error| IpcError::io(&error, "read peer credentials"))?;
 	let euid = euid();
 	if cred.uid() != euid {
-		return Err(IpcError::new(
-			"EACCES",
-			format!("{endpoint} is served by uid {}, expected {euid}", cred.uid()),
-		));
+		return Err(IpcError::foreign_peer(format!(
+			"{endpoint} is served by uid {}, expected {euid}",
+			cred.uid()
+		)));
 	}
 	Ok(Stream(stream))
 }
@@ -320,11 +434,11 @@ pub enum WriteFinish {
 	/// Write side shut; reading continues until EOF.
 	HalfClosed,
 	/// The whole stream must be dropped now.
-	#[allow(dead_code, reason = "Windows-only outcome kept in the shared shape")]
 	Closed,
 }
 
-/// Connected socket.
+/// Connected socket whose peer runs as our effective uid. Only
+/// [`Listener::accept`] and [`connect`] create one.
 pub struct Stream(UnixStream);
 
 impl Stream {
@@ -352,5 +466,47 @@ impl Stream {
 			return Err(io::Error::last_os_error());
 		}
 		Ok(WriteFinish::HalfClosed)
+	}
+}
+
+impl AsyncRead for Stream {
+	fn poll_read(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &mut ReadBuf<'_>,
+	) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+	}
+}
+
+/// `shutdown` shuts the write half (`SHUT_WR`); the peer reads EOF while this
+/// side keeps reading.
+impl AsyncWrite for Stream {
+	fn poll_write(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		buf: &[u8],
+	) -> Poll<io::Result<usize>> {
+		Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+	}
+
+	fn poll_write_vectored(
+		self: Pin<&mut Self>,
+		cx: &mut Context<'_>,
+		bufs: &[IoSlice<'_>],
+	) -> Poll<io::Result<usize>> {
+		Pin::new(&mut self.get_mut().0).poll_write_vectored(cx, bufs)
+	}
+
+	fn is_write_vectored(&self) -> bool {
+		self.0.is_write_vectored()
+	}
+
+	fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_flush(cx)
+	}
+
+	fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
 	}
 }

@@ -39,6 +39,17 @@ function sanitizeWellFormedText(text: string): string {
 	return stripped.replace(CONTROL_RE, "");
 }
 
+/** U+061C, U+200E/200F, U+202A–202E, U+2066–2069: explicit bidi embedding, override, isolate and mark controls. */
+const BIDI_CONTROLS_RE = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Remove Unicode bidi controls, so untrusted text (e.g. a remote peer's name) cannot reorder what
+ * the reader sees. {@link sanitizeText} keeps them: they are legitimate in ordinary content.
+ */
+export function stripBidiControls(text: string): string {
+	return text.replace(BIDI_CONTROLS_RE, "");
+}
+
 /**
  * Apply {@link sanitizeText} to every string value inside a JSON-shaped value.
  * Only plain objects and arrays are walked; class instances, typed arrays, and

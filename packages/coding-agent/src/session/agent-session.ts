@@ -709,6 +709,12 @@ export class SessionBusyError extends Error {
 	}
 }
 
+/** Where a hidden notice lands: `prompt` = with a user prompt; `work` = between a tool batch and the next model call. */
+export type SessionNoticeBoundary = "prompt" | "work";
+
+/** Contributes at most one hidden notice per boundary; `undefined` when it has nothing to say. */
+export type SessionNoticeSource = (boundary: SessionNoticeBoundary) => CustomMessage | undefined;
+
 /** Result of {@link AgentSession.navigateTree}. */
 export interface NavigateTreeResult {
 	editorText?: string;
@@ -1476,6 +1482,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  existing session keeps it: that conversation may still have a warm provider cache, so
 	 *  prompt content snapshotted from disk (the workspace tree) must stay byte-stable for it. */
 	#transcriptEpoch = 0;
+	/** Bumped only by resetSessionContext(): it empties the conversation but keeps the session id,
+	 *  so {@link conversationId} needs its own signal. Advanced in the same synchronous step that empties it. */
+	#contextResets = 0;
+	/** Hidden-notice contributors ({@link addNoticeSource}), in registration order. Entries are
+	 *  wrapped so the same function registered twice is removed one registration at a time. */
+	#noticeSources: { readonly source: SessionNoticeSource }[] = [];
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -2741,6 +2753,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
+			// Registered notice sources. Never at a stop boundary: there a notice would cost
+			// another model call just to say so.
+			if (boundary === "work") {
+				for (const entry of this.#noticeSources)
+					thunks.push(() => this.#takeSourceNotice(entry.source, "work") ?? null);
+			}
 			const contextNotesReminder = this.#experimentalContextNotesReminder;
 			if (contextNotesReminder) {
 				this.#experimentalContextNotesReminder = undefined;
@@ -7470,6 +7488,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
 		this.#sessionGeneration++;
+		// Change the conversation id in the same synchronous step as agent.reset(), before the next
+		// await: replies addressed to the dropped conversation must be rejected from here on, even if a
+		// later step below suspends or throws.
+		this.#contextResets++;
 		this.#pendingNextTurnMessages = [];
 		this.#pendingExcludedRows = [];
 		this.#experimentalContextNotesReminder = undefined;
@@ -10168,7 +10190,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
 			const skillNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillNotice) {
+			const sourceNotices = isUserQueuedMessage(message)
+				? this.#noticeSources.flatMap(entry => this.#takeSourceNotice(entry.source, "prompt") ?? [])
+				: [];
+			if (
+				xdevMountNotice ||
+				toolRosterNotice ||
+				evalPreludeNotice ||
+				sessionAgentNotice ||
+				skillNotice ||
+				sourceNotices.length > 0
+			) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -10177,6 +10209,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
 					...(skillNotice ? [skillNotice] : []),
+					...sourceNotices,
 				);
 			}
 
@@ -14125,6 +14158,43 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		// The sender's context is active here; the delivery is the recipient's work.
 		return this.#inLogContext(() => this.#irc.deliver(msg));
+	}
+
+	/**
+	 * Register a hidden-notice source; returns the remover (idempotent). Sources run in
+	 * registration order after the built-in notices: at `prompt` only with a user prompt, at
+	 * `work` between a tool batch and the next model call.
+	 */
+	addNoticeSource(source: SessionNoticeSource): () => void {
+		const entry = { source };
+		this.#noticeSources.push(entry);
+		return () => {
+			// Copy-on-write: an in-flight iteration over the previous array is never disturbed.
+			this.#noticeSources = this.#noticeSources.filter(candidate => candidate !== entry);
+		};
+	}
+
+	/** One source's notice; a throwing source is logged and skipped so it never breaks the turn. */
+	#takeSourceNotice(source: SessionNoticeSource, boundary: SessionNoticeBoundary): CustomMessage | undefined {
+		try {
+			return source(boundary);
+		} catch (error) {
+			logger.warn("Session notice source failed", { boundary, error: String(error) });
+			return undefined;
+		}
+	}
+
+	/** Tool context the SDK built for this session (eval cells, host services that spawn subagents). */
+	get toolSession(): ToolSession | undefined {
+		return this.#evalToolSession;
+	}
+
+	/**
+	 * Id of the conversation this session currently holds: the session id (changes on `/new`, resume,
+	 * fork) plus the in-place context-reset count (changes on `/clear`). A same-file reload keeps it.
+	 */
+	get conversationId(): string {
+		return `${this.sessionManager.getSessionId()}#${this.#contextResets}`;
 	}
 
 	/** Recognizes parent IRC steering at message consumption, without promoting queued requests. */

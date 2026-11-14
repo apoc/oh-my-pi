@@ -1037,4 +1037,23 @@ describe("system prompt tool inventory", () => {
 		expect(withoutRead).not.toContain("xd://read/urls");
 		expect(withoutRead).toContain("named service");
 	});
+
+	it("advertises mesh:// iff the mesh_peers tool is present, direct or xd-mounted", async () => {
+		const advertises = async (toolNames: string[], xdevTools: { name: string; summary: string }[]) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames,
+				tools: TOOLS,
+				xdevTools,
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			});
+			return systemPrompt.join("\n\n").includes("`mesh://`: read-only mesh peers");
+		};
+		expect(await advertises(["read", "bash"], [])).toBe(false);
+		expect(await advertises(["read", "bash"], [{ name: "mesh_peers", summary: "Lists mesh peers." }])).toBe(true);
+		expect(await advertises(["read", "bash", "mesh_peers"], [])).toBe(true);
+	});
 });

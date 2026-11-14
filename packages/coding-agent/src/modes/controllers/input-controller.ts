@@ -212,6 +212,7 @@ const DETACHED_DRAFT_COMMANDS = new Set([
 	"guided-goal",
 	"tan",
 	"btw",
+	"mesh",
 	"omfg",
 	"handoff",
 	"cleanse",
@@ -3116,6 +3117,7 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
+					forkSourceArtifactsDir: manager.getForkSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,

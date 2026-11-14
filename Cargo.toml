@@ -8,7 +8,10 @@ members = [
    "crates/builtins",
    "crates/diff",
    "crates/edit",
+   "crates/instances",
+   "crates/ipc",
    "crates/iso",
+   "crates/mesh",
    "crates/natives",
    "crates/predict",
    "crates/shell",
@@ -261,7 +264,10 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 omp-ast = { path = "crates/ast", default-features = false }
 omp-diff = { path = "crates/diff" }
 omp-edit = { path = "crates/edit" }
+omp-instances = { path = "crates/instances" }
+omp-ipc = { path = "crates/ipc" }
 omp-iso = { path = "crates/iso" }
+omp-mesh = { path = "crates/mesh" }
 omp-shell = { path = "crates/shell" }
 omp-predict = { path = "crates/predict" }
 omp-voice = { path = "crates/voice" }
@@ -308,6 +314,18 @@ thiserror = "2"
 bytes = "1"
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Cryptography
+# ──────────────────────────────────────────────────────────────────────────────
+ring = "0.17"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Networking
+# ──────────────────────────────────────────────────────────────────────────────
+dns-lookup = "3.0.1"
+if-addrs = "0.15"
+mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CLI & Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 clap = { version = "4", features = ["derive", "env"] }
@@ -317,6 +335,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # ──────────────────────────────────────────────────────────────────────────────
 pdf-inspector = "1"
 regex = "1"
+unicode-normalization = "0.1"
 fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────

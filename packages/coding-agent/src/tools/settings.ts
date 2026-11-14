@@ -5,6 +5,7 @@ import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgLspEnabled } from "../lsp/settings";
+import { cfgMeshEnabled } from "../mesh/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -1226,6 +1227,7 @@ export const cfgBuiltinToolGates = combine({
 	grep: cfgGrepEnabled,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
+	mesh: cfgMeshEnabled,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

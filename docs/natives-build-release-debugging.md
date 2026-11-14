@@ -165,7 +165,7 @@ bazelisk --bazelrc="$rc" test //crates/...                 # full Rust suite
 # clippy scope mirrors `cargo clippy --workspace` (libraries, plus omp-shell's
 # `obash` binary in the strict set), split by
 # lint policy via a query kind filter:
-bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...)" \
+bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/instances/... + //crates/ipc/... + //crates/iso/... + //crates/mesh/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...)" \
   | xargs bazelisk --bazelrc="$rc" build --config=clippy-strict --
 bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (…strict set…) - //crates/builtins/...)" \
   | xargs bazelisk --bazelrc="$rc" build --config=clippy --

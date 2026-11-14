@@ -5,6 +5,8 @@
 ### Added
 
 - Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
+- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ## [19.0.0] - 2026-11-18
 

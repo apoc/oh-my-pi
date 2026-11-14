@@ -152,6 +152,24 @@ describe("single-instance menus", () => {
 		expect(shown).toHaveLength(1);
 	});
 
+	// A custom menu whose `create` throws must release its kind, so the next request for it opens.
+	it("frees a custom fullscreen menu kind when its create callback throws", () => {
+		const { ui, shown, setFocus, overlayStack } = overlayUi();
+		const controller = new SelectorController(createInteractiveModeContext({ ui }));
+		expect(() =>
+			controller.openFullscreenMenu("x", () => {
+				throw new Error("boom");
+			}),
+		).toThrow("boom");
+		expect(shown).toHaveLength(0);
+
+		const component: Component = { render: () => [], invalidate: () => {} };
+		controller.openFullscreenMenu("x", () => component);
+		expect(shown).toEqual([component]);
+		expect(overlayStack.at(-1)?.component).toBe(component);
+		expect(setFocus).toHaveBeenLastCalledWith(component);
+	});
+
 	// Regression: a second /usage (or status-line cost click) while the dashboard
 	// was open stacked another fullscreen dashboard on top of the first.
 	it("opens one usage dashboard per close, focusing it on repeat requests", () => {

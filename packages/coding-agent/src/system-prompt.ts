@@ -51,6 +51,7 @@ import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
 import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
+import { cfgMeshAutoBackgroundEnabled } from "./mesh/settings";
 import {
 	cfgTuiAutoGraph,
 	cfgTuiReactions,
@@ -109,6 +110,7 @@ export const cfgSystemPromptInputs = combine({
 	asyncEnabled: cfgAsyncEnabled,
 	bashAutoBackground: cfgBashAutoBackgroundEnabled,
 	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
+	meshAutoBackground: cfgMeshAutoBackgroundEnabled,
 	// Browser endpoint changes can enable pre-call platform safety guidance.
 	browserCdpUrl: cfgBrowserCdpUrl,
 	browserRelayUrl: cfgBrowserRelayUrl,
@@ -1072,6 +1074,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		outReplies,
 		crossInstanceAgents,
 		subagent,
+		mesh: toolPromptNames.has("mesh_peers"),
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],

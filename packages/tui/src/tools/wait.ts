@@ -50,7 +50,7 @@ export type CoordinationOp = "send" | "wait" | "cancel";
 /** Background-job row surfaced by `wait`/`cancel` results and `proc://` listings. */
 export interface JobSnapshot {
 	id: string;
-	type: "bash" | "task" | "eval";
+	type: "bash" | "task" | "eval" | "mesh";
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
@@ -721,7 +721,8 @@ function bodyLines(
  * delivered to this session, `irc:autoreply` side-channel replies sent on
  * this session's behalf, and `irc:relay` observations of agent↔agent
  * traffic. Shares the tool renderer's glyph + quote-border conventions so
- * cards and peer-message output look identical in the transcript.
+ * cards and peer-message output look identical in the transcript. Other
+ * traffic (mesh) reuses the card with its own `title`, `role` and leading `tags`.
  */
 export function createIrcMessageCard(
 	card: {
@@ -733,21 +734,25 @@ export function createIrcMessageCard(
 		timestamp?: number;
 		pool?: string;
 		mode?: string;
+		title?: string;
+		role?: string;
+		tags?: readonly string[];
 	},
 	getExpanded: () => boolean,
 	uiTheme: Theme,
 ): Component {
 	const from = card.from?.trim() || "?";
 	const title =
-		card.kind === "incoming"
+		card.title ??
+		(card.kind === "incoming"
 			? `IRC ${uiTheme.nav.back} ${from}`
 			: card.kind === "autoreply"
 				? `IRC ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 				: card.kind === "workpool"
 					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
-					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
+					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`);
 	const body = card.body ?? "";
-	const meta: string[] = [];
+	const meta: string[] = [...(card.tags ?? [])];
 	if (card.kind === "autoreply") meta.push("auto");
 	if (card.kind === "workpool" && card.mode) meta.push(card.mode);
 	if (card.replyTo) meta.push("reply");
@@ -768,7 +773,7 @@ export function createIrcMessageCard(
 	// Terminal-local collapse replaces `getExpanded`; the node never changes after creation.
 	const described = cardNode(
 		{
-			role: `omp.irc.${card.kind}`,
+			role: card.role ?? `omp.irc.${card.kind}`,
 			tone: "info",
 			head: [
 				span(plainText(title), "toolTitle strong"),

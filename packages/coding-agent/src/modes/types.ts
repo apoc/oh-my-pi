@@ -30,6 +30,7 @@ import type {
 } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
+import type { InteractiveMesh } from "./components/mesh/interactive-mesh";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
 import type { BlockedKind } from "../utils/run-status";
@@ -298,6 +299,8 @@ export interface InteractiveModeContext {
 	historyStorage?: HistoryStorage;
 	mcpManager?: MCPManager;
 	lspServers?: LspStartupServerInfo[];
+	/** The mesh surface (`/mesh`, status segment, host); set once init attached it. */
+	readonly mesh?: InteractiveMesh;
 	/** Owns hosting: manual `/collab`, `collab.autoStart`, and room rotation on session switch. */
 	collabController: CollabController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */

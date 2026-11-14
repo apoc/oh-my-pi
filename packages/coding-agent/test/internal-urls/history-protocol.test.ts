@@ -14,6 +14,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getInternalUrlSuggestions } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import {
 	formatCurrentBranchFullHistory,
 	HistoryProtocolHandler,
@@ -22,12 +24,13 @@ import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+import { meshResponderArtifactsDir } from "@oh-my-pi/pi-coding-agent/mesh/paths";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { resourceText } from "../helpers/resource-text";
@@ -706,6 +709,94 @@ describe("history:// protocol", () => {
 			const resource = await InternalUrlRouter.instance().resolve("history://Parent.Child");
 			expect(resource.content).toContain("# Parent.Child (on disk)");
 		});
+	});
+
+	it("serves a confined fork only its source's transcript tree, read in place", async () => {
+		using tempDir = TempDir.createSync("@omp-history-fork-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const sourceArtifacts = path.join(dir, "source", "source");
+		const childFile = path.join(sourceArtifacts, "Sub1.jsonl");
+		const grandchildFile = path.join(sourceArtifacts, "Sub1", "Sub1.Grandchild.jsonl");
+		await Bun.write(childFile, sessionFixtureJsonl("source child history"));
+		await Bun.write(grandchildFile, sessionFixtureJsonl("source grandchild history", "grandchild"));
+		// Another mesh peer's responder lives in the source's private mesh-threads tree.
+		await Bun.write(
+			path.join(meshResponderArtifactsDir(sourceArtifacts, "T1"), "MeshAsk.jsonl"),
+			sessionFixtureJsonl("other peer's question"),
+		);
+		const externalArtifacts = path.join(dir, "external-artifacts");
+		await Bun.write(path.join(externalArtifacts, "ExternalOnly.jsonl"), sessionFixtureJsonl("external transcript"));
+		registerArtifactsDir(externalArtifacts);
+		AgentRegistry.global().register({
+			id: "ForeignOnly",
+			displayName: "foreign only",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "outside the source", timestamp: 1 }]),
+			status: "running",
+		});
+		const forkFile = path.join(dir, "forks", "MeshAsk.jsonl");
+		const context = {
+			session: makeToolSession(cwd, forkFile, { forkSourceArtifactsDir: sourceArtifacts }),
+			sessionFile: forkFile,
+		};
+		const router = InternalUrlRouter.instance();
+
+		const child = await router.resolve("history://Sub1", context);
+		expect(child.content).toContain("source child history");
+		expect(child.sourcePath).toBe(childFile);
+		expect(await router.locate("history://Sub1.Grandchild", context)).toBe(grandchildFile);
+		const index = await router.resolve("history://", context);
+		expect(index.content).toContain("| Sub1 | on disk |");
+		expect(index.content).toContain("| Sub1.Grandchild | on disk |");
+		expect(index.content).not.toContain("ForeignOnly");
+		expect(index.content).not.toContain("MeshAsk");
+		expect(index.content).not.toContain("ExternalOnly");
+		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
+		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
+		await expect(router.resolve("history://MeshAsk", context)).rejects.toThrow("Unknown agent: MeshAsk");
+
+		// The editor binds the fork scope as a scalar, without a tool session.
+		const forkSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
+			cwd,
+			sessionFile: forkFile,
+			forkSourceArtifactsDir: sourceArtifacts,
+		}));
+		expect(forkSuggestions?.items.map(item => item.value).toSorted()).toEqual([
+			"history://Sub1",
+			"history://Sub1.Grandchild",
+		]);
+		const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({ cwd }));
+		const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
+		expect(ordinaryValues).toContain("history://ForeignOnly");
+		expect(ordinaryValues).toContain("history://ExternalOnly");
+	});
+
+	it("keeps a confined fork's foreign source children out of the parent's history", async () => {
+		using tempDir = TempDir.createSync("@omp-history-fork-parent-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const foreignSource = path.join(dir, "foreign", "source.jsonl");
+		await Bun.write(foreignSource, sessionFixtureJsonl("foreign root history", "foreign-root"));
+		await Bun.write(
+			path.join(dir, "foreign", "source", "ForeignChild.jsonl"),
+			sessionFixtureJsonl("foreign child history"),
+		);
+		const parentFile = path.join(dir, "parent", "main.jsonl");
+		await Bun.write(parentFile, sessionFixtureJsonl("parent history", "parent-root"));
+		const fork = await SessionManager.forkFrom(foreignSource, cwd, undefined, undefined, {
+			confined: true,
+			suppressBreadcrumb: true,
+			sessionFile: path.join(dir, "parent", "main", "Fork.jsonl"),
+		});
+		await fork.close();
+
+		const context = { session: makeToolSession(cwd, parentFile), sessionFile: parentFile };
+		const router = InternalUrlRouter.instance();
+		const index = await router.resolve("history://", context);
+		expect(index.content).toMatch(/\| Fork \| parked \|/);
+		expect(index.content).not.toContain("ForeignChild");
+		await expect(router.resolve("history://ForeignChild", context)).rejects.toThrow("Unknown agent: ForeignChild");
 	});
 
 	it("skips a registered artifact candidate that is a file", async () => {

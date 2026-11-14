@@ -175,6 +175,7 @@ function emptyViewState(): SessionViewState {
 	return {
 		providerSessionId: "",
 		sessionName: undefined,
+		forkSourceArtifactsDir: null,
 		leafId: null,
 		agentEffort: undefined,
 		tools: [],
@@ -340,6 +341,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			getBranch: fromId => this.#entryIndex.pathTo(fromId),
 			getLeafId: () => this.#entryIndex.leafId(),
 			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
+			getForkSourceArtifactsDir: () => this.#view.forkSourceArtifactsDir,
 			appendCustomEntry: (customType, data) => this.#appendCustomEntry(customType, data),
 			flush: () => this.#command("flushSession"),
 			ensureOnDisk: () => this.#command("ensureOnDisk"),
