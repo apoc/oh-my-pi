@@ -1,0 +1,20 @@
+{
+	"relevant": {
+		"instructions": "The state lists other coding-agent instances in `peers`, keyed by tag, and a `need` one of them should serve. Is peer {{key}} the right instance to contact for the need? Judge by its work summary, repository and branch, working directory, session name and running agents; apply `criteria`.",
+		"criteria": {
+			"true": "Relevant: its summary, repository, directory, session or agents show it works on the subject, code or task the need names, or it holds the knowledge or state the need asks about.",
+			"false": "Not relevant: it works on an unrelated project or subject, or nothing about it connects to the need."
+		}
+	},
+	"match": {
+		"instructions": "Which field of peer {{key}} in `peers` connects it most strongly to `need`?",
+		"criteria": {
+			"summary": "its work summary",
+			"repo": "its repository or branch",
+			"cwd": "its working directory",
+			"session": "its session name",
+			"agents": "one of its running agents or their tasks",
+			"none": "nothing connects it to the need"
+		}
+	}
+}

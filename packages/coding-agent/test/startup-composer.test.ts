@@ -10,6 +10,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import * as instances from "@oh-my-pi/pi-coding-agent/instances";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
@@ -22,6 +23,7 @@ import {
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
 import type { StatusPrediction } from "../src/modes/interactive/status-prediction";
@@ -116,10 +118,9 @@ describe("outer startup collaboration gate", () => {
 		cfgStartupShowSplash.override(activeSettings, false);
 		cfgMarketplaceAutoUpdate.override(activeSettings, "off");
 		installInMemoryRelay();
-		const publish = registry.publishCollabHost;
-		vi.spyOn(registry, "publishCollabHost").mockImplementation((source, options) =>
-			publish(source, { ...options, dir: testSession.tempDir }),
-		);
+		// The process's instance host, in the test's temp dir.
+		const instanceHost = new InstanceHost({ dir: testSession.tempDir });
+		vi.spyOn(instances, "sharedInstanceHost").mockReturnValue(instanceHost);
 		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 		const enteredReplay = Promise.withResolvers<InteractiveMode>();
@@ -266,6 +267,7 @@ describe("outer startup collaboration gate", () => {
 			mode?.stop();
 			stopPendingStartupComposer();
 			vi.restoreAllMocks();
+			await instanceHost.close();
 			uninstallInMemoryRelay();
 			authStorage.close();
 			// setProjectDir chdir'd into tempDir; Windows cannot delete the process cwd.

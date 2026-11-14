@@ -156,6 +156,11 @@ function jobAge(job: JobsPanelJob, now: number): number {
 	return Math.max(0, (job.status === "running" ? now : (job.endTime ?? now)) - job.startTime);
 }
 
+/** Jobs whose label is prose (a subagent's name, a mesh question), not a command line. */
+function isProseLabel(type: string): boolean {
+	return type === "task" || type === "mesh";
+}
+
 function jobTitle(job: JobsPanelJob): string {
 	return job.intent ?? job.label;
 }
@@ -456,7 +461,7 @@ function JobListRow(props: { entry: JobTreeRow<JobsPanelJob>; now: number }): JS
 	const title = jobTitle(job);
 	const state = job.status === "completed" ? "done" : job.status;
 	if (job.agentId !== undefined) label.push({ t: `${job.agentId} `, s: "strong" }, { t: title });
-	else label.push({ t: title, s: "mono" });
+	else label.push(isProseLabel(job.type) ? { t: title } : { t: title, s: "mono" });
 	const tooltip = [
 		title,
 		job.caption,
@@ -539,7 +544,7 @@ function JobDetail(props: {
 	const { job, detail, shown } = props;
 	const running = job.status === "running";
 	const age = Math.round(jobAge(job, props.now));
-	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const command = detail?.command ?? (isProseLabel(job.type) ? undefined : job.label);
 	const facts = jobFacts(job, detail);
 	const presentation = stepPresentation(detail?.trace, props.preferences);
 	return (
@@ -564,7 +569,7 @@ function JobDetail(props: {
 					<ActionButton id="cancel" label="Cancel job" title="Cancel job  x" tone="error" keys={["x"]} />
 				)}
 			</row>
-			{job.type === "task" && (
+			{isProseLabel(job.type) && (
 				<col key="about" role="omp.jobs.about" gap="xs">
 					<text role="omp.jobs.title" text={jobTitle(job)} title={jobTitle(job)} wrap="word" />
 					{job.caption && (
@@ -706,9 +711,9 @@ function termDetail(
 	if (detail && detail.pids.length > 0) facts.push(`pid ${detail.pids.join(", ")}`);
 	if (detail?.exitCode !== undefined) facts.push(`exit ${detail.exitCode}`);
 	if (detail?.artifactId) facts.push(`local://${detail.artifactId}.log`);
-	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const command = detail?.command ?? (isProseLabel(job.type) ? undefined : job.label);
 	return {
-		caption: job.type === "task" ? job.caption : undefined,
+		caption: isProseLabel(job.type) ? job.caption : undefined,
 		command,
 		facts: facts.join(" · "),
 		widget: detail?.widget,

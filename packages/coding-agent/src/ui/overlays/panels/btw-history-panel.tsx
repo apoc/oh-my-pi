@@ -19,7 +19,9 @@ import { getBtwLatestTurn } from "../../../session/btw-history-model";
 import "../../styles/panels/btw-history-panel";
 import { BtwInjectAnswer } from "./btw-answer";
 import {
+	BTW_HISTORY_TEXTS,
 	type BtwHistoryModel,
+	type BtwHistoryTexts,
 	DATE_FORMAT,
 	displayTurns,
 	type FollowUpComposer,
@@ -37,21 +39,24 @@ import { rowsRole, type SheetAttributes } from "../sheet";
 /** Tern's sheet: a large centered one (the list beside the reader), palette-sized while there is nothing to list. */
 export function btwHistorySheet(model: BtwHistoryModel): SheetAttributes {
 	return {
-		role: "omp.overlay.btwHistory",
+		role: model.texts.role,
 		anchor: "center",
 		size: () => (model.rev(), model.records.length > 0 ? "lg" : "md"),
-		head: "BTW history",
+		head: sanitizeDisplayLine(model.texts.heading),
 		modal: true,
 	};
 }
 
 /** A status worth naming beside an answer natively; an answered question needs none. */
-export function btwStatusSpans(status: BtwHistoryTurn["status"]): TspSpan[] | undefined {
+export function btwStatusSpans(
+	status: BtwHistoryTurn["status"],
+	running = BTW_HISTORY_TEXTS.runningNative,
+): TspSpan[] | undefined {
 	switch (status) {
 		case "running":
 			return [
 				{ s: "accent", t: "●", fx: "pulse" },
-				{ s: "accent", t: " Answering" },
+				{ s: "accent", t: ` ${running}` },
 			];
 		case "cancelled":
 			return [{ s: "warning", t: "Cancelled" }];
@@ -107,7 +112,7 @@ function HistoryList(props: { readonly model: BtwHistoryModel }): JSXNode {
 							key={record.id}
 							label={label}
 							detail={detail}
-							value={btwStatusSpans(getBtwLatestTurn(record).status)}
+							value={btwStatusSpans(getBtwLatestTurn(record).status, model.texts.runningNative)}
 						/>
 					);
 				})}
@@ -121,8 +126,9 @@ function Turn(props: {
 	readonly index: number;
 	readonly block: InjectBlock | undefined;
 	readonly topicCreatedAt: number;
+	readonly texts: BtwHistoryTexts;
 }): JSXNode {
-	const { turn, index, block } = props;
+	const { turn, index, block, texts } = props;
 	// A follow-up asked on the topic's day needs only its time.
 	const meta: TspSpan[] =
 		index === 0
@@ -135,7 +141,7 @@ function Turn(props: {
 						),
 					},
 				];
-	const status = btwStatusSpans(turn.status);
+	const status = btwStatusSpans(turn.status, texts.runningNative);
 	if (status) meta.push({ t: "  ·  " }, ...status);
 	const stream = turn.status === "running";
 	let answer: JSXNode = null;
@@ -146,7 +152,7 @@ function Turn(props: {
 		) : turn.answer.trim() ? (
 			<md text={sanitizeDisplayText(turn.answer)} stream={stream} />
 		) : (
-			<text role="omp.btw.pending" spans={[{ s: "dim", t: stream ? "Thinking…" : "No answer text." }]} />
+			<text role="omp.btw.pending" spans={[{ s: "dim", t: stream ? texts.pendingNative : "No answer text." }]} />
 		);
 	}
 	return (
@@ -168,15 +174,17 @@ function Turn(props: {
 	);
 }
 
+/** The follow-up composer under the thread, or a new topic's in its place. */
 function Composer(props: { readonly model: BtwHistoryModel; readonly composer: FollowUpComposer }): JSXNode {
 	const { model, composer } = props;
+	const followUp = composer.recordId !== undefined;
 	return (
 		<col key="composer" role="omp.btw.composer" gap="sm">
 			<input
 				text={composer.draft.text}
 				cursor={composer.draft.cursor}
-				placeholder="Ask about this answer…"
-				prompt="Follow up: "
+				placeholder={followUp ? model.texts.followUpPlaceholder : model.texts.startPlaceholder}
+				prompt={followUp ? "Follow up: " : "Ask: "}
 				sendable={false}
 				onEdit={event => {
 					const next = applyEdit(composer.draft, event);
@@ -204,9 +212,10 @@ function Thread(props: { readonly model: BtwHistoryModel; readonly record: BtwHi
 					index={index}
 					block={model.injectBlock(record, turn, index)}
 					topicCreatedAt={record.createdAt}
+					texts={model.texts}
 				/>
 			))}
-			{model.composer && <Composer model={model} composer={model.composer} />}
+			{model.composer?.recordId !== undefined && <Composer model={model} composer={model.composer} />}
 		</col>
 	);
 }
@@ -231,19 +240,23 @@ function Actions(props: { readonly model: BtwHistoryModel; readonly record: BtwH
 	const running = model.running(record);
 	const hides = model.options.escapeHides === true;
 	const copied = record !== undefined && model.isCopied(record);
+	const startable = model.options.onStart !== undefined;
 	return (
 		<row key="actions" role="omp.actions" align="center" gap="sm">
-			{running && <Button label="Stop answer" act="stop" shortcut={hides ? "x" : cancelKey} />}
+			{running && <Button label={model.texts.stop} act="stop" shortcut={hides ? "x" : cancelKey} />}
 			{model.canInject(record) && <Button label="Inject into main" act="inject" shortcut={model.injectKey} />}
 			{model.canBranch(record) && <Button label="Branch to chat" act="branch" shortcut="b" />}
 			{model.canCopy(record) && [
 				<Button label={copied ? "Copy again" : "Copy answer"} act="copy-answer" shortcut="c" />,
 				copied && <text role="omp.btw.copied" spans={[{ s: "success", t: "✓ Copied" }]} />,
 			]}
+			{/* A new topic sits with the answer's actions, or in the corner while there is nothing else to do. */}
+			{startable && record && <Button label="New question" act="start" shortcut="n" />}
 			<spacer grow={1} />
 			{/* Clicking Close always dismisses; its tooltip names Esc only where Esc does too. */}
 			<Button label="Close" act="close" shortcut={running && !hides ? undefined : cancelKey} />
 			{model.canFollowUp(record) && <Button label="Follow up" act="follow-up" shortcut="f" accent />}
+			{startable && !record && <Button label="New question" act="start" shortcut="n" accent />}
 		</row>
 	);
 }
@@ -254,6 +267,8 @@ export function BtwHistoryPanel(props: { readonly model: BtwHistoryModel }): JSX
 		model.rev();
 		return untrack(() => {
 			const record = model.selected();
+			// A new topic's composer belongs to no record yet: it takes the reader's place.
+			const starting = model.composer?.recordId === undefined ? model.composer : undefined;
 			return (
 				<col
 					gap="none"
@@ -281,22 +296,34 @@ export function BtwHistoryPanel(props: { readonly model: BtwHistoryModel }): JSX
 								min={{ w: 0 }}
 								scroll={model.nativeScroll}
 							>
-								<Thread model={model} record={record} />
+								{starting ? (
+									<Composer model={model} composer={starting} />
+								) : (
+									<Thread model={model} record={record} />
+								)}
 							</col>
 						</row>
 					) : (
-						<col key="empty" role="omp.btw.empty" align="center" gap="sm">
-							<text role="omp.btw.empty.title" text="No side questions yet" />
-							<text
-								role="omp.btw.empty.hint"
-								spans={[
-									{ t: "Ask one with " },
-									{ s: "code", t: "/btw <question>" },
-									{ t: ". The answer stays out of the main conversation." },
-								]}
-								wrap="word"
-							/>
-						</col>
+						[
+							<col key="empty" role="omp.btw.empty" align="center" gap="sm">
+								<text role="omp.btw.empty.title" text={sanitizeDisplayLine(model.texts.emptyTitle)} />
+								<text
+									role="omp.btw.empty.hint"
+									spans={
+										// The default names `/btw <question>` as code; a host's hint is plain text.
+										model.options.texts?.emptyHint === undefined
+											? [
+													{ t: "Ask one with " },
+													{ s: "code", t: "/btw <question>" },
+													{ t: ". The answer stays out of the main conversation." },
+												]
+											: [{ t: sanitizeDisplayLine(model.texts.emptyHint) }]
+									}
+									wrap="word"
+								/>
+							</col>,
+							starting && <Composer model={model} composer={starting} />,
+						]
 					)}
 					<Actions model={model} record={record} />
 				</col>

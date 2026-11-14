@@ -127,7 +127,7 @@ describe("formatTaskResultSummary", () => {
 		// result: a copy of the model-recognized `<irc>`/`<system-*>` block names
 		// must read as literal text, not reopen a harness block. `<task-result>`/
 		// `<output>` are not harness-recognized tag names (harness-tags.ts only
-		// matches `irc` and `system-*`), so an embedded copy of those is out of
+		// matches `irc`, `mesh-*` and `system-*`), so an embedded copy of those is out of
 		// this fix's scope and stays untouched.
 		const forged = [
 			"real findings",

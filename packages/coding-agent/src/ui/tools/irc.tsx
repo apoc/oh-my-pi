@@ -5,8 +5,11 @@
  * (`IRC ➤ Ben auto`), relayed traffic between other agents and workpool
  * fan-outs — with the message's age and its Markdown body.
  *
- * Terminal look: `omp.irc.*` cards (`src/ui/styles/tools/irc.ts`); the
- * transcript's expand state reaches it as `term.expanded`.
+ * Mesh traffic reuses the card (`MESH ⟵ peer`) with its own `title`, `role` and
+ * leading `tags`.
+ *
+ * Terminal look: `omp.irc.*` / `omp.mesh.*` cards (`src/ui/styles/tools/irc.ts`);
+ * the transcript's expand state reaches it as `term.expanded`.
  */
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
@@ -24,10 +27,17 @@ export interface IrcMessage {
 	readonly timestamp?: number;
 	readonly pool?: string;
 	readonly mode?: string;
+	/** The heading in place of the IRC one; the caller sanitizes its text. */
+	readonly title?: (theme: Theme) => string;
+	/** The card's role in place of `omp.irc.<kind>`. */
+	readonly role?: string;
+	/** Dim tags after the heading, ahead of the kind's own. */
+	readonly tags?: readonly string[];
 }
 
-/** An IRC heading with the given preset's directional glyph. */
+/** A card's heading with the given preset's directional glyph. */
 export function ircTitle(card: IrcMessage, theme: Theme): string {
+	if (card.title) return card.title(theme);
 	const from = cleanText(card.from?.trim() || "?");
 	const to = cleanText(card.to?.trim() || "?");
 	switch (card.kind) {
@@ -46,14 +56,14 @@ export function ircTitle(card: IrcMessage, theme: Theme): string {
 export function IrcMessageCard(props: { readonly message: IrcMessage; readonly expanded?: () => boolean }): JSXNode {
 	const card = props.message;
 	const body = card.body ?? "";
-	const tail: TspSpan[] = [];
+	const tail: TspSpan[] = (card.tags ?? []).map(tag => ({ s: "muted", t: ` ${cleanText(tag)}` }));
 	if (card.kind === "autoreply") tail.push({ s: "muted", t: " auto" });
 	if (card.kind === "workpool" && card.mode) tail.push({ s: "muted", t: ` ${cleanText(card.mode)}` });
 	if (card.replyTo) tail.push({ s: "muted", t: " reply" });
 	const expanded = props.expanded;
 	return (
 		<card
-			role={`omp.irc.${card.kind}`}
+			role={card.role ?? `omp.irc.${card.kind}`}
 			tone="info"
 			head={() => [{ s: "toolTitle strong", t: ircTitle(card, currentTheme()) }, ...tail]}
 			collapsible={body.trim().length > 0}

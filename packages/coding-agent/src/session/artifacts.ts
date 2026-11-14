@@ -90,6 +90,7 @@ export class ArtifactManager implements ArtifactManagerApi {
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
 	readonly #ready: Promise<void> | undefined;
+	readonly #reservedIdsDir: string | undefined;
 
 	/**
 	 * @param dir The `local://` root that holds spill files. Created lazily on first save.
@@ -97,11 +98,15 @@ export class ArtifactManager implements ArtifactManagerApi {
 	 * @param ready Settles once `dir` is seeded (a session move copying the previous
 	 *   session's files in the background). Id scans and lookups wait for it,
 	 *   so new ids never collide with copied ones. Must not reject.
+	 * @param reservedIdsDir Read-only spill root whose ids stay reserved: a confined
+	 *   fork allocates past its source's ids so `local://<n>.log` from the inherited
+	 *   transcript keeps naming the source spill.
 	 */
-	constructor(dir: string, sessionDir: string | null, ready?: Promise<void>) {
+	constructor(dir: string, sessionDir: string | null, ready?: Promise<void>, reservedIdsDir?: string) {
 		this.#dir = dir;
 		this.#sessionDir = sessionDir;
 		this.#ready = ready;
+		this.#reservedIdsDir = reservedIdsDir;
 	}
 
 	get dir(): string {
@@ -127,8 +132,16 @@ export class ArtifactManager implements ArtifactManagerApi {
 
 	/** Start ids past every `<N>.log` already at the root, so a resumed session never reuses one. */
 	async #scanExistingIds(): Promise<void> {
+		const files = await this.#listFiles();
+		if (this.#reservedIdsDir) {
+			try {
+				files.push(...(await fs.readdir(this.#reservedIdsDir)));
+			} catch {
+				// A missing source spill root reserves nothing.
+			}
+		}
 		let maxId = -1;
-		for (const file of await this.#listFiles()) {
+		for (const file of files) {
 			const id = spillIdOfFileName(file);
 			if (id !== undefined && id > maxId) maxId = id;
 		}

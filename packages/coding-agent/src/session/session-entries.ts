@@ -105,6 +105,11 @@ export interface SessionHeader {
 	 * readers that see both transcripts leave them to the parent. Kept by sessions derived from the fork.
 	 */
 	inheritedThroughEntryId?: string;
+	/**
+	 * Source session file of a confined read-only fork. Its artifacts stay in the
+	 * source: `history://`, `agent://`, and inherited `local://` spills read them from there.
+	 */
+	forkSource?: string;
 }
 
 export interface NewSessionOptions {
@@ -121,6 +126,11 @@ export interface NewSessionOptions {
 	additionalDirectories?: string[];
 	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
 	sessionDir?: string;
+	/**
+	 * Fork source the new session is confined to: a subagent of a confined fork reads `history://`
+	 * and `agent://` only within that source's artifacts, like the fork itself.
+	 */
+	forkSource?: string;
 }
 
 export interface SessionEntryBase {

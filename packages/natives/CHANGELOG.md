@@ -8,6 +8,13 @@
 
 - Snapcompact renders with one installed font per transcript instead of shipping bitmap and Silver fonts.
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
+### Added
+
+- Added the `InstanceHost` class: a same-machine instance publishing one entry and one endpoint (Unix socket or current-user named pipe) in an owner-only registry directory, shared by every namespace it serves; `InstanceHost.shared(dir)` returns the process-wide host
+- Added the `MeshNode` class, the native engine behind oh my pi mesh (same-machine discovery through the `mesh` namespace of an `InstanceHost`, LAN discovery over mDNS and static peers with an AES-256-GCM sealed transport, snapshots, request/response messaging with tracked answers via `request`, `awaitReply` and `forgetPending`, and `peerCounts`), plus `meshDeriveKey`, `meshPassphraseCheck(phrase)` and `meshLimits()` (the protocol's text, field and watch-lifetime caps)
+- Added `publishCollab(host, onQuery)`, `listCollabHosts({ dir, timeoutMs })` and `resolveCollabHostLink(selector, access, { dir, timeoutMs })`, the native local Collab host registry: a host serves the `collab` namespace of an `InstanceHost` and answers queries through `CollabRegistration.respond()`; link failures reject with an `Error` whose `code` is `not_found`, `ambiguous`, `stale_generation`, `access_unavailable` or `unreachable` (`registry_dir` for an insecure or unreadable registry directory)
+
+### Fixed
 
 ### Added
 

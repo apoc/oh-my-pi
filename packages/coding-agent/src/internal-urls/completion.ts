@@ -26,6 +26,8 @@ export interface InternalUrlCallerContext {
 	cwd?: string;
 	sessionFile?: string;
 	sessionId?: string;
+	/** Source artifacts dir when the caller is a confined fork: `history://` completes only its source's transcripts. */
+	forkSourceArtifactsDir?: string;
 }
 
 /** Decode a completion `value` for fuzzy matching (the inserted value may be

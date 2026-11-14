@@ -31,6 +31,7 @@ pub mod block;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 mod bundled_libc;
 pub mod clipboard;
+pub mod collab_registry;
 pub mod console_input;
 pub mod console_threads;
 pub mod crash_handler;
@@ -49,6 +50,7 @@ pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
+pub mod instances;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;
 pub mod js;
@@ -57,6 +59,7 @@ pub mod line_match;
 pub mod live;
 pub mod memory;
 pub mod mermaid;
+pub mod mesh;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;

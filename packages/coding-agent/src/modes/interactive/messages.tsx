@@ -2,7 +2,7 @@
 /**
  * Transcript faces of the session's non-assistant messages: prompts, summaries,
  * file mentions, and the custom messages extensions and omp itself persist
- * (background job events, IRC traffic, advisor notes, skill prompts, collab
+ * (background job events, IRC and mesh traffic, advisor notes, skill prompts, collab
  * prompts, handoffs). Assistant replies and `!`/`$` runs have their own
  * presenters.
  */
@@ -14,6 +14,7 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "../../collab/protocol";
 import type { MessageRenderer } from "../../extensibility/extensions/render-types";
+import { MESH_INCOMING_MESSAGE_TYPE } from "../../mesh/bridge";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -45,6 +46,7 @@ import {
 import { FileMentions } from "../../ui/transcript/messages/file-mention";
 import { CustomMessageBlock, type FrameRenderer, HookMessageBlock } from "../../ui/transcript/messages/frame";
 import { LateDiagnostics } from "../../ui/transcript/messages/late-diagnostics";
+import { MeshIncomingMessage } from "../../ui/transcript/messages/mesh-cards";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { TangentDispatch, TangentResult } from "../../ui/transcript/messages/notices";
 import { SkillMessage } from "../../ui/transcript/messages/skill-message";
@@ -191,6 +193,9 @@ function customFace(message: CustomOrHookMessage, env: MessageFaceEnv): MessageF
 		return {
 			face: () => <IrcMessageBlock message={message} expanded={env.expanded} visible={env.activityVisible} />,
 		};
+	}
+	if (customType === MESH_INCOMING_MESSAGE_TYPE) {
+		return { face: () => <MeshIncomingMessage message={message} expanded={env.expanded} /> };
 	}
 	if (customType === "advisor") {
 		const details = (message as CustomMessage<AdvisorMessageDetails>).details;

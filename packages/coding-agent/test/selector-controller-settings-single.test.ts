@@ -299,6 +299,53 @@ describe("single-instance menus", () => {
 		model.close();
 	});
 
+	// A custom menu whose `create` throws must release its kind, so the next request for it opens.
+	it("frees a custom fullscreen menu kind when its create callback throws", () => {
+		const { ctx, overlays } = shellContext();
+		const controller = new SelectorController(ctx);
+		expect(() =>
+			controller.openFullscreenMenu("x", () => {
+				throw new Error("boom");
+			}),
+		).toThrow("boom");
+		expect(overlays.open()).toBe(false);
+
+		controller.openFullscreenMenu("x", screen);
+		const menu = overlays.top();
+		expect(menu?.node.props()).toMatchObject({ size: "full" });
+		expect(menu?.node.children()[0]?.kind).toBe("picker");
+	});
+
+	it("opens one custom fullscreen menu per kind; closing it frees the kind and refocuses the composer", () => {
+		const { ctx, overlays, focused } = shellContext();
+		const controller = new SelectorController(ctx);
+		let close: (() => void) | undefined;
+		let created = 0;
+		const open = () =>
+			controller.openFullscreenMenu("x", done => {
+				created++;
+				close = done;
+				return screen();
+			});
+
+		open();
+		const menu = overlays.top();
+		expect(focused()?.kind).toBe("picker");
+		focused.set(null);
+		open();
+		expect(created).toBe(1);
+		expect(overlays.nodes()).toHaveLength(1);
+		expect(focused()?.kind).toBe("picker");
+
+		close?.();
+		expect(menu?.closed).toBe(true);
+		expect(overlays.open()).toBe(false);
+		expect(focused()?.kind).toBe("col");
+		open();
+		expect(created).toBe(2);
+		expect(overlays.nodes()).toHaveLength(1);
+	});
+
 	// Regression: a second /usage (or status-line cost click) while the dashboard
 	// was open stacked another fullscreen dashboard on top of the first.
 	it("opens one usage dashboard per close, focusing it on repeat requests", () => {

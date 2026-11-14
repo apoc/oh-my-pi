@@ -43,6 +43,52 @@ export interface BtwHistoryInject {
 	send(record: BtwHistoryRecord): void;
 }
 
+/** Every user-visible string the sheet names; the defaults read as the session's `/btw` history. */
+export interface BtwHistoryTexts {
+	/** Terminal frame title and Tern sheet `head`. */
+	readonly heading: string;
+	/** Tern sheet `role`. */
+	readonly role: string;
+	/** Empty state title. */
+	readonly emptyTitle: string;
+	/** Empty state hint (plain text; the default names `/btw <question>` as code natively). */
+	readonly emptyHint: string;
+	/** Follow-up composer placeholder. */
+	readonly followUpPlaceholder: string;
+	/** New-topic composer placeholder. */
+	readonly startPlaceholder: string;
+	/** Notice when a follow-up cannot start. */
+	readonly busy: string;
+	/** Tern's running-turn label after "●". */
+	readonly runningNative: string;
+	/** The terminal's running status badge. */
+	readonly runningBadge: string;
+	/** Tern's placeholder while a running turn has no answer text. */
+	readonly pendingNative: string;
+	/** The terminal's placeholder while a running turn has no answer text. */
+	readonly pendingText: string;
+	/** Stop button label. */
+	readonly stop: string;
+	/** The terminal's list pane label. */
+	readonly listLabel: string;
+}
+
+export const BTW_HISTORY_TEXTS: BtwHistoryTexts = {
+	heading: "BTW history",
+	role: "omp.overlay.btwHistory",
+	emptyTitle: "No side questions yet",
+	emptyHint: "Use /btw QUESTION to start one.",
+	followUpPlaceholder: "Ask about this answer…",
+	startPlaceholder: "Type a question…",
+	busy: "A BTW request is busy. Try again when it finishes.",
+	runningNative: "Answering",
+	runningBadge: "Running",
+	pendingNative: "Thinking…",
+	pendingText: "Waiting for response…",
+	stop: "Stop answer",
+	listLabel: "History",
+};
+
 export interface BtwHistoryOptions {
 	readonly records: readonly BtwHistoryRecord[];
 	readonly onClose: () => void;
@@ -74,6 +120,13 @@ export interface BtwHistoryOptions {
 	 * `x` stops it, instead of Esc stopping first (hosts without an inline panel).
 	 */
 	readonly escapeHides?: boolean;
+	/** Override any user-visible string; unset fields keep the `/btw` defaults. */
+	readonly texts?: Partial<BtwHistoryTexts>;
+	/**
+	 * Start a NEW topic from the composer {@link BtwHistoryModel.openStart} opens (`n`, native `start`);
+	 * resolve true once accepted (the composer closes), false (or a throw) keeps the draft.
+	 */
+	readonly onStart?: (question: string, signal: AbortSignal) => Promise<boolean>;
 	readonly inject?: BtwHistoryInject;
 	/** The inject key (`alt+i`). */
 	readonly injectKey?: string;
@@ -83,9 +136,10 @@ export interface BtwHistoryOptions {
 
 export type BtwPane = "list" | "answer";
 
-/** The follow-up being written for one topic. */
+/** The composer under the reader: a follow-up on one topic, or a new topic ({@link BtwHistoryModel.openStart}). */
 export interface FollowUpComposer {
-	readonly recordId: string;
+	/** The topic followed up; undefined for a new topic. */
+	readonly recordId: string | undefined;
 	draft: LineValue;
 	readonly abort: AbortController;
 	/** Images pasted into it, numbered by their `[Image #N]` markers. */
@@ -101,7 +155,7 @@ export interface InjectBlock {
 	readonly state: BtwInjectState;
 }
 
-export const BTW_STATUS: Readonly<Record<BtwHistoryTurn["status"], { label: string; color: string }>> = {
+const BTW_STATUS: Readonly<Record<BtwHistoryTurn["status"], { label: string; color: string }>> = {
 	running: { label: "Running", color: "accent" },
 	complete: { label: "Complete", color: "success" },
 	cancelled: { label: "Cancelled", color: "warning" },
@@ -166,7 +220,12 @@ export class BtwHistoryModel implements DictationTarget {
 	followLatest = false;
 	/** The last reader scroll key, forwarded natively. */
 	nativeScroll: ScrollRequest | undefined;
-	#copied: { id: string; text: string } | undefined;
+	/** What `c` copied, and the record's turn count then: a newer follow-up retires the confirmation. */
+	#copied: { id: string; text: string; turns: number } | undefined;
+	/** The sheet's strings: the `/btw` defaults under the host's overrides. */
+	readonly texts: BtwHistoryTexts;
+	/** Status badges with the sheet's running label. */
+	readonly statuses: Readonly<Record<BtwHistoryTurn["status"], { label: string; color: string }>>;
 	readonly #spaceHold: SpaceHoldGesture | undefined;
 	/** Image-path pastes in flight: what they hand back as text (an unreadable path) is typed, not re-attached. */
 	#pathPastes = 0;
@@ -181,6 +240,8 @@ export class BtwHistoryModel implements DictationTarget {
 	detailHeight = 1;
 
 	constructor(readonly options: BtwHistoryOptions) {
+		this.texts = { ...BTW_HISTORY_TEXTS, ...options.texts };
+		this.statuses = { ...BTW_STATUS, running: { ...BTW_STATUS.running, label: this.texts.runningBadge } };
 		this.records = options.records;
 		this.selectedId = options.records[0]?.id;
 		if (options.records.length === 1) this.focus = "answer";
@@ -215,8 +276,10 @@ export class BtwHistoryModel implements DictationTarget {
 	update(records: readonly BtwHistoryRecord[]): void {
 		this.records = records;
 		const copied = this.#copied && records.find(record => record.id === this.#copied!.id);
-		if (!copied || getBtwCopyText(copied) !== this.#copied!.text) this.#copied = undefined;
-		if (this.composer && !records.some(record => record.id === this.composer!.recordId)) this.composer = undefined;
+		if (!copied || !this.isCopied(copied)) this.#copied = undefined;
+		// A new topic's composer belongs to no record; a follow-up's goes with its record.
+		const composerId = this.composer?.recordId;
+		if (composerId !== undefined && !records.some(record => record.id === composerId)) this.composer = undefined;
 		if (!records.some(record => record.id === this.selectedId)) {
 			this.selectedId = records[0]?.id;
 			this.listScroll = 0;
@@ -228,14 +291,19 @@ export class BtwHistoryModel implements DictationTarget {
 		this.touch();
 	}
 
-	/** `c` copied this record's answer (shown while the record still holds that text). */
+	/** `c` copied this record's answer (shown while the record still holds that text and no newer turn). */
 	markCopied(recordId: string, text: string): void {
-		this.#copied = { id: recordId, text };
+		const record = this.records.find(entry => entry.id === recordId);
+		this.#copied = { id: recordId, text, turns: record ? getBtwTurns(record).length : 0 };
 		this.touch();
 	}
 
 	isCopied(record: BtwHistoryRecord): boolean {
-		return record.id === this.#copied?.id && getBtwCopyText(record) === this.#copied.text;
+		return (
+			record.id === this.#copied?.id &&
+			getBtwCopyText(record) === this.#copied.text &&
+			getBtwTurns(record).length === this.#copied.turns
+		);
 	}
 
 	selectedIndex(): number {
@@ -310,6 +378,15 @@ export class BtwHistoryModel implements DictationTarget {
 		return true;
 	}
 
+	/** Open a composer that starts a new topic via `onStart`; false without `onStart`, while composing, or while a send is in flight. */
+	openStart(): boolean {
+		if (this.composer || this.followUpPending || !this.options.onStart) return false;
+		this.composer = { recordId: undefined, draft: { text: "", cursor: 0 }, abort: new AbortController(), images: [] };
+		this.focus = "answer";
+		this.touch();
+		return true;
+	}
+
 	/** Select a record with its reader focused, from the top (a just-asked `/btw`). */
 	showRecord(recordId: string): void {
 		const index = this.records.findIndex(record => record.id === recordId);
@@ -333,15 +410,19 @@ export class BtwHistoryModel implements DictationTarget {
 		this.touch();
 	}
 
+	/** A clipboard image (an empty paste) or image paths attach to a follow-up; a new topic takes text only. */
 	paste(text: string): void {
 		const composer = this.composer;
 		if (!composer) return;
-		if (text === "" && this.options.onPasteImage) {
+		const images = composer.recordId !== undefined;
+		if (images && text === "" && this.options.onPasteImage) {
 			void this.options.onPasteImage();
 			return;
 		}
 		const paths =
-			this.options.onPasteImagePath && this.#pathPastes === 0 ? extractImagePastePathsFromText(text) : undefined;
+			images && this.options.onPasteImagePath && this.#pathPastes === 0
+				? extractImagePastePathsFromText(text)
+				: undefined;
 		if (paths) {
 			void this.#pastePaths(paths);
 			return;
@@ -427,10 +508,10 @@ export class BtwHistoryModel implements DictationTarget {
 		return true;
 	}
 
-	/** Attach an image to the follow-up; its `[Image #N, WxH]` marker to type, or undefined while none can take it. */
+	/** Attach an image to the follow-up; its `[Image #N, WxH]` marker to type, or undefined while none can take it (a new topic takes none). */
 	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
 		const composer = this.composer;
-		if (!composer || this.followUpPending) return undefined;
+		if (!composer || composer.recordId === undefined || this.followUpPending) return undefined;
 		composer.images.push(image);
 		return formatVisionMarker("image", composer.images.length, dims);
 	}
@@ -439,6 +520,16 @@ export class BtwHistoryModel implements DictationTarget {
 		const composer = this.composer;
 		if (!composer || this.followUpPending) return;
 		let question = composer.draft.text.trim();
+		if (composer.recordId === undefined) {
+			if (!question) {
+				composer.notice = "Enter a question.";
+				this.touch();
+				return;
+			}
+			const onStart = this.options.onStart!;
+			await this.#send(composer, "question", () => onStart(question, composer.abort.signal));
+			return;
+		}
 		if (!question) {
 			composer.notice = "Enter a follow-up question.";
 			this.touch();
@@ -446,38 +537,46 @@ export class BtwHistoryModel implements DictationTarget {
 		}
 		const record = this.records.find(record => record.id === composer.recordId);
 		if (!record || !this.canFollowUp(record)) {
-			composer.notice = "A BTW request is busy. Try again when it finishes.";
+			composer.notice = this.texts.busy;
 			this.touch();
 			return;
 		}
-		this.followUpPending = true;
-		composer.notice = "Starting follow-up…";
-		this.touch();
 		let images: ImageContent[] | undefined;
 		if (composer.images.length > 0) {
 			const compacted = compactImageMarkers(question, composer.images.length, { byAppearance: true });
 			images = compacted ? compacted.keep.map(index => composer.images[index]!) : composer.images;
 			if (compacted) question = compacted.text.trim();
 		}
+		const onFollowUp = this.options.onFollowUp!;
+		await this.#send(composer, "follow-up", () =>
+			onFollowUp(record, question, composer.abort.signal, images?.length ? images : undefined),
+		);
+	}
+
+	/** Send the composer's question: accepted closes it, otherwise the draft stays with a retry notice. */
+	async #send(
+		composer: FollowUpComposer,
+		noun: "follow-up" | "question",
+		send: () => Promise<boolean>,
+	): Promise<void> {
+		this.followUpPending = true;
+		composer.notice = `Starting ${noun}…`;
+		this.touch();
+		const keep = `Your draft is kept; ${actionKey("tui.input.submit")} to retry.`;
 		try {
-			const accepted = await this.options.onFollowUp!(
-				record,
-				question,
-				composer.abort.signal,
-				images?.length ? images : undefined,
-			);
+			const accepted = await send();
 			if (this.composer !== composer) return;
 			if (accepted) {
 				this.composer = undefined;
-				this.selectedId = composer.recordId;
+				// A new topic's record was already added and shown by the host: keep that selection.
+				if (composer.recordId !== undefined) this.selectedId = composer.recordId;
 				this.focus = "answer";
 				this.#jumpToEnd();
 			} else {
-				composer.notice = `Follow-up was not started. Your draft is kept; ${actionKey("tui.input.submit")} to retry.`;
+				composer.notice = `${noun === "question" ? "Question" : "Follow-up"} was not started. ${keep}`;
 			}
 		} catch {
-			if (this.composer === composer)
-				composer.notice = `Could not start the follow-up. Your draft is kept; ${actionKey("tui.input.submit")} to retry.`;
+			if (this.composer === composer) composer.notice = `Could not start the ${noun}. ${keep}`;
 		} finally {
 			this.followUpPending = false;
 			this.touch();
@@ -571,6 +670,10 @@ export class BtwHistoryModel implements DictationTarget {
 			if (record && this.canBranch(record)) this.options.onBranch?.(record);
 			return true;
 		}
+		if (id === "n" && this.options.onStart) {
+			this.openStart();
+			return true;
+		}
 		if (this.options.inject && id === this.injectKey) {
 			this.#sendInject(record);
 			return true;
@@ -620,6 +723,9 @@ export class BtwHistoryModel implements DictationTarget {
 				break;
 			case "stop":
 				if (record && this.running(record)) this.options.onCancel(record);
+				break;
+			case "start":
+				this.openStart();
 				break;
 			case "send":
 				void this.submitFollowUp();

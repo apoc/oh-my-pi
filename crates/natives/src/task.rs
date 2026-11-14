@@ -77,6 +77,32 @@ pub fn signal_aborted(signal: &Unknown) -> bool {
 		.unwrap_or(false)
 }
 
+/// A token cancelled when the JavaScript `signal` aborts (or already has);
+/// `None` without a usable signal.
+pub fn cancellation_token(signal: Option<Unknown>) -> Option<CancellationToken> {
+	signal.and_then(|value| {
+		let token = CancellationToken::new();
+		if signal_aborted(&value) {
+			token.cancel();
+			return Some(token);
+		}
+		let signal = AbortSignal::from_unknown(value).ok()?;
+		let abort = token.clone();
+		signal.on_abort(move || abort.cancel());
+		Some(token)
+	})
+}
+
+/// JS `Error` whose `code` is `code`.
+pub fn coded(env: Env, code: &str, message: String) -> Error {
+	Error::from(napi::JsError::from(Error::new(code, message)).into_unknown(env))
+}
+
+/// `InvalidArg` error carrying `err`'s message.
+pub fn invalid_arg(err: impl std::fmt::Display) -> Error {
+	Error::new(Status::InvalidArg, err.to_string())
+}
+
 impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {

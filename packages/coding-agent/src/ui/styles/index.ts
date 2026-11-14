@@ -42,6 +42,7 @@ import "./panels/extensions";
 import "./panels/hook-dialogs";
 import "./panels/login-dialog";
 import "./panels/mcp-add-wizard";
+import "./panels/mesh-manager";
 import "./panels/move-overlay";
 import "./panels/omfg";
 import "./panels/pause-screen";

@@ -42,6 +42,11 @@
 ### Removed
 
 - Removed the public getProviderInFlightRoot() API; provider in-flight limits no longer rely on a lease directory.
+- `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.
+### Added
+
+- Added `stripBidiControls`, which removes Unicode bidi embedding, override, isolate and mark controls from untrusted text
+- Added `isEnvFromProjectDotenv`, which tells whether an environment variable came from the working directory's dotenv files (autoloaded by Bun or loaded by omp) rather than the launch environment, and `isBunTestEntrypoint`, the `bun test` entrypoint check without the `PI_TEST_RUNTIME` marker
 
 ## [19.1.0] - 2026-11-21
 

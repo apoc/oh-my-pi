@@ -182,6 +182,7 @@ const DETACHED_DRAFT_COMMANDS = new Set([
 	"guided-goal",
 	"tan",
 	"btw",
+	"mesh",
 	"omfg",
 	"handoff",
 	"cleanse",
@@ -3121,7 +3122,12 @@ export class InputController {
 			// The interactive host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;
-				return { cwd: manager.getCwd(), sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile() };
+				return {
+					cwd: manager.getCwd(),
+					sessionId: manager.getSessionId(),
+					sessionFile: manager.getSessionFile(),
+					forkSourceArtifactsDir: manager.getForkSourceArtifactsDir() ?? undefined,
+				};
 			},
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),

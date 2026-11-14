@@ -3,6 +3,7 @@ import type { AutocompleteItem } from "../autocomplete/autocomplete";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import { reportTextView } from "../modes/controllers/command-views";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
+import { BUILTIN_MESH_SLASH_COMMANDS } from "./builtin-mesh";
 import { BUILTIN_COMMIT_SLASH_COMMANDS } from "./builtin-commit";
 import {
 	buildArgumentCompletions,
@@ -45,6 +46,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
+	...BUILTIN_MESH_SLASH_COMMANDS,
 	...BUILTIN_SESSION_SLASH_COMMANDS,
 	...BUILTIN_COMMIT_SLASH_COMMANDS,
 	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
@@ -78,6 +80,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		subcommandOptional: command.subcommandOptional,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+		createArgumentCompletions: command.createArgumentCompletions,
 	}),
 );
 
@@ -98,7 +101,8 @@ function materializeTuiBuiltinSlashCommand(
 			materialized.getInlineHint = buildEffortInlineHint(runtime);
 		} else {
 			const options = { optional: cmd.subcommandOptional };
-			materialized.getArgumentCompletions = buildArgumentCompletions(subcommands, options);
+			materialized.getArgumentCompletions =
+				cmd.createArgumentCompletions?.(subcommands, runtime) ?? buildArgumentCompletions(subcommands, options);
 			materialized.getInlineHint = buildSubcommandInlineHint(subcommands, options);
 		}
 	} else if (cmd.name === "move") {

@@ -13,6 +13,7 @@ import {
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import Collab from "@oh-my-pi/pi-coding-agent/commands/collab";
+import { InstanceHost } from "@oh-my-pi/pi-natives";
 import { type CliConfig, CliUsageError } from "@oh-my-pi/pi-utils/cli";
 
 interface HostFixture {
@@ -23,7 +24,7 @@ interface HostFixture {
 
 const ALPHA: HostFixture = {
 	snapshot: {
-		instanceId: "host-alpha",
+		instanceId: "a1pha0000000host",
 		generation: 2,
 		pid: process.pid,
 		sessionId: "sess-alpha",
@@ -43,7 +44,7 @@ const ALPHA: HostFixture = {
 
 const BRAVO: HostFixture = {
 	snapshot: {
-		instanceId: "host-bravo",
+		instanceId: "bravo0000000host",
 		generation: 7,
 		pid: process.pid,
 		sessionId: "sess-bravo",
@@ -62,6 +63,7 @@ const BRAVO: HostFixture = {
 };
 
 const publications: CollabHostPublication[] = [];
+const hosts: InstanceHost[] = [];
 const tmpDirs: string[] = [];
 const CONFIG: CliConfig = { bin: "omp", version: "0.0.0-test", commands: new Map() };
 
@@ -72,13 +74,15 @@ async function makeTmpDir(): Promise<string> {
 }
 
 async function publish(dir: string, fixture: HostFixture): Promise<void> {
+	const host = new InstanceHost({ dir, instanceId: fixture.snapshot.instanceId });
+	hosts.push(host);
 	const pub = await publishCollabHost(
 		{
 			snapshot: () => fixture.snapshot,
 			link: access =>
 				access === "view" ? fixture.viewUrl : fixture.snapshot.access === "control" ? fixture.controlUrl : null,
 		},
-		{ dir, instanceId: fixture.snapshot.instanceId },
+		{ host },
 	);
 	publications.push(pub);
 }
@@ -119,6 +123,7 @@ async function runCommand(argv: string[], dir: string, out: Collector): Promise<
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await Promise.all(publications.splice(0).map(pub => pub.close()));
+	await Promise.all(hosts.splice(0).map(host => host.close()));
 	for (const dir of tmpDirs.splice(0)) {
 		await fs.rm(dir, { recursive: true, force: true });
 	}
@@ -142,8 +147,8 @@ describe("Collab CLI", () => {
 
 		const text = out.plain();
 		expect(text).toContain("2 active Collab hosts");
-		expect(text).toContain("host-alpha  Alpha Session (sess-alpha)  /tmp/work/alpha");
-		expect(text).toContain("host-bravo  sess-bravo  /tmp/work/bravo");
+		expect(text).toContain("a1pha0000000host  Alpha Session (sess-alpha)  /tmp/work/alpha");
+		expect(text).toContain("bravo0000000host  sess-bravo  /tmp/work/bravo");
 		expect(text).toContain(`pid ${process.pid}`);
 		expect(text).toContain("gen 2 · test/alpha-model");
 		expect(text).toContain("gen 7 · no model");
@@ -159,7 +164,7 @@ describe("Collab CLI", () => {
 	it("renders no activity token for a host that does not report busy", async () => {
 		const dir = await makeTmpDir();
 		const legacy: HostFixture = {
-			snapshot: { ...BRAVO.snapshot, instanceId: "host-charlie", sessionId: "sess-charlie", busy: null },
+			snapshot: { ...BRAVO.snapshot, instanceId: "char1ie00000host", sessionId: "sess-charlie", busy: null },
 			controlUrl: "https://collab.test/#charlie-CONTROL-url",
 			viewUrl: "https://collab.test/#charlie-VIEW-url",
 		};
@@ -168,7 +173,7 @@ describe("Collab CLI", () => {
 		await runCommand(["list"], dir, out);
 
 		const text = out.plain();
-		expect(text).toContain("host-charlie");
+		expect(text).toContain("char1ie00000host");
 		// An older host reports nothing, and the row guesses nothing.
 		expect(text).not.toMatch(/working|idle/);
 	});

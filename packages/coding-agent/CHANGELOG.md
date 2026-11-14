@@ -128,6 +128,25 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- The omp daemon no longer loads the model catalog, the AI provider code or most of the TUI; in npm installs it uses about 24 MB less resident memory (about 150 MB less when omp runs from source) ([#20224](https://github.com/can1357/oh-my-pi/pull/20224) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- With Vim editing mode on, `y` no longer copies to the system clipboard; use `"+y` / `"*y`, or turn on `tui.vimYankToClipboard` to get the old behavior ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- With Vim editing mode on, the prompt after a message you send starts in **Vim Start Mode** (Insert by default) instead of staying in the mode you sent it from ([#20037](https://github.com/can1357/oh-my-pi/pull/20037) by [@lericson](https://github.com/lericson))
+- Eval-defined tools (`@tool` / `tool(fn)` and the `tools` field on `task`, `agent()`, `workpool()`) are now off by default; set `eval.tools.enabled` to turn them back on
+- When `/wt` moves the session into an ovnfs checkout, its message now says "Moved to ovnfs checkout <name> at <path>" instead of "Moved to worktree"
+
+### Changed
+
+- The bash tool's visualization keeps a one-line awk, jq, regex or other embedded program highlighted where it appears in the command; only multi-line programs move below it behind a `⟦awk ↓⟧`-style chip.
+- `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+- Added oh my pi mesh (`mesh.enabled`, off by default): omp instances on the same PC (`mesh.mode: local`) or the LAN (`remote`/`both`: mDNS plus static `mesh.peers`, sealed with a key derived from a shared key phrase) discover each other and exchange `status`, `ask`, `task`, `steer`, `note`, `watch` and `reply` messages with follow-up threads, each kind governed by a `mesh.inbound.*` policy (`allow`, `ask`, `deny`); `ask` responders may delegate read-only research to confined `scout` subagents ([docs](../../docs/mesh.md))
+- Added `/mesh`, a manager for peers, pending approvals, mode, key phrase, hide/block and composing messages (native picker sheet on Tern), a `mesh: N local · M remote` status line, `/mesh ask [agent [message]]` for a `/btw`-style conversation with a peer, and `/mesh steer [agent] [message]`; mesh traffic and the answers this instance sends show in the transcript as `MESH ← peer` / `MESH → peer` cards ([docs](../../docs/mesh.md#mesh-ask-and-mesh-steer))
+- Added the `mesh_peers` and `mesh_send` tools and the read-only `mesh://` scheme so the main agent can list peers (optionally ranked by relevance), message them and read peer snapshots and its own threads; `status`/`ask`/`task` answers not back within `mesh.autoBackground.thresholdMs` (default 10s) move to a background `mesh` job whose answer wakes the agent
+- The main agent is told which other agents are on the mesh (name, session, cwd, branch, summary) and which join or leave, without extra model calls (`mesh.announcePeers`), and its system prompt says when to consult a peer and to coordinate before editing files a peer on the same branch may be editing
+- Added `omp mesh list [--json]` to list mesh peers and `omp mesh set-key` to store the mesh key derived from a key phrase
+
+### Changed
+
+- Local Collab host discovery (`omp collab list`, `omp collab link`, `/collab list`) now runs on the shared same-machine instance registry `~/.omp/run/instances` instead of `~/.omp/run/collab-hosts`: a host's instance ID is its process's instance ID, the registry directory is restricted to the current user on Windows too (no longer inheriting the configuration root's ACL), and hosts published by older omp builds are not listed (nor do they list newer ones) ([docs](../../docs/collab.md))
 
 ### Fixed
 

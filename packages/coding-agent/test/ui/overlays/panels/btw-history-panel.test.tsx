@@ -1,9 +1,13 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { describe, expect, it, vi } from "bun:test";
+import { createRoot, resolveChildren, type UiNode } from "@oh-my-pi/pi-tui";
 import { decodeMouse } from "@oh-my-pi/pi-tui/driver/input/mouse";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import type { BtwHistoryRecord } from "../../../../src/session/btw-history-model";
-import { BtwHistoryPanel } from "../../../../src/ui/overlays/panels/btw-history-panel";
-import { BtwHistoryModel } from "../../../../src/ui/overlays/panels/btw-history-panel-model";
+import { BtwHistoryPanel, btwHistorySheet } from "../../../../src/ui/overlays/panels/btw-history-panel";
+import { type BtwHistoryOptions, BtwHistoryModel } from "../../../../src/ui/overlays/panels/btw-history-panel-model";
+import { printRows } from "../../../../src/ui/print-rows";
+import { keyEvent } from "../../../helpers/input-harness";
 import { type Driver, type Mounted, panelSuite } from "./harness";
 
 process.env.TZ = "UTC";
@@ -188,4 +192,142 @@ panelSuite({
 		if (!build) throw new Error(`unknown case ${caseName}`);
 		return build();
 	},
+});
+
+/** The native tree's nodes (key, kind, props), in tree order. */
+function nativeNodes(
+	model: BtwHistoryModel,
+): { key: string | undefined; kind: string; props: Record<string, unknown> }[] {
+	return createRoot(dispose => {
+		const out: { key: string | undefined; kind: string; props: Record<string, unknown> }[] = [];
+		const walk = (node: UiNode) => {
+			out.push({ key: node.key(), kind: node.kind, props: node.props() as Record<string, unknown> });
+			for (const child of node.children()) walk(child);
+		};
+		try {
+			for (const node of resolveChildren(() => <BtwHistoryPanel model={model} />)()) walk(node);
+			return out;
+		} finally {
+			dispose();
+		}
+	});
+}
+
+const screenText = (model: BtwHistoryModel) =>
+	Bun.stripANSI(printRows(() => <BtwHistoryPanel model={model} />, 80).join("\n"));
+const keys = (model: BtwHistoryModel) => nativeNodes(model).map(node => node.key);
+
+function sheetModel(extra: Partial<BtwHistoryOptions> = {}): BtwHistoryModel {
+	return new BtwHistoryModel({
+		records: [],
+		onClose: () => {},
+		onCopy: () => {},
+		onCancel: () => {},
+		terminalRows: () => 30,
+		now: () => now,
+		...extra,
+	});
+}
+
+describe("BtwHistoryModel with host texts and new topics", () => {
+	it("starts a new topic from an empty sheet with custom texts, natively and in text", async () => {
+		const accepted = Promise.withResolvers<boolean>();
+		const onStart = vi.fn((_question: string, _signal: AbortSignal) => accepted.promise);
+		const onPasteImage = vi.fn(async () => {});
+		const model = sheetModel({
+			texts: { heading: "Ask peer", role: "omp.overlay.ask", emptyTitle: "No questions yet", emptyHint: "Press n." },
+			onStart,
+			onPasteImage,
+		});
+		expect(btwHistorySheet(model)).toMatchObject({ role: "omp.overlay.ask", head: "Ask peer" });
+		const empty = nativeNodes(model);
+		expect(empty.map(node => node.key)).toContain("empty");
+		expect(empty.map(node => node.key)).toContain("start");
+		expect(empty.find(node => node.props.role === "omp.btw.empty.hint")?.props.spans).toEqual([{ t: "Press n." }]);
+		const screen = screenText(model);
+		expect(screen).toContain("Ask peer");
+		expect(screen).toContain("No questions yet.");
+		expect(screen).toContain("Press n.");
+		expect(screen).toContain("n new");
+
+		model.action("start");
+		expect(model.openStart()).toBe(false);
+		expect(keys(model)).toContain("composer");
+		const composing = screenText(model);
+		expect(composing).toContain("Ask: ");
+		expect(composing).not.toContain("Topic:");
+		expect(nativeNodes(model).find(node => node.kind === "input")?.props).toMatchObject({
+			prompt: "Ask: ",
+			placeholder: "Type a question…",
+		});
+		// A record update never drops the new-topic composer.
+		model.update([]);
+		expect(keys(model)).toContain("composer");
+		// A new topic takes text only: no image attaches and an empty paste reads no clipboard image.
+		expect(model.attachImage({ type: "image", data: "", mimeType: "image/png" })).toBeUndefined();
+		model.paste("");
+		expect(onPasteImage).not.toHaveBeenCalled();
+
+		model.paste("what changed?");
+		model.key(keyEvent("enter"));
+		expect(onStart.mock.calls[0]?.[0]).toBe("what changed?");
+		// The host adds and shows the new record before accepting.
+		model.update([rec("n", { question: "what changed?" })]);
+		model.showRecord("n");
+		accepted.resolve(true);
+		await tick();
+		const done = nativeNodes(model);
+		expect(done.map(node => node.key)).not.toContain("composer");
+		expect(done.some(node => node.kind === "md" && node.props.text === "what changed?")).toBe(true);
+		expect(model.selectedId).toBe("n");
+	});
+
+	it("keeps a refused new topic's draft with a retry notice", async () => {
+		const model = sheetModel({ onStart: async () => false });
+		model.key(keyEvent("n"));
+		model.key(keyEvent("enter"));
+		expect(model.composer?.notice).toBe("Enter a question.");
+		model.paste("why?");
+		await model.submitFollowUp();
+		expect(model.composer?.draft.text).toBe("why?");
+		expect(model.composer?.notice).toStartWith("Question was not started.");
+	});
+
+	it("offers New question beside the answer's actions while a topic is shown", () => {
+		const model = sheetModel({ records: [rec("a")], onStart: async () => true });
+		expect(keys(model)).toContain("start");
+		expect(model.attachImage({ type: "image", data: "", mimeType: "image/png" })).toBeUndefined();
+		model.key(keyEvent("n"));
+		// The new topic's composer takes the reader's place.
+		const nodes = keys(model);
+		expect(nodes).toContain("composer");
+		expect(nodes).not.toContain("thread");
+	});
+
+	it("keeps the /btw empty state and offers no new topic without onStart", () => {
+		const model = sheetModel();
+		expect(btwHistorySheet(model)).toMatchObject({ role: "omp.overlay.btwHistory", head: "BTW history" });
+		expect(model.openStart()).toBe(false);
+		expect(model.key(keyEvent("n"))).toBe(false);
+		const nodes = nativeNodes(model);
+		expect(nodes.map(node => node.key)).not.toContain("composer");
+		expect(nodes.map(node => node.key)).not.toContain("start");
+		expect(JSON.stringify(nodes.find(node => node.props.role === "omp.btw.empty.hint")?.props.spans)).toContain(
+			"/btw <question>",
+		);
+		const screen = screenText(model);
+		expect(screen).toContain("Use /btw QUESTION to start one.");
+		expect(screen).not.toContain("n new");
+	});
+
+	it("names a running turn with the host's labels", () => {
+		const model = sheetModel({
+			records: [rec("r", { status: "running", answer: "" })],
+			texts: { runningBadge: "Waiting", pendingText: "Waiting for the agent…", stop: "Stop waiting" },
+		});
+		const screen = screenText(model);
+		expect(screen).toContain("Waiting · ");
+		expect(screen).toContain("Waiting for the agent…");
+		expect(nativeNodes(model).find(node => node.key === "stop")?.props.title).toStartWith("Stop waiting");
+	});
 });

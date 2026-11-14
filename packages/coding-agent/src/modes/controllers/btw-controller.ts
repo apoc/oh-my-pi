@@ -17,7 +17,7 @@ import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-
 import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel, btwHistorySheet } from "../../ui/overlays/panels/btw-history-panel";
-import { BtwHistoryModel } from "../../ui/overlays/panels/btw-history-panel-model";
+import { type BtwHistoryOptions, BtwHistoryModel } from "../../ui/overlays/panels/btw-history-panel-model";
 import { BtwPanel, BtwPanelState } from "../../ui/overlays/panels/btw-panel";
 import { BtwNote } from "../../ui/overlays/panels/btw-note";
 import type { OverlayHandle, TranscriptBlock } from "../../ui/shell";
@@ -54,6 +54,80 @@ interface BtwRequest {
 	 * prompt instruction, the highlighted block, and the inject key always agree.
 	 */
 	injectEnabled: boolean;
+}
+
+/** Model options a side-conversation sheet supplies; the rest come from the interactive context. */
+export type BtwSheetOptions = Omit<
+	BtwHistoryOptions,
+	"spaceHoldKeys" | "spaceHold" | "injectKey" | "terminalRows" | "escapeHides"
+>;
+
+/**
+ * Open and focus a fullscreen BTW history sheet (`/btw` history, `/mesh ask`). `onClosed` runs once it
+ * closed (Esc, Close, or the shell closing every overlay), after its model was disposed.
+ */
+export function showBtwHistorySheet(
+	ctx: InteractiveModeContext,
+	options: BtwSheetOptions,
+	onClosed: (handle: OverlayHandle) => void,
+): { model: BtwHistoryModel; overlay: OverlayHandle } {
+	const [injectKey] = ctx.keybindings.keysFor("app.btw.inject");
+	const model = new BtwHistoryModel({
+		...options,
+		spaceHoldKeys: ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
+		spaceHold: target => ctx.dictationSpaceHold(target),
+		injectKey: injectKey === undefined ? undefined : canonicalKeyId(injectKey),
+		terminalRows: () => ctx.shell.size().rows,
+		// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
+		escapeHides: ctx.shell.native(),
+	});
+	// The sheet rebuilds its node on every change, so the overlay (stable) holds focus and feeds the model.
+	const handle = ctx.shell.overlays.show(
+		() =>
+			jsx("overlay", {
+				...(ctx.shell.native() ? btwHistorySheet(model) : { size: "full", role: "omp.app.screen" }),
+				onKey: (key: KeyEvent) => model.key(key),
+				onPaste: (paste: PasteEvent) => {
+					if (!model.composer) return false;
+					model.paste(paste.text);
+					return true;
+				},
+				children: BtwHistoryPanel({ model }),
+			}),
+		{
+			onClose: () => {
+				model.dispose();
+				if (ctx.promptPasteTarget?.node === handle.node) ctx.promptPasteTarget = undefined;
+				onClosed(handle);
+			},
+		},
+	);
+	// Image pastes (Ctrl+V, dropped paths) attach to the follow-up being written.
+	ctx.promptPasteTarget = {
+		node: handle.node,
+		attachImage: image => {
+			const marker = model.attachImage(image);
+			if (marker) model.paste(marker);
+		},
+		setText: text => model.setDraft({ text, cursor: text.length }),
+	};
+	return { model, overlay: handle };
+}
+
+/** Copy a side-conversation answer and confirm it; false when the clipboard write failed (the error is shown). */
+export async function copyBtwAnswer(
+	ctx: Pick<InteractiveModeContext, "showStatus" | "showError">,
+	answer: string,
+	what: string,
+): Promise<boolean> {
+	try {
+		await copyToClipboard(replaceTabs(answer).trim());
+		ctx.showStatus(`Copied ${what} to clipboard`);
+		return true;
+	} catch (error) {
+		ctx.showError(sanitizeErrorLine(error));
+		return false;
+	}
 }
 
 function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
@@ -243,14 +317,10 @@ export class BtwController {
 		// start another /btw before they do. Confirm only the still-active surface.
 		const inlineRequest = options?.historyRecordId === undefined ? this.#activeRequest : undefined;
 		try {
-			await copyToClipboard(replaceTabs(answer).trim());
-			this.ctx.showStatus("Copied /btw answer to clipboard");
+			if (!(await copyBtwAnswer(this.ctx, answer, "/btw answer"))) return true;
 			if (options?.historyRecordId !== undefined) this.#historyPanel?.markCopied(options.historyRecordId, answer);
 			else if (inlineRequest && this.#visible && this.#activeRequest === inlineRequest)
 				inlineRequest.panel.markCopied();
-			return true;
-		} catch (error) {
-			this.ctx.showError(sanitizeErrorLine(error));
 			return true;
 		} finally {
 			this.#copyInFlight = false;
@@ -758,76 +828,49 @@ export class BtwController {
 		}
 		this.#hideInline();
 		const historySessionId = this.#sessionManager.getSessionId();
-		const [injectKey] = this.ctx.keybindings.keysFor("app.btw.inject");
-		const panel = new BtwHistoryModel({
-			records: this.#historyRecords(store),
-			onClose: () => this.#closeHistory(),
-			onCopy: record => {
-				const answer = getBtwCopyText(record);
-				if (answer !== undefined) void this.#copyAnswer(answer, { historyRecordId: record.id });
-			},
-			onCancel: record => {
-				if (this.#activeRequest?.record.id === record.id) this.handleCancel();
-			},
-			canBranch: record => record.id === this.#activeRequest?.record.id && this.canBranch(),
-			onBranch: record => {
-				if (record.id !== this.#activeRequest?.record.id) return;
-				void this.handleBranch();
-			},
-			canFollowUp: record =>
-				!this.#starting &&
-				!this.#branchInFlight &&
-				this.#transitionCount === 0 &&
-				getBtwLatestTurn(record).status !== "running" &&
-				(!this.#activeRequest || getBtwLatestTurn(this.#activeRequest.record).status !== "running"),
-			onFollowUp: (record, question, signal, images) => {
-				if (historySessionId !== this.#sessionManager.getSessionId()) {
-					return Promise.resolve(false);
-				}
-				return this.startFollowUp(record.id, question, signal, images);
-			},
-			onPasteImage: () => this.ctx.handleImagePaste(),
-			onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
-			spaceHoldKeys: this.ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
-			spaceHold: target => this.ctx.dictationSpaceHold(target),
-			inject: this.#injectEnabled()
-				? {
-						state: (record, turnIndex) => this.#injectState(record, turnIndex),
-						canSend: record => this.#canSend(record),
-						send: record => this.#inject(record),
+		const { model: panel, overlay } = showBtwHistorySheet(
+			this.ctx,
+			{
+				records: this.#historyRecords(store),
+				onClose: () => this.#closeHistory(),
+				onCopy: record => {
+					const answer = getBtwCopyText(record);
+					if (answer !== undefined) void this.#copyAnswer(answer, { historyRecordId: record.id });
+				},
+				onCancel: record => {
+					if (this.#activeRequest?.record.id === record.id) this.handleCancel();
+				},
+				canBranch: record => record.id === this.#activeRequest?.record.id && this.canBranch(),
+				onBranch: record => {
+					if (record.id !== this.#activeRequest?.record.id) return;
+					void this.handleBranch();
+				},
+				canFollowUp: record =>
+					!this.#starting &&
+					!this.#branchInFlight &&
+					this.#transitionCount === 0 &&
+					getBtwLatestTurn(record).status !== "running" &&
+					(!this.#activeRequest || getBtwLatestTurn(this.#activeRequest.record).status !== "running"),
+				onFollowUp: (record, question, signal, images) => {
+					if (historySessionId !== this.#sessionManager.getSessionId()) {
+						return Promise.resolve(false);
 					}
-				: undefined,
-			injectKey: injectKey === undefined ? undefined : canonicalKeyId(injectKey),
-			terminalRows: () => this.ctx.shell.size().rows,
-			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
-			escapeHides: this.ctx.shell.native(),
-		});
-		this.#historyPanel = panel;
-		// The sheet rebuilds its node on every change, so the overlay (stable) holds focus and feeds the model.
-		const handle = this.ctx.shell.overlays.show(
-			() =>
-				jsx("overlay", {
-					...(this.ctx.shell.native() ? btwHistorySheet(panel) : { size: "full", role: "omp.app.screen" }),
-					onKey: (key: KeyEvent) => panel.key(key),
-					onPaste: (paste: PasteEvent) => {
-						if (!panel.composer) return false;
-						panel.paste(paste.text);
-						return true;
-					},
-					children: BtwHistoryPanel({ model: panel }),
-				}),
-			{ onClose: () => this.#historyClosed(handle) },
-		);
-		this.#historyOverlay = handle;
-		// Image pastes (Ctrl+V, dropped paths) attach to the follow-up being written.
-		this.ctx.promptPasteTarget = {
-			node: handle.node,
-			attachImage: image => {
-				const marker = panel.attachImage(image);
-				if (marker) panel.paste(marker);
+					return this.startFollowUp(record.id, question, signal, images);
+				},
+				onPasteImage: () => this.ctx.handleImagePaste(),
+				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+				inject: this.#injectEnabled()
+					? {
+							state: (record, turnIndex) => this.#injectState(record, turnIndex),
+							canSend: record => this.#canSend(record),
+							send: record => this.#inject(record),
+						}
+					: undefined,
 			},
-			setText: text => panel.setDraft({ text, cursor: text.length }),
-		};
+			handle => this.#historyClosed(handle),
+		);
+		this.#historyPanel = panel;
+		this.#historyOverlay = overlay;
 		return panel;
 	}
 
@@ -850,9 +893,7 @@ export class BtwController {
 	#historyClosed(handle: OverlayHandle): void {
 		if (this.#historyOverlay !== handle) return;
 		this.#historyOverlay = undefined;
-		this.#historyPanel?.dispose();
 		this.#historyPanel = undefined;
-		if (this.ctx.promptPasteTarget?.node === handle.node) this.ctx.promptPasteTarget = undefined;
 		// Closing while a BTW still answers keeps it running: text mode returns
 		// to its inline panel; Tern answers in its note, or says how to get back.
 		const request = this.#activeRequest;

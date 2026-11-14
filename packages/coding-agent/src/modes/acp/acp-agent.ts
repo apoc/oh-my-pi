@@ -104,6 +104,7 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import { AcpMeshBinding } from "./mesh-binding";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
@@ -1009,6 +1010,8 @@ export class AcpAgent implements Agent {
 	#handleWrites: Promise<void> = Promise.resolve();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
+	/** Mesh participation, served from the newest open session. */
+	readonly #mesh = new AcpMeshBinding();
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
@@ -1960,6 +1963,7 @@ export class AcpAgent implements Agent {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(record.protocolSessionId, record);
+			await this.#mesh.sync(() => Array.from(this.#sessions.values(), open => open.session));
 			return record;
 		} catch (error) {
 			await this.#disposeSessionRecord(record);
@@ -3500,6 +3504,8 @@ export class AcpAgent implements Agent {
 	async #closeManagedSession(sessionId: string, record: ManagedSessionRecord): Promise<void> {
 		record.closedError ??= RequestError.resourceNotFound(sessionId);
 		this.#sessions.delete(sessionId);
+		// Move the mesh off the closing session before it is disposed.
+		await this.#mesh.sync(() => Array.from(this.#sessions.values(), open => open.session));
 		await this.#cancelPromptForClose(record);
 		await this.#disposeSessionRecord(record);
 	}
@@ -3552,6 +3558,7 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
+			await this.#mesh.dispose();
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(

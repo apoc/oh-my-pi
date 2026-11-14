@@ -421,6 +421,22 @@ async function locateLocalTarget(
 }
 
 /**
+ * Options to read `url` through: a confined fork's own root, else — for a path the fork has not
+ * written — its source's root, read in place so inherited `local://<N>.log` spills keep resolving.
+ */
+async function readOptionsFor(
+	url: InternalUrl,
+	opts: LocalProtocolOptions,
+	context: ResolveContext | undefined,
+): Promise<LocalProtocolOptions> {
+	const sourceDir = context?.session?.forkSourceArtifactsDir;
+	if (!sourceDir || !extractRelativePath(url)) return opts;
+	if ((await locateLocalTarget(url, opts, false)) !== null) return opts;
+	const sourceOpts: LocalProtocolOptions = { getArtifactsDir: () => sourceDir };
+	return (await locateLocalTarget(url, sourceOpts, false)) !== null ? sourceOpts : opts;
+}
+
+/**
  * Protocol handler for local:// URLs.
  *
  * URL forms:
@@ -501,7 +517,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 			throw new Error("No session - local:// unavailable");
 		}
 
-		const resolved = await resolveLocalTarget(url, opts);
+		const resolved = await resolveLocalTarget(url, await readOptionsFor(url, opts, context));
 		if (resolved.kind === "listing") {
 			return buildListing(url, resolved.root);
 		}
@@ -517,7 +533,8 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		if (!opts) {
 			throw new Error("No session - local:// unavailable");
 		}
-		return locateLocalTarget(url, opts, options?.create === true);
+		const create = options?.create === true;
+		return locateLocalTarget(url, create ? opts : await readOptionsFor(url, opts, context), create);
 	}
 
 	locateSync(url: InternalUrl, context?: ResolveContext): string | undefined {

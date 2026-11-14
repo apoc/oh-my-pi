@@ -228,3 +228,90 @@ pickerSuite({
 		};
 	},
 });
+
+/** Mount a panel on one running job, selected, and hand its root to `use`. */
+function withJobsPanel<T>(
+	job: JobsPanelSnapshot["running"][number],
+	detail: JobsPanelDetail | undefined,
+	use: (root: UiNode) => T,
+): T {
+	return createRoot(dispose => {
+		try {
+			const source: JobsPanelSource = {
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => detail,
+				cancel() {},
+				close() {},
+			};
+			const [root] = resolveChildren(<JobsPanel source={source} selected={job.id} now={() => NOW} />)();
+			if (!root) throw new Error("missing jobs panel");
+			return use(root);
+		} finally {
+			dispose();
+		}
+	});
+}
+
+function describeJobsPanel(job: JobsPanelSnapshot["running"][number], detail?: JobsPanelDetail): string {
+	return withJobsPanel(job, detail, root => JSON.stringify(describeTree(root, staticEnvironment(currentTheme()))));
+}
+
+/** The panel's plain terminal rows at 80 columns. */
+function paintJobsPanel(job: JobsPanelSnapshot["running"][number], detail?: JobsPanelDetail): string[] {
+	return withJobsPanel(job, detail, root =>
+		paintNode(staticEnvironment(currentTheme()), root, 80).rows.map(row => Bun.stripANSI(row)),
+	);
+}
+
+test("shows a mesh job's label as prose, not as a command line", () => {
+	const label = "Ask Carol what ARBTR is";
+	const tree = describeJobsPanel({ id: "mesh-1", type: "mesh", status: "running", label, startTime: NOW - 2_000 });
+	// The list row is plain text (a command is mono), the detail leads with the label as its title.
+	expect(tree).toContain(JSON.stringify({ t: label }));
+	expect(tree).not.toContain(JSON.stringify({ s: "mono", t: label }));
+	expect(tree).toContain('"role":"omp.jobs.title"');
+	expect(tree).not.toContain('"role":"omp.jobs.command"');
+});
+
+test("still shows a bash job's label as a mono command", () => {
+	const command = "cargo test --workspace";
+	const tree = describeJobsPanel({
+		id: "bash-1",
+		type: "bash",
+		status: "running",
+		label: command,
+		startTime: NOW - 2_000,
+	});
+	expect(tree).toContain(JSON.stringify({ s: "mono", t: command }));
+	expect(tree).toContain('"role":"omp.jobs.command"');
+	expect(tree).not.toContain('"role":"omp.jobs.title"');
+});
+
+test("paints a mesh job's caption in the terminal, and no command row", () => {
+	const label = "Ask Carol what ARBTR is";
+	const caption = "Waits for Carol's answer; ends when it arrives.";
+	const rows = paintJobsPanel({
+		id: "mesh-1",
+		type: "mesh",
+		status: "running",
+		label,
+		caption,
+		startTime: NOW - 2_000,
+	});
+	expect(rows.filter(row => row.includes(caption))).toHaveLength(1);
+	// The label shows once, in the list row; a command row would repeat it under the list.
+	expect(rows.filter(row => row.includes(label))).toHaveLength(1);
+});
+
+test("paints a bash job's command in the terminal", () => {
+	const command = "cargo test --workspace";
+	const rows = paintJobsPanel({
+		id: "bash-1",
+		type: "bash",
+		status: "running",
+		label: command,
+		startTime: NOW - 2_000,
+	});
+	// The list row and the command row under it.
+	expect(rows.filter(row => row.includes(command))).toHaveLength(2);
+});

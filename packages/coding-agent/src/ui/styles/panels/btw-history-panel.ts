@@ -1,5 +1,5 @@
 /**
- * `/btw` history in the terminal: a box titled `BTW history`, the pane labels
+ * `/btw` history in the terminal: a box titled `BTW history` (a host's own heading and labels with its texts), the pane labels
  * (`❯ History (N)`, `Details`), then the history list beside the reader from
  * 96 columns (one pane below, the focused one), the follow-up composer, a
  * navigation hint, the key hints and the bottom edge. The reader is a
@@ -16,7 +16,6 @@ import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-te
 import { sanitizeErrorLine } from "../../../modes/view-model/chrome/error-block";
 import { getBtwCopyText, getBtwLatestTurn } from "../../../session/btw-history-model";
 import {
-	BTW_STATUS,
 	type BtwHistoryModel,
 	type BtwPane,
 	DATE_FORMAT,
@@ -36,7 +35,7 @@ function keyHint(theme: Theme, keys: string, label: string): string {
 }
 
 function focusLabel(theme: Theme, model: BtwHistoryModel, pane: BtwPane): string {
-	const label = pane === "list" ? `History (${model.records.length})` : "Details";
+	const label = pane === "list" ? `${model.texts.listLabel} (${model.records.length})` : "Details";
 	return model.focus === pane
 		? theme.style("strong", theme.fg("accent", `${theme.symbols.symbol("nav.cursor")} ${label}`))
 		: theme.fg("muted", `  ${label}`);
@@ -76,10 +75,11 @@ function listRows(theme: Theme, model: BtwHistoryModel, width: number, height: n
 	model.listHeight = Math.max(1, Math.floor(height / span));
 	const records = model.records;
 	if (records.length === 0) {
-		return wrap(theme.fg("muted", "No side questions yet.\n\nUse /btw QUESTION to start one."), width).slice(
-			0,
-			height,
-		);
+		const { emptyTitle, emptyHint } = model.texts;
+		return wrap(
+			theme.fg("muted", `${sanitizeDisplayLine(emptyTitle)}.\n\n${sanitizeDisplayLine(emptyHint)}`),
+			width,
+		).slice(0, height);
 	}
 	const selected = model.selectedIndex();
 	model.listScroll = revealRow(model.listScroll, selected, records.length, model.listHeight);
@@ -91,7 +91,7 @@ function listRows(theme: Theme, model: BtwHistoryModel, width: number, height: n
 	for (let index = model.listScroll; index < end; index++) {
 		const record = records[index]!;
 		const picked = index === selected;
-		const status = BTW_STATUS[getBtwLatestTurn(record).status];
+		const status = model.statuses[getBtwLatestTurn(record).status];
 		const cursor = picked
 			? theme.fg(model.focus === "list" ? "accent" : "muted", theme.symbols.symbol("nav.cursor"))
 			: " ";
@@ -114,14 +114,17 @@ function listRows(theme: Theme, model: BtwHistoryModel, width: number, height: n
 function readerLines(cx: PaintContext, model: BtwHistoryModel, sheet: UiNode, inner: number): string[] {
 	const theme = cx.theme;
 	const record = model.selected();
-	if (!record) return wrap(theme.fg("muted", "No side questions yet. Use /btw QUESTION to start one."), inner);
+	if (!record) {
+		const { emptyTitle, emptyHint } = model.texts;
+		return wrap(theme.fg("muted", sanitizeDisplayLine(`${emptyTitle}. ${emptyHint}`)), inner);
+	}
 	const lines: string[] = [];
 	if (model.isCopied(record)) lines.push(...wrap(theme.fg("success", "✓ Copied to clipboard"), inner), "");
 	const thread = findNode(sheet, node => roleOf(node) === "omp.btw.thread");
 	const turnNodes = thread?.children().filter(node => roleOf(node) === "omp.btw.turn") ?? [];
 	displayTurns(record).forEach((turn, index) => {
 		if (index > 0) lines.push("", theme.fg("dim", theme.symbols.box.horizontal.repeat(inner)), "");
-		const status = BTW_STATUS[turn.status];
+		const status = model.statuses[turn.status];
 		const node = turnNodes[index];
 		const question = node?.children()[0];
 		const answerNode = node
@@ -140,7 +143,7 @@ function readerLines(cx: PaintContext, model: BtwHistoryModel, sheet: UiNode, in
 		if ((block || turn.answer.trim()) && answerNode) lines.push(...cx.paint(answerNode, inner).rows);
 		else
 			lines.push(
-				...wrap(theme.fg("dim", turn.status === "running" ? "Waiting for response…" : "No answer text."), inner),
+				...wrap(theme.fg("dim", turn.status === "running" ? model.texts.pendingText : "No answer text."), inner),
 			);
 		if (turn.error) lines.push("", ...wrap(theme.fg("error", sanitizeErrorLine(turn.error)), inner));
 		if (turn.status === "interrupted") lines.push("", ...wrap(theme.fg("muted", "Not resumed in this view."), inner));
@@ -163,8 +166,14 @@ function readerWindow(theme: Theme, model: BtwHistoryModel, lines: readonly stri
  * The follow-up line: the accent prompt, the draft (scrolled to keep the caret in view) and an inverse caret;
  * `caretGlyph` (push-to-talk's mic) takes the caret's cell at the end of the draft.
  */
-function composerLine(theme: Theme, text: string, cursor: number, width: number, caretGlyph?: string): string {
-	const prompt = "Follow up: ";
+function composerLine(
+	theme: Theme,
+	prompt: string,
+	text: string,
+	cursor: number,
+	width: number,
+	caretGlyph?: string,
+): string {
 	const room = Math.max(1, width - visibleWidth(prompt));
 	const before = text.slice(0, cursor);
 	const glyph = cursor >= text.length ? caretGlyph : undefined;
@@ -199,6 +208,7 @@ function hints(theme: Theme, model: BtwHistoryModel, inner: number): string {
 	if (model.canFollowUp(record))
 		parts.push(keyHint(theme, `f/${bindingGlyph("tui.select.confirm", "enter")}`, "follow up"));
 	if (model.canInject(record)) parts.push(keyHint(theme, keyGlyph(model.injectKey), "inject"));
+	if (model.options.onStart) parts.push(keyHint(theme, "n", "new"));
 	if (record && getBtwCopyText(record) !== undefined) {
 		parts.push(
 			model.isCopied(record)
@@ -229,13 +239,15 @@ defineRolePainter("col", "omp.btw.sheet", (node, cx): Block => {
 	const composerLines: string[] = [];
 	if (composer) {
 		const available = Math.max(1, height - chrome - 1);
-		if (available >= 2)
+		// A new topic has no topic to name yet.
+		if (available >= 2 && composer.recordId !== undefined)
 			composerLines.push(
 				theme.fg("dim", truncate(`Topic: ${sanitizeDisplayLine(record ? topicLabel(record) : "")}`, inner)),
 			);
 		if (composer.notice && available >= 3)
 			composerLines.push(theme.fg(model.followUpPending ? "dim" : "warning", truncate(composer.notice, inner)));
-		composerLines.push(composerLine(theme, composer.draft.text, composer.draft.cursor, inner, caretGlyph));
+		const prompt = composer.recordId === undefined ? "Ask: " : "Follow up: ";
+		composerLines.push(composerLine(theme, prompt, composer.draft.text, composer.draft.cursor, inner, caretGlyph));
 	}
 	let bodyHeight = Math.max(composer ? 0 : 1, height - chrome - composerLines.length);
 	const showDetail = wide || model.focus === "answer";
@@ -265,7 +277,7 @@ defineRolePainter("col", "omp.btw.sheet", (node, cx): Block => {
 	const bodyTop = framed ? 2 : height >= 3 ? 1 : 0;
 	const hits: Hit[] = [];
 	if (framed) {
-		const title = ` BTW history `;
+		const title = ` ${sanitizeDisplayLine(model.texts.heading)} `;
 		const fill = Math.max(0, width - 3 - visibleWidth(title));
 		lines.push(
 			`${border(`${box.topLeft}${box.horizontal}`)}${theme.style("strong", theme.fg("accent", title))}${border(`${box.horizontal.repeat(fill)}${box.topRight}`)}`,
