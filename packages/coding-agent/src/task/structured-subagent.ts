@@ -46,7 +46,7 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { renderStepPrompts } from "./steps";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult, usesYield } from "./executor";
-import type { SubagentFork } from "../mesh/fork-isolation";
+import type { SubagentFork } from "./fork-isolation";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,

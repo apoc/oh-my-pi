@@ -11,7 +11,7 @@ import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { writeFileAtomically } from "../utils/atomic-file";
-import { MESH_THREADS_DIRNAME } from "./paths";
+import { MESH_THREADS_DIRNAME } from "../internal-urls/registry-helpers";
 import type { MeshErrorCode, MeshSender, MeshThreadKind } from "./wire";
 
 type MeshTurnStatus = "queued" | "running" | "complete" | "error" | "interrupted";

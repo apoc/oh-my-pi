@@ -7,12 +7,18 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { MESH_THREADS_DIRNAME } from "../mesh/paths";
 import { AgentRegistry } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
 const MAX_SCAN_DEPTH = 8;
+/**
+ * Subdirectory of the session artifacts dir holding thread records and, under `responders/`, the
+ * responders' transcripts. Session delete/move/gc carry it with the artifacts dir; confined-fork
+ * scans skip it (`PRIVATE_ARTIFACT_SUBDIRS`), so one peer's fork never reads another's thread.
+ */
+export const MESH_THREADS_DIRNAME = "mesh-threads";
+
 /**
  * Artifact subdirectories holding other parties' data (mesh peers' threads and their responders'
  * transcripts). A confined fork reads its source's tree (`onlyPreferred` scans) but never these.

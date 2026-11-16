@@ -14,10 +14,9 @@ export interface SubagentFork {
 
 /**
  * Session capabilities of a confined fork: restricted tools, no extensions/MCP/IRC/LSP, no inherited
- * project context. `spawns` is the forked agent's own allow-list (a mesh `ask` responder may
- * delegate to `scout`).
+ * project context.
  */
-export function forkIsolationOptions(cwd: string, spawns: string) {
+export function forkIsolationOptions(cwd: string) {
 	return {
 		disableExtensionDiscovery: true,
 		restrictToolNames: true,
@@ -26,7 +25,6 @@ export function forkIsolationOptions(cwd: string, spawns: string) {
 		mcpTools: [],
 		enableIrc: false,
 		enableLsp: false,
-		spawns,
 		additionalDirectories: [],
 		inheritedSessionAgents: undefined,
 		contextFiles: [],

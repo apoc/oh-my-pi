@@ -21,7 +21,7 @@ import { getBundledAgent, parseAgent } from "../task/agents";
 import { runSubagentFollowUpTurn } from "../task/executor";
 import { runStructuredSubagent } from "../task/structured-subagent";
 import type { AgentDefinition } from "../task/types";
-import type { HostRestrictions } from "./host-restrictions";
+import type { HostRestrictions } from "../task/host-restrictions";
 import { type MeshAnswerer, MeshPeerError, type MeshResponderResult } from "./inbound";
 import { isMeshThreadResponder, meshResponderArtifactsDir } from "./paths";
 import { decideAskRoute, type MeshThreadRecord, meshConversationKey, meshThreadHistory } from "./threads";

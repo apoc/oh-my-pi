@@ -129,7 +129,7 @@ import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
-import { type HostRestrictions, mergeHostRestrictions } from "../mesh/host-restrictions";
+import { type HostRestrictions, mergeHostRestrictions } from "./host-restrictions";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -144,7 +144,7 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "./types";
-import { forkIsolationOptions, type SubagentFork } from "../mesh/fork-isolation";
+import { forkIsolationOptions, type SubagentFork } from "./fork-isolation";
 import {
 	type AgentProgress,
 	type AgentStreaming,
@@ -5429,8 +5429,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 					// Fork isolation overrides every inherited field above in one place; a fork keeps only
-					// its own agent's spawn allow-list.
-					...(fork ? forkIsolationOptions(effectiveCwd, spawnsEnv) : {}),
+					// its own agent's spawn allow-list (`spawns` above).
+					...(fork ? forkIsolationOptions(effectiveCwd) : {}),
 				},
 				fork: fork !== undefined,
 				prompt: {

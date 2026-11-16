@@ -1,15 +1,8 @@
 /**
- * On-disk layout of mesh data inside a session's artifacts dir. Dependency-free so internal-URL
- * scanning can honour it without loading the mesh modules.
+ * On-disk layout of mesh data inside a session's artifacts dir.
  */
 import * as path from "node:path";
-
-/**
- * Subdirectory of the session artifacts dir holding thread records and, under `responders/`, the
- * responders' transcripts. Session delete/move/gc carry it with the artifacts dir; confined-fork
- * scans skip it (`PRIVATE_ARTIFACT_SUBDIRS`), so one peer's fork never reads another's thread.
- */
-export const MESH_THREADS_DIRNAME = "mesh-threads";
+import { MESH_THREADS_DIRNAME } from "../internal-urls/registry-helpers";
 
 /** Persistent artifacts root of one thread's responders (transcripts, outputs). */
 export function meshResponderArtifactsDir(artifactsDir: string, threadId: string): string {
