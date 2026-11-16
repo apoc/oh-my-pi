@@ -477,7 +477,6 @@ export class SessionPublisher {
 		return {
 			providerSessionId: session.sessionId,
 			sessionName: manager.getSessionName(),
-			forkSourceArtifactsDir: manager.getForkSourceArtifactsDir(),
 			leafId: manager.getLeafId(),
 			agentEffort: session.agent.state.thinkingLevel,
 			tools,

@@ -140,7 +140,7 @@ describe("local:// root of a confined fork's source", () => {
 				getSessionSpawns: () => "*",
 				getArtifactsDir: () => fork.getArtifactsDir(),
 				settings: Settings.isolated(),
-				forkSourceArtifactsDir: fork.getForkSourceArtifactsDir() ?? undefined,
+				forkSource: fork.getForkSource() ?? undefined,
 				forkSourceSessionId: fork.getForkSourceSessionId() ?? undefined,
 			};
 			const context = {

@@ -186,7 +186,7 @@ function fileSafeTimestamp(iso: string): string {
 	return iso.replace(/[:.]/g, "-");
 }
 
-function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
+export function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	if (!sessionFile?.endsWith(".jsonl")) return null;
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }

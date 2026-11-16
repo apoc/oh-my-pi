@@ -59,7 +59,7 @@ async function setup(dir: string): Promise<Fixture> {
 	return {
 		sourceArtifacts,
 		fork: {
-			session: toolSession(cwd, { forkSourceArtifactsDir: sourceArtifacts }),
+			session: toolSession(cwd, { forkSource: `${sourceArtifacts}.jsonl` }),
 			sessionFile: path.join(dir, "forks", "Fork.jsonl"),
 		},
 		ordinary: { session: toolSession(cwd), sessionFile: path.join(dir, "main.jsonl") },
@@ -132,12 +132,12 @@ describe("agent:// in a confined fork", () => {
 		const router = InternalUrlRouter.instance();
 
 		const peers = await router.resolve("agent://peers", ordinary);
-		expect(peers.content).toContain("No other omp instances in this project.");
+		expect(peers.content).toContain("No other omp instances in this project");
 		expect(await rejection(router.resolve("agent://peers", fork))).toStartWith("Not found: peers");
 
 		const otherPid = process.pid + 100_000;
 		expect(await rejection(router.resolve(`agent://${otherPid}/Worker`, ordinary))).toStartWith(
-			`No omp instance with pid ${otherPid}`,
+			`No live omp instance with pid ${otherPid}`,
 		);
 		expect(await rejection(router.resolve(`agent://${otherPid}/Worker`, fork))).toStartWith(`Not found: ${otherPid}`);
 		// This process's own pid reads as a local address only outside a fork.
@@ -157,13 +157,20 @@ describe("agent:// in a confined fork", () => {
 		expect((await router.resolve("agent://0-Scout", fork)).content).toBe("scout report\n");
 	});
 
-	it("completes only the source's ids for the editor's fork marker", async () => {
+	it("stays confined when its fork source yields no artifacts dir", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-fork-");
-		const { sourceArtifacts } = await setup(tempDir.path());
-		const handler = InternalUrlRouter.instance().getHandler("agent");
+		const { ordinary } = await setup(tempDir.path());
+		const fork = {
+			session: toolSession(path.join(tempDir.path(), "project"), {
+				forkSource: path.join(tempDir.path(), "not-a-session.txt"),
+			}),
+		};
+		const router = InternalUrlRouter.instance();
 
-		const ids = (await handler?.complete?.("", { forkSourceArtifactsDir: sourceArtifacts }))?.map(item => item.value);
-		expect(ids).toEqual(["Worker"]);
+		expect((await router.resolve("agent://ExternalOnly", ordinary)).content).toBe("external output\n");
+		// Only the fork's own (absent) artifacts dir is scanned: no registered dir, no registry agent.
+		expect(await rejection(router.resolve("agent://ExternalOnly", fork))).toBe("No artifacts directory found");
+		expect(await rejection(router.resolve("agent://MeshAsk", fork))).toBe("No artifacts directory found");
 	});
 });
 
@@ -201,7 +208,7 @@ describe("proc:// in a confined fork", () => {
 		});
 		const fork = {
 			session: toolSession(cwd, {
-				forkSourceArtifactsDir: path.join(tempDir.path(), "source"),
+				forkSource: path.join(tempDir.path(), "source.jsonl"),
 				agentRegistry: registry,
 				getAgentId: () => "MeshAskFork",
 			}),

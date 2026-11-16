@@ -47,6 +47,7 @@ import {
 } from "../session/messages";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import type { SessionEntry } from "../session/session-entries";
+import { artifactsDirectoryFor } from "../session/session-manager";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
 import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
 import type {
@@ -438,8 +439,15 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
 		// A confined fork sees only its source's transcript tree, read in place.
-		const forkDir = context?.session?.forkSourceArtifactsDir ?? context?.forkSourceArtifactsDir;
-		if (forkDir) return { visible: [], preferredArtifactDir: forkDir, onlyPreferred: true };
+		const forkSource = context?.session?.forkSource;
+		if (forkSource !== undefined) {
+			// No derivable dir: onlyPreferred with no preferred dir scans nothing.
+			return {
+				visible: [],
+				preferredArtifactDir: artifactsDirectoryFor(forkSource) ?? undefined,
+				onlyPreferred: true,
+			};
+		}
 		const registry = AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
@@ -651,8 +659,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
-		const forkDir = context?.session?.forkSourceArtifactsDir ?? context?.forkSourceArtifactsDir;
-		if (forkDir) {
+		const forkSource = context?.session?.forkSource;
+		if (forkSource !== undefined) {
+			const forkDir = artifactsDirectoryFor(forkSource);
+			if (!forkDir) return [];
 			return (await diskIdsForCompletion(forkDir, true)).map(id => ({ value: id, description: "on disk" }));
 		}
 		const completions: UrlCompletion[] = [];

@@ -80,7 +80,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 	if (!registry) return [];
 	const selfId = session.getAgentId?.() ?? undefined;
 	// A confined fork (mesh `ask` responder) sees only its own scouts, never other sessions' agents.
-	const confined = session.forkSourceArtifactsDir !== undefined;
+	const confined = session.forkSource !== undefined;
 	// Cover = the caller's RUNNING jobs only. A settled job still sitting in
 	// delivery retention must not hide its agent if that agent was re-woken
 	// (e.g. via a peer message) and is running again without a job.

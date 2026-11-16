@@ -3126,7 +3126,6 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
-					forkSourceArtifactsDir: manager.getForkSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,

@@ -147,7 +147,6 @@ export interface SessionViewState {
 	/** Provider-facing session id (`AgentSession.sessionId`). */
 	providerSessionId: string;
 	sessionName: string | undefined;
-	forkSourceArtifactsDir: string | null;
 	leafId: string | null;
 	/** Effort applied to the agent loop (`agent.state.thinkingLevel`). */
 	agentEffort: Effort | undefined;

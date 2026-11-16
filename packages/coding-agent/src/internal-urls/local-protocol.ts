@@ -4,6 +4,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import localDoc from "../prompts/internal-urls/local.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
+import { artifactsDirectoryFor } from "../session/session-manager";
 import {
 	buildDirectoryResource,
 	containedRealPath,
@@ -429,7 +430,8 @@ async function readOptionsFor(
 	opts: LocalProtocolOptions,
 	context: ResolveContext | undefined,
 ): Promise<LocalProtocolOptions> {
-	const sourceDir = context?.session?.forkSourceArtifactsDir;
+	const forkSource = context?.session?.forkSource;
+	const sourceDir = forkSource === undefined ? null : artifactsDirectoryFor(forkSource);
 	if (!sourceDir || !extractRelativePath(url)) return opts;
 	if ((await locateLocalTarget(url, opts, false)) !== null) return opts;
 	const sourceId = context?.session?.forkSourceSessionId ?? null;

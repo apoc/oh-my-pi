@@ -17,7 +17,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getInternalUrlSuggestions } from "@oh-my-pi/pi-coding-agent/internal-urls/completion";
 import {
 	formatCurrentBranchFullHistory,
 	HistoryProtocolHandler,
@@ -783,6 +782,7 @@ describe("history:// protocol", () => {
 		using tempDir = TempDir.createSync("@omp-history-fork-");
 		const dir = tempDir.path();
 		const cwd = path.join(dir, "project");
+		const sourceFile = path.join(dir, "source", "source.jsonl");
 		const sourceArtifacts = path.join(dir, "source", "source");
 		const childFile = path.join(sourceArtifacts, "Sub1.jsonl");
 		const grandchildFile = path.join(sourceArtifacts, "Sub1", "Sub1.Grandchild.jsonl");
@@ -805,7 +805,7 @@ describe("history:// protocol", () => {
 		});
 		const forkFile = path.join(dir, "forks", "MeshAsk.jsonl");
 		const context = {
-			session: makeToolSession(cwd, forkFile, { forkSourceArtifactsDir: sourceArtifacts }),
+			session: makeToolSession(cwd, forkFile, { forkSource: sourceFile }),
 			sessionFile: forkFile,
 		};
 		const router = InternalUrlRouter.instance();
@@ -823,21 +823,60 @@ describe("history:// protocol", () => {
 		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
 		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
 		await expect(router.resolve("history://MeshAsk", context)).rejects.toThrow("Unknown agent: MeshAsk");
+		// agent:// reads the source's output dir only; a live agent outside it is neither served nor listed.
+		await Bun.write(path.join(sourceArtifacts, "Out.md"), "source output");
+		// A running agent sharing the output's id is not the source's run: no superseded banner, still locatable.
+		AgentRegistry.global().register({
+			id: "Out",
+			displayName: "out",
+			kind: "sub",
+			// An open run (`runStartedAt`) is what makes a registered ref count as running.
+			session: Object.assign(fakeLiveSession([{ role: "user", content: "unrelated live run", timestamp: 1 }]), {
+				runStartedAt: Date.now(),
+			}),
+			status: "running",
+		});
+		expect((await router.resolve("agent://Out", context)).content).toBe("source output");
+		expect(await router.locate("agent://Out", context)).toBe(path.join(sourceArtifacts, "Out.md"));
+		const missing: unknown = await router.resolve("agent://ForeignOnly", context).catch((error: unknown) => error);
+		expect(missing).toBeInstanceOf(Error);
+		expect((missing as Error).message).toBe("Not found: ForeignOnly\nList agents with history://");
+		const completions = await router.complete("history", "", context);
+		expect(completions?.map(candidate => candidate.value).toSorted()).toEqual(["Sub1", "Sub1.Grandchild"]);
+	});
 
-		// The editor binds the fork scope as a scalar, without a tool session.
-		const forkSuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({
-			cwd,
+	it("fails closed for a confined session whose fork source yields no artifacts dir", async () => {
+		using tempDir = TempDir.createSync("@omp-history-fork-closed-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const externalArtifacts = path.join(dir, "external-artifacts");
+		await Bun.write(path.join(externalArtifacts, "ExternalOnly.jsonl"), sessionFixtureJsonl("external transcript"));
+		await Bun.write(path.join(externalArtifacts, "Out.md"), "external output");
+		registerArtifactsDir(externalArtifacts);
+		AgentRegistry.global().register({
+			id: "ForeignOnly",
+			displayName: "foreign only",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "outside the source", timestamp: 1 }]),
+			status: "running",
+		});
+		const forkFile = path.join(dir, "forks", "MeshAsk.jsonl");
+		const context = {
+			// Not a `.jsonl` session file, so no artifacts dir derives from it.
+			session: makeToolSession(cwd, forkFile, { forkSource: path.join(dir, "source", "not-a-session.txt") }),
 			sessionFile: forkFile,
-			forkSourceArtifactsDir: sourceArtifacts,
-		}));
-		expect(forkSuggestions?.items.map(item => item.value).toSorted()).toEqual([
-			"history://Sub1",
-			"history://Sub1.Grandchild",
-		]);
-		const ordinarySuggestions = await getInternalUrlSuggestions("history://", cwd, undefined, () => ({ cwd }));
-		const ordinaryValues = ordinarySuggestions?.items.map(item => item.value) ?? [];
-		expect(ordinaryValues).toContain("history://ForeignOnly");
-		expect(ordinaryValues).toContain("history://ExternalOnly");
+		};
+		const router = InternalUrlRouter.instance();
+
+		const index = await router.resolve("history://", context);
+		expect(index.content).not.toContain("ForeignOnly");
+		expect(index.content).not.toContain("ExternalOnly");
+		await expect(router.resolve("history://ForeignOnly", context)).rejects.toThrow("Unknown agent: ForeignOnly");
+		await expect(router.resolve("history://ExternalOnly", context)).rejects.toThrow("Unknown agent: ExternalOnly");
+		expect(await router.complete("history", "", context)).toEqual([]);
+		// Only the fork's own (absent) artifacts dir is scanned; the registered external dir is not.
+		await expect(router.resolve("agent://Out", context)).rejects.toThrow("No artifacts directory found");
+		expect(await router.locate("agent://Out", context)).toBeNull();
 	});
 
 	it("keeps a confined fork's foreign source children out of the parent's history", async () => {

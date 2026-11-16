@@ -314,8 +314,6 @@ export interface ToolSession {
 	 * required yield tool). Suppresses automatic tool-set expansion.
 	 */
 	restrictToolNames?: boolean;
-	/** Confined forks: the source session's artifacts dir, read in place by history://, agent:// and local:// spill fallbacks. */
-	readonly forkSourceArtifactsDir?: string;
 	/** Confined forks: the source session file; every subagent the fork spawns is confined to it too. */
 	readonly forkSource?: string;
 	/** Confined forks: the source session's id, naming its `local://` root when that sits under the temp dir. */

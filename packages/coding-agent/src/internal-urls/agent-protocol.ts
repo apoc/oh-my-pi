@@ -41,6 +41,7 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { artifactsDirectoryFor } from "../session/session-manager";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -90,7 +91,7 @@ function peersByProject(peers: MeshPeer[], own: string | undefined): string {
 
 function crossInstanceEnabled(context?: ResolveContext): boolean {
 	// A confined fork reads only its source's artifacts: no other instance's agents.
-	if (context?.session?.forkSourceArtifactsDir) return false;
+	if (context?.session?.forkSource !== undefined) return false;
 	const settings = context?.session?.settings ?? context?.settings;
 	return settings !== undefined && cfgTaskCrossInstance.get(settings);
 }
@@ -101,20 +102,22 @@ function crossInstanceEnabled(context?: ResolveContext): boolean {
  * included) lives outside its source's artifacts.
  */
 function visibleRegistry(context?: ResolveContext): AgentRegistryApi | undefined {
-	if (context?.session?.forkSourceArtifactsDir) return undefined;
+	if (context?.session?.forkSource !== undefined) return undefined;
 	return context?.agentRegistry ?? AgentRegistry.global();
 }
 
 /**
  * Artifacts dirs a confined fork reads `agent://` outputs from: its source's, then its own (its
- * scouts publish there, and their full output is linked from task results). `undefined` for any
- * other caller.
+ * scouts publish there, and their full output is linked from task results). Neither dir is scanned
+ * recursively, so the source's `mesh-threads` stay out of reach; a fork source that yields no
+ * artifacts dir leaves only the own dir. `undefined` for any other caller.
  */
 function forkOutputDirs(context?: ResolveContext): string[] | undefined {
-	const forkDir = context?.session?.forkSourceArtifactsDir ?? context?.forkSourceArtifactsDir;
-	if (!forkDir) return undefined;
+	const forkSource = context?.session?.forkSource;
+	if (forkSource === undefined) return undefined;
+	const forkDir = artifactsDirectoryFor(forkSource);
 	const ownDir = context?.session?.getArtifactsDir?.() ?? context?.sessionFile?.slice(0, -6);
-	return ownDir && ownDir !== forkDir ? [forkDir, ownDir] : [forkDir];
+	return [...new Set([forkDir, ownDir].filter((dir): dir is string => !!dir))];
 }
 
 function decodeSegment(segment: string): string {

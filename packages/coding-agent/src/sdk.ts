@@ -2691,9 +2691,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.getFindHintVisible();
 			},
 			restrictToolNames,
-			get forkSourceArtifactsDir() {
-				return sessionManager.getForkSourceArtifactsDir() ?? undefined;
-			},
 			get forkSource() {
 				return sessionManager.getForkSource() ?? undefined;
 			},
@@ -4684,7 +4681,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				settingsApproval: toolSession.settingsApproval === true,
 				outReplies: outRepliesActive(settings, tuiTranscript),
 				// A confined fork's agent:// refuses other instances; don't advertise them.
-				crossInstanceAgents: cfgTaskCrossInstance.get(settings) && !toolSession.forkSourceArtifactsDir,
+				crossInstanceAgents: cfgTaskCrossInstance.get(settings) && toolSession.forkSource === undefined,
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
