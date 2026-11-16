@@ -40,7 +40,7 @@ import { TIER_RANK } from "../tools/approval";
 import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
-import { InternalUrlRouter } from "./router";
+import { confinedSchemeRefusal, InternalUrlRouter } from "./router";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -990,6 +990,8 @@ export class InternalUrlFilesystem {
 
 	#route(input: string): Route {
 		const scheme = schemeOf(input);
+		const refusal = confinedSchemeRefusal(scheme, this.#context.session);
+		if (refusal) throw new UrlFsError("EACCES", refusal);
 		const registered = this.#router.getHandler(scheme);
 		const spec = registered?.spec ?? (this.#router.canResolve(input) ? this.#router.spec("mcp") : undefined);
 		if (!spec) throw new UrlFsError("ENOENT", `No handler for ${scheme}:// URLs: ${input}`);

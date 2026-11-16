@@ -92,6 +92,32 @@ const GLOB_CHARS_RE = /[*?[{]/;
 const QUERY_START_RE = /\?[\w.-]*=/;
 // Selectors a mutating tool accepts: whole-file display modes that do not change which bytes are addressed.
 const WHOLE_FILE_SELECTOR_RE = /^(?:raw|conflicts)$/i;
+// Schemes a confined fork (a mesh `ask` responder, or any subagent it spawns: every
+// caller whose session has `forkSource`) may not reach. They leave the copied
+// transcript's sandbox: `ssh` reaches remote hosts, `issue`/`pr`/`mr` make
+// authenticated network calls as the user, and `vault`/`memory` expose personal
+// data that lives outside the source session. Enforced centrally through
+// {@link confinedSchemeRefusal}, not per handler.
+const CONFINED_FORK_DENIED_SCHEMES: Record<string, true> = {
+	ssh: true,
+	issue: true,
+	pr: true,
+	mr: true,
+	vault: true,
+	memory: true,
+};
+
+/**
+ * Why `session` may not reach `scheme://` URLs, or undefined when it may: a confined fork
+ * (`session.forkSource` set) addressing a {@link CONFINED_FORK_DENIED_SCHEMES} scheme.
+ * Every router entry that dispatches to a handler, and the shell URL filesystem, gate on it.
+ */
+export function confinedSchemeRefusal(scheme: string, session: ToolSession | undefined): string | undefined {
+	if (!session?.forkSource) return undefined;
+	const normalized = scheme.toLowerCase();
+	if (!Object.hasOwn(CONFINED_FORK_DENIED_SCHEMES, normalized)) return undefined;
+	return `${normalized}:// is unavailable: confined forks (mesh ask responders and their subagents) cannot use ${normalized}:// URLs.`;
+}
 
 /** Process-global scheme registry; tools route internal URLs through its spec-driven API. */
 export class InternalUrlRouter {
@@ -268,6 +294,7 @@ export class InternalUrlRouter {
 	async complete(scheme: string, query: string, context?: ResolveContext): Promise<UrlCompletion[] | null> {
 		const handler = this.#handlers.get(scheme.toLowerCase());
 		if (!handler?.complete) return null;
+		if (confinedSchemeRefusal(scheme, context?.session)) return [];
 		return handler.complete(query, context);
 	}
 
@@ -313,6 +340,7 @@ export class InternalUrlRouter {
 				: undefined
 			: this.#resourceFallbackHandler(scheme);
 		if (!handler) return null;
+		this.#assertNotConfinedDenied(scheme, context);
 		const url = parseInternalUrl(bare);
 		const spec = handler.spec;
 		if (spec.backing === "file" && handler.locate) {
@@ -326,6 +354,7 @@ export class InternalUrlRouter {
 	async locate(input: string, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		const registered = this.#registered(input);
 		if (!registered?.handler.locate) return null;
+		this.#assertNotConfinedDenied(registered.scheme, context);
 		return registered.handler.locate(parseInternalUrl(this.split(registered.url).path), context, options);
 	}
 
@@ -375,6 +404,7 @@ export class InternalUrlRouter {
 	locateSync(input: string, context?: ResolveContext): string | undefined {
 		const registered = this.#registered(input);
 		if (!registered?.handler.spec.linkable || !registered.handler.locateSync) return undefined;
+		if (confinedSchemeRefusal(registered.scheme, context?.session)) return undefined;
 		let parsed: InternalUrl;
 		try {
 			parsed = parseInternalUrl(this.split(registered.url).path);
@@ -402,6 +432,7 @@ export class InternalUrlRouter {
 	async enumerate(input: string, context?: ResolveContext): Promise<Array<{ url: string; content: string }> | null> {
 		const registered = this.#registered(input);
 		if (!registered?.handler.enumerate) return null;
+		this.#assertNotConfinedDenied(registered.scheme, context);
 		return registered.handler.enumerate(parseInternalUrl(registered.url), context);
 	}
 
@@ -479,6 +510,12 @@ export class InternalUrlRouter {
 		return this.#isResourceFallbackScheme(scheme) ? this.#handlers.get(this.#resourceFallbackScheme) : undefined;
 	}
 
+	/** Throw {@link confinedSchemeRefusal}'s message when it refuses `scheme` for the caller. */
+	#assertNotConfinedDenied(scheme: string, context: ResolveContext | WriteContext | undefined): void {
+		const refusal = confinedSchemeRefusal(scheme, context?.session);
+		if (refusal) throw new Error(refusal);
+	}
+
 	/** Normalized hierarchical URL of a registered scheme, with its handler; undefined otherwise. */
 	#registered(input: string): RegisteredUrl | undefined {
 		const url = this.normalize(input);
@@ -505,7 +542,10 @@ export class InternalUrlRouter {
 		return { ...registered, segments, firstGlob };
 	}
 
-	#route(input: string, allowResourceFallback = false): { parsed: InternalUrl; handler: ProtocolHandler } {
+	#route(
+		input: string,
+		allowResourceFallback = false,
+	): { parsed: InternalUrl; handler: ProtocolHandler; scheme: string } {
 		const parsed = parseInternalUrl(this.normalize(input));
 		const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 		const handler =
@@ -516,12 +556,13 @@ export class InternalUrlRouter {
 				.join(", ");
 			throw new Error(`Unknown protocol: ${scheme}://\nSupported: ${available || "none"}`);
 		}
-		return { parsed, handler };
+		return { parsed, handler, scheme };
 	}
 
 	/** Resolve an internal URL through its registered protocol handler. */
 	async resolve(input: string, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
-		const { parsed, handler } = this.#route(input, true);
+		const { parsed, handler, scheme } = this.#route(input, true);
+		this.#assertNotConfinedDenied(scheme, context);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.spec.immutable };
 	}
@@ -531,9 +572,9 @@ export class InternalUrlRouter {
 	 * handler's model-facing result, if it produced one.
 	 */
 	async write(input: string, content: string, context?: WriteContext): Promise<InternalWriteResult | void> {
-		const { parsed, handler } = this.#route(input);
+		const { parsed, handler, scheme } = this.#route(input);
+		this.#assertNotConfinedDenied(scheme, context);
 		if (!handler.write) {
-			const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 			throw new Error(`${scheme}:// URLs are read-only for write; use the protocol-specific tool for mutations.`);
 		}
 		return await handler.write(parsed, content, context);
