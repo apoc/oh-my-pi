@@ -288,6 +288,42 @@ describe("structured subagent primitive", () => {
 		);
 		expect(discover).not.toHaveBeenCalled();
 	});
+
+	it("rejects a confined fork combined with isolation or custom tools before discovery", async () => {
+		const fork = { sourceFile: "/tmp/main-session.jsonl" };
+		const toolSession = session();
+		cfgEvalToolsEnabled.set(toolSession.settings, true);
+		const customTools = createEvalCustomTools(toolSession, [
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		for (const rejected of [{ isolation: { requested: true } }, { customTools }]) {
+			const error = await resolveEffectiveSubagentPolicy(request({ fork, ...rejected })).catch(
+				(caught: unknown) => caught,
+			);
+			expect(error).toBeInstanceOf(StructuredSubagentError);
+			expect(error).toMatchObject({
+				kind: "preflight",
+				message: "A forked subagent does not support isolated execution or custom tools.",
+			});
+		}
+		expect(discover).not.toHaveBeenCalled();
+
+		// The same request without those controls resolves.
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(request({ fork }));
+		expect(policy.fork).toEqual(fork);
+		expect((await resolveEffectiveSubagentPolicy(request({ fork, isolation: { requested: false } }))).fork).toEqual(
+			fork,
+		);
+		expect((await resolveEffectiveSubagentPolicy(request({ fork, customTools: [] }))).fork).toEqual(fork);
+	});
+
 	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");

@@ -171,6 +171,8 @@ async function createPersistedSession(
 		readOnly?: boolean;
 		agent?: string;
 		isolated?: boolean;
+		/** Confine the session: its header records this source file, as a mesh `ask` fork's descendants do. */
+		forkSource?: string;
 		retryFallback?: RetryFallbackRole;
 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 		perCallModel?: boolean;
@@ -179,7 +181,14 @@ async function createPersistedSession(
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	},
 ): Promise<string> {
-	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+	const sessionDir = path.join(cwd, "sessions");
+	const manager =
+		contract?.forkSource === undefined
+			? SessionManager.create(cwd, sessionDir)
+			: await SessionManager.open(path.join(sessionDir, "confined.jsonl"), sessionDir, undefined, {
+					initialCwd: cwd,
+					forkSource: contract.forkSource,
+				});
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
 	manager.appendSessionInit({
@@ -549,6 +558,24 @@ describe("persisted subagent revival", () => {
 		const ref = createRef(sessionFile);
 		const reviver = await createFactory(cwd)(ref);
 		expect(reviver).toEqual({ refused: expect.stringContaining("ran isolated") });
+	});
+
+	it("revives a contract-bearing session but leaves the same session transcript-only once its header records a forkSource", async () => {
+		// A confined fork's isolation and host restrictions live only in the spawning process, so a
+		// cold revival of it (or of any subagent confined with it) would silently drop them.
+		const cwd = makeTempDir("@pi-confined-revive-");
+		const open = await createPersistedSession(cwd);
+		const openRef = createRef(open);
+		expect(await createFactory(cwd)(openRef)).toBeDefined();
+
+		const sourceFile = path.join(cwd, "main-session.jsonl");
+		const confined = await createPersistedSession(cwd, undefined, undefined, undefined, { forkSource: sourceFile });
+		const peek = await SessionManager.peekSessionInit(confined);
+		expect(peek?.init).not.toBeNull();
+		expect(peek?.forkSource).toBe(sourceFile);
+		expect(await fs.promises.stat(peek!.cwd)).toBeDefined();
+		const confinedRef = createRef(confined);
+		expect(await createFactory(cwd)(confinedRef)).toBeUndefined();
 	});
 
 	it("restores the persisted agent definition name on cold revival so agent-scoped rules keep matching", async () => {
