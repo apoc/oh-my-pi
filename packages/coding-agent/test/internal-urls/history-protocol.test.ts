@@ -845,6 +845,41 @@ describe("history:// protocol", () => {
 		expect(completions?.map(candidate => candidate.value).toSorted()).toEqual(["Sub1", "Sub1.Grandchild"]);
 	});
 
+	it("serves a confined fork the outputs of its own subagents, ahead of its source's, never a peer's", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-fork-own-");
+		const dir = tempDir.path();
+		const cwd = path.join(dir, "project");
+		const sourceFile = path.join(dir, "source", "source.jsonl");
+		const sourceArtifacts = path.join(dir, "source", "source");
+		const forkFile = path.join(dir, "forks", "MeshAsk.jsonl");
+		const ownArtifacts = path.join(dir, "forks", "MeshAsk");
+		await Bun.write(path.join(ownArtifacts, "Scout.md"), "own scout output");
+		await Bun.write(path.join(ownArtifacts, "Shared.md"), "own shared output");
+		await Bun.write(path.join(sourceArtifacts, "Shared.md"), "source shared output");
+		await Bun.write(path.join(sourceArtifacts, "SourceOnly.md"), "source only output");
+		// Another mesh peer's output lives in the source's private mesh-threads tree.
+		await Bun.write(path.join(meshResponderArtifactsDir(sourceArtifacts, "T1"), "PeerScout.md"), "peer output");
+		// A sibling peer's own dir is not this fork's.
+		await Bun.write(path.join(dir, "forks", "OtherAsk", "OtherScout.md"), "sibling output");
+		const context = {
+			session: makeToolSession(cwd, forkFile, { forkSource: sourceFile, getArtifactsDir: () => ownArtifacts }),
+			sessionFile: forkFile,
+		};
+		const router = InternalUrlRouter.instance();
+
+		const scout = await router.resolve("agent://Scout", context);
+		expect(scout.content).toBe("own scout output");
+		expect(scout.sourcePath).toBe(path.join(ownArtifacts, "Scout.md"));
+		expect(await router.locate("agent://Scout", context)).toBe(path.join(ownArtifacts, "Scout.md"));
+		// The fork's own dir wins a shared id; the source's outputs stay readable.
+		expect((await router.resolve("agent://Shared", context)).content).toBe("own shared output");
+		expect((await router.resolve("agent://SourceOnly", context)).content).toBe("source only output");
+		await expect(router.resolve("agent://PeerScout", context)).rejects.toThrow("Not found: PeerScout");
+		await expect(router.resolve("agent://OtherScout", context)).rejects.toThrow("Not found: OtherScout");
+		expect(await router.locate("agent://PeerScout", context)).toBeNull();
+		expect(await router.locate("agent://OtherScout", context)).toBeNull();
+	});
+
 	it("fails closed for a confined session whose fork source yields no artifacts dir", async () => {
 		using tempDir = TempDir.createSync("@omp-history-fork-closed-");
 		const dir = tempDir.path();

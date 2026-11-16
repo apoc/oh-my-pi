@@ -4,7 +4,8 @@ import type { HostRestrictions } from "./host-restrictions";
 /**
  * A host-requested read-only fork of a persisted session (mesh `ask` responders). The child starts
  * from a copy of `sourceFile`'s history, confined to it: `history://`, `agent://` and inherited `local://`
- * read the source's artifacts in place, and every subagent the fork spawns stays confined too.
+ * read the source's artifacts in place (`agent://` also reads the fork tree's own artifacts dir, its
+ * subagents' outputs), and every subagent the fork spawns stays confined too.
  */
 export interface SubagentFork {
 	sourceFile: string;

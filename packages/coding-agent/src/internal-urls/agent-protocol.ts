@@ -107,17 +107,18 @@ function visibleRegistry(context?: ResolveContext): AgentRegistryApi | undefined
 }
 
 /**
- * Artifacts dirs a confined fork reads `agent://` outputs from: its source's, then its own (its
- * scouts publish there, and their full output is linked from task results). Neither dir is scanned
- * recursively, so the source's `mesh-threads` stay out of reach; a fork source that yields no
- * artifacts dir leaves only the own dir. `undefined` for any other caller.
+ * Artifacts dirs a confined fork reads `agent://` outputs from: its own first (its scouts publish
+ * there, their full output is linked from task results, and their ids win over a source's same-named
+ * output), then its source's. Neither dir is scanned recursively, so the source's `mesh-threads`
+ * stay out of reach; a fork source that yields no artifacts dir leaves only the own dir.
+ * `undefined` for any other caller.
  */
 function forkOutputDirs(context?: ResolveContext): string[] | undefined {
 	const forkSource = context?.session?.forkSource;
 	if (forkSource === undefined) return undefined;
 	const forkDir = artifactsDirectoryFor(forkSource);
 	const ownDir = context?.session?.getArtifactsDir?.() ?? context?.sessionFile?.slice(0, -6);
-	return [...new Set([forkDir, ownDir].filter((dir): dir is string => !!dir))];
+	return [...new Set([ownDir, forkDir].filter((dir): dir is string => !!dir))];
 }
 
 function decodeSegment(segment: string): string {
@@ -690,7 +691,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
-		// A confined fork reads its source's agent outputs in place, plus its own scouts'.
+		// A confined fork reads its own scouts' outputs, then its source's, in place.
 		const forkDirs = forkOutputDirs(context);
 		if (forkDirs) return forkDirs;
 		const rootSessionFile = context?.sessionFile
