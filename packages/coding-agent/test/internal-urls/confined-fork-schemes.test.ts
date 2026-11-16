@@ -7,6 +7,7 @@ import {
 	InternalUrlRouter,
 	LocalProtocolHandler,
 	type ResolveContext,
+	type SchemeHost,
 	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
@@ -14,6 +15,7 @@ import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ShellFsOp } from "@oh-my-pi/pi-natives";
 import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -164,6 +166,73 @@ describe("InternalUrlRouter confined-fork scheme gate", () => {
 
 		const resource = await InternalUrlRouter.instance().resolve("local://note.md", confined());
 		expect(resource.content).toBe("allowed");
+	});
+});
+
+describe("InternalUrlRouter confined-fork prompt advertisement", () => {
+	const DENIED = ["ssh", "issue", "pr", "mr", "vault", "memory"];
+	const host: SchemeHost = {
+		skillUriAccess: false,
+		ruleCount: 0,
+		memoryBackend: "local",
+		securityEnabled: false,
+		settingsApproval: false,
+		outReplies: false,
+		subagent: false,
+		mesh: false,
+		confined: false,
+	};
+
+	/** Registers always-advertising stubs for the denied schemes (the real handlers depend on `gh`/`ssh`/Obsidian binaries) plus one allowed scheme. */
+	function advertiseStubs(router: InternalUrlRouter): InternalUrlRouter {
+		for (const scheme of [...DENIED, "scratch"]) {
+			router.register({
+				scheme,
+				spec: { backing: "virtual", selectors: "none", immutable: true },
+				promptDoc: () => `${scheme}:// advertised`,
+				promptReference: () => `${scheme}:// reference`,
+				resolve: async url => ({ url: url.href, content: "", contentType: "text/plain" }),
+			});
+		}
+		return router;
+	}
+	const schemesOf = (lines: string[]) => lines.map(line => line.slice(0, line.indexOf("://")));
+
+	it("omits every denied scheme from a confined host and keeps the rest", () => {
+		const router = advertiseStubs(new InternalUrlRouter());
+		const open = schemesOf(router.describe({ ...host, confined: false }));
+		for (const scheme of DENIED) expect(open).toContain(scheme);
+
+		const confinedLines = schemesOf(router.describe({ ...host, confined: true }));
+		for (const scheme of DENIED) expect(confinedLines).not.toContain(scheme);
+		expect(confinedLines).toContain("scratch");
+		expect(confinedLines).toContain("proc");
+		expect(confinedLines).toEqual(open.filter(scheme => !DENIED.includes(scheme)));
+	});
+
+	it("omits every denied scheme from a confined reference and keeps the rest", () => {
+		const router = advertiseStubs(new InternalUrlRouter());
+		const open = schemesOf(router.reference());
+		for (const scheme of DENIED) expect(open).toContain(scheme);
+		expect(schemesOf(router.reference({ confined: false }))).toEqual(open);
+
+		const confinedLines = schemesOf(router.reference({ confined: true }));
+		for (const scheme of DENIED) expect(confinedLines).not.toContain(scheme);
+		expect(confinedLines).toContain("scratch");
+		expect(confinedLines).toContain("proc");
+		expect(confinedLines).toEqual(open.filter(scheme => !DENIED.includes(scheme)));
+	});
+
+	it("renders xd://read/urls without denied schemes for a confined read tool only", () => {
+		advertiseStubs(InternalUrlRouter.instance());
+		const urls = (forkSource: string | undefined) => new ReadTool(toolSession(forkSource)).docTopics().urls;
+
+		const open = urls(undefined);
+		for (const scheme of DENIED) expect(open).toContain(`- ${scheme}:// reference`);
+
+		const confinedTopic = urls(path.join(cleanupRoot, "source-session.jsonl"));
+		for (const scheme of DENIED) expect(confinedTopic).not.toContain(`${scheme}:// reference`);
+		expect(confinedTopic).toContain("- scratch:// reference");
 	});
 });
 

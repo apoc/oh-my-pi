@@ -175,6 +175,8 @@ export interface SchemeHost {
 	subagent: boolean;
 	/** `mesh_peers` is in this prompt's tool set (directly or as an xd device). */
 	mesh: boolean;
+	/** The session is a confined fork: CONFINED_FORK_DENIED_SCHEMES are refused, so they go unadvertised. */
+	confined: boolean;
 }
 
 /**

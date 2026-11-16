@@ -485,17 +485,19 @@ export class InternalUrlRouter {
 	/** Rendered promptDoc lines, registration order, for schemes available under `host`. */
 	describe(host: SchemeHost): string[] {
 		const lines: string[] = [];
-		for (const handler of this.#handlers.values()) {
+		for (const [scheme, handler] of this.#handlers) {
+			if (host.confined && Object.hasOwn(CONFINED_FORK_DENIED_SCHEMES, scheme)) continue;
 			const line = handler.promptDoc?.(host);
 			if (line !== undefined) lines.push(line);
 		}
 		return lines;
 	}
 
-	/** Rendered promptReference entries, registration order: the body of `help://read/urls`. */
-	reference(): string[] {
+	/** Rendered promptReference entries, registration order: the body of `help://read/urls`. A confined host omits {@link CONFINED_FORK_DENIED_SCHEMES}, as {@link describe} does. */
+	reference(host?: Pick<SchemeHost, "confined">): string[] {
 		const lines: string[] = [];
-		for (const handler of this.#handlers.values()) {
+		for (const [scheme, handler] of this.#handlers) {
+			if (host?.confined && Object.hasOwn(CONFINED_FORK_DENIED_SCHEMES, scheme)) continue;
 			const line = handler.promptReference?.();
 			if (line !== undefined) lines.push(line);
 		}

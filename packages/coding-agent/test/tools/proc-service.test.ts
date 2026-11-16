@@ -314,6 +314,7 @@ describe("proc:// background jobs", () => {
 				outReplies: false,
 				subagent: false,
 				mesh: false,
+				confined: false,
 			})
 			.find(line => line.startsWith("proc://"));
 		expect(help).toMatch(/\/kill[^;]*jobs, agents, and services/);

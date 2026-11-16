@@ -17,6 +17,7 @@ const host: SchemeHost = {
 	outReplies: false,
 	subagent: false,
 	mesh: false,
+	confined: false,
 };
 
 /** A caller session; `enabled` undefined leaves `out.enabled` unset. */

@@ -1197,7 +1197,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 			}),
 			urls: InternalUrlRouter.instance()
-				.reference()
+				.reference({ confined: Boolean(this.session.forkSource) })
 				.map(line => `- ${line}`)
 				.join("\n"),
 		};

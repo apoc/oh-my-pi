@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { buildSystemPrompt as buildSdkSystemPrompt } from "@oh-my-pi/pi-coding-agent/sdk";
 import {
 	buildSystemPrompt,
@@ -1083,5 +1084,60 @@ describe("system prompt tool inventory", () => {
 		expect(withoutPeers).toContain("`mesh-peers` notices");
 		const withPeers = await render(["read", "bash", "mesh_send", "mesh_peers"]);
 		expect(withPeers).toContain("`mesh_peers` lists them");
+	});
+
+	it("advertises memory:// in # Internal URLs only for a local memory backend outside a confined fork", async () => {
+		const memoryLines = async (opts: { memoryBackend: string; confined: boolean }) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["read", "bash"],
+				tools: TOOLS,
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				...opts,
+			});
+			const lines = systemPrompt.join("\n\n").split("\n");
+			const start = lines.indexOf("# Internal URLs");
+			expect(start).toBeGreaterThan(-1);
+			const end = lines.findIndex((line, index) => index > start && line.trim() === "");
+			return lines.slice(start, end < 0 ? lines.length : end).filter(line => line.includes("memory://"));
+		};
+		expect(await memoryLines({ memoryBackend: "local", confined: false })).toEqual([
+			"- memory://root: project-memory summary.",
+		]);
+		expect(await memoryLines({ memoryBackend: "local", confined: true })).toEqual([]);
+		expect(await memoryLines({ memoryBackend: "off", confined: false })).toEqual([]);
+	});
+
+	it("inlines the ssh:// reference without read only for an unconfined prompt", async () => {
+		// No `read` tool: the internal URL reference is inlined into the prompt, minus the schemes a confined fork cannot reach.
+		InternalUrlRouter.resetForTests();
+		InternalUrlRouter.instance().register({
+			scheme: "ssh",
+			spec: { backing: "virtual", selectors: "none", immutable: true },
+			promptReference: () => "ssh:// reference",
+			resolve: async url => ({ url: url.href, content: "", contentType: "text/plain" }),
+		});
+		try {
+			const referenced = async (confined: boolean) => {
+				const { systemPrompt } = await buildSystemPrompt({
+					cwd: tempDir,
+					contextFiles: [],
+					skills: [],
+					rules: [],
+					toolNames: ["bash"],
+					tools: TOOLS,
+					workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+					confined,
+				});
+				return systemPrompt.join("\n\n").split("\n");
+			};
+			expect(await referenced(false)).toContain("- ssh:// reference");
+			expect(await referenced(true)).not.toContain("- ssh:// reference");
+		} finally {
+			InternalUrlRouter.resetForTests();
+		}
 	});
 });

@@ -649,6 +649,8 @@ export interface BuildSystemPromptOptions {
 	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
 	 */
 	subagent?: boolean;
+	/** Whether this prompt is for a confined fork (mesh `ask` responder or its subagent): schemes it may not reach go unadvertised. Defaults to false. */
+	confined?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -776,6 +778,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled = false,
 		ovnfs,
 		subagent = false,
+		confined = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -1072,6 +1075,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		outReplies,
 		crossInstanceAgents,
 		subagent,
+		confined,
 		mesh: toolPromptNames.has("mesh_peers"),
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
@@ -1128,7 +1132,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree,
 		hasSkillUriAccess,
 		internalUrls: InternalUrlRouter.instance().describe(schemeHost),
-		internalUrlReference: InternalUrlRouter.instance().reference(),
+		internalUrlReference: InternalUrlRouter.instance().reference({ confined }),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
