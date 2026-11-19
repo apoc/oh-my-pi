@@ -11,6 +11,7 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added the `/sandbox` panel (ANSI fullscreen and native Tern sheet: overview, filesystem, network and effective-policy pages, network modes the host cannot enforce shown disabled with the reason), the sandbox access dialog, the `sandbox_request` tool card, and a `sandboxed` badge with blocked-host and likely-denial notes on bash and eval cards ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Changed
 

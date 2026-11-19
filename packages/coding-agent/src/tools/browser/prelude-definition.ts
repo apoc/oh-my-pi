@@ -33,7 +33,7 @@ function browserX11Guidance(settings: Settings, platform: NodeJS.Platform = proc
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
-	host: Pick<HostEvalPreludeDefinition, "invoke" | "status"> & {
+	host: Pick<HostEvalPreludeDefinition, "invoke" | "status" | "sandboxSubjects"> & {
 		/** Where an open with `app: "auto"` goes; set only while an open without `app` goes to the relay. */
 		relayFallback?: BrowserKind;
 	},
@@ -62,6 +62,7 @@ export function createBrowserPreludeDefinition(
 		exports: ["browser"],
 		approval: "exec",
 		enabled: () => cfgBrowserEnabled.get(session.settings),
+		sandboxSubjects: host.sandboxSubjects,
 		invoke: host.invoke,
 		status: host.status,
 	};

@@ -7,6 +7,8 @@
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
 - The browser relay now runs inside the omp extension's native host while Chrome is open, instead of being started on demand by omp. `omp browser-relay` (serving the relay by hand) and its `--port`, `--token` and `--no-group` options are removed; `browser.relayUrl` still points omp at a relay forwarded from another machine. After updating, reload the omp extension once (or restart Chrome)
 - Eval's `archive.search(query)` now finds sessions by title, idle recap, or what the user and assistant wrote, across all history, and returns session records with their `matches`; prompt-only search moved to `archive.prompts({ query })`. Both match query words against the start of words (`arch` finds `archive`, `chiv` no longer does)
+- Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- A project `.env` can no longer set the names that choose omp's config (`PI_CONFIG_FILES`, agent/config dirs, profile, XDG roots, natives dir); set them in your shell or omp's own `.env` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Added
 
@@ -25,6 +27,8 @@
 - Session transcripts get a full-text index (`~/.omp/agent/transcripts.db`) of user and assistant messages, built by the omp daemon in the background on the first `archive.search` and kept current on later ones, never on a session's own thread; the first build reads every top-level transcript once
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added an opt-in OS sandbox (seatbelt, bubblewrap, processcontainer) for agent commands, eval, the file tools, `read`'s binary analysis and eval's `dsm`, extension `exec`, opted-in MCP servers and language servers: workspace-only writes, secret stores unreadable, network off, open or allowlisted through an egress proxy; git config and hooks and the project config folders omp loads (`.omp/`, `.claude/`, `.mcp.json`, …) stay read-only inside the workspace, and one a sandboxed command creates or replaces is recorded and neither loaded nor used by omp's git until you trust it in `/sandbox`; omp's Chromium for the `browser` helper runs as its own process per workspace, behind the egress proxy in `allowlist` mode, with `file:` loads and page downloads restricted; network modes the host cannot enforce are refused with the missing packages named, a refusal names the exact path, host or `exec` action (something omp does outside the sandbox, such as a `debug` launch or attach, a `computer` call or a browser it cannot restrict) the agent can ask for with the `sandbox_request` tool, and edits to omp's own settings files always ask; configure with `/sandbox`, `sandbox.*` settings (a project can only tighten them) or `PI_SANDBOX=1`, with Windows opt-ins `sandbox.filesystem.windowsListDrives` and `sandbox.network.windowsLoopback`, and `omp --smoke-test` checks it (see `docs/sandbox.md`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- RPC clients can read and edit the sandbox, receive `sandbox_update`, opt in to answering host and access prompts, and revoke `exec` grants or trust and remove recorded sandbox-created paths (see `docs/rpc.md#sandbox`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Changed
 
@@ -37,6 +41,7 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Approval modes now gate `read` and search URLs on `192.0.0.0/24` and `198.18.0.0/15` like other non-public addresses, matching the sandbox egress proxy ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 
@@ -70,6 +75,7 @@
 - Fixed `computer` on Windows passing off a fully covered window's screenshot and `ax()` tree as current: for Chrome, Edge and Electron apps, which can stop drawing while covered, both now say the window appeared covered and may be stale ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
+- On Windows, cancelling a JavaScript eval cell no longer drops the output it printed just before the cancel, and a hung Python interpreter probe no longer delays backend discovery past its timeout ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [19.0.1] - 2026-11-19
 
