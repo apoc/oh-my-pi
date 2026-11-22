@@ -40,8 +40,9 @@ where
 ///
 /// # Errors
 /// [`FrameError::TooLarge`] when the declared length exceeds `max` (the
-/// payload is not read; drop the connection), [`FrameError::Truncated`] when
-/// the stream ends mid-frame, [`FrameError::Io`] otherwise.
+/// payload is not read; answer, then drain or drop the connection),
+/// [`FrameError::Truncated`] when the stream ends mid-frame,
+/// [`FrameError::Io`] otherwise.
 pub async fn read_frame<R>(reader: &mut R, max: usize) -> Result<Option<Vec<u8>>, FrameError>
 where
 	R: AsyncRead + Unpin + ?Sized,

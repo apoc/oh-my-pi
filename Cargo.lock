@@ -5959,6 +5959,7 @@ version = "19.2.1"
 dependencies = [
  "base64 0.23.1",
  "dns-lookup 3.0.1",
+ "flume",
  "if-addrs",
  "mdns-sd",
  "omp-instances",

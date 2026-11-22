@@ -34,7 +34,7 @@ use tokio::{
 
 use self::{
 	inbound::{Admission, Limits, Pending, admit},
-	peers::{Departed, MdnsEndpoint, PeerTable},
+	peers::{Departed, MAX_CANDIDATES, MdnsEndpoint, PeerTable},
 	replies::{AwaitStart, Effects, Inflight, KeyTaken, Replies, ReplyOp},
 };
 pub use self::{
@@ -289,7 +289,36 @@ struct State {
 	/// Peers only a local listing dropped while requests to them were
 	/// tracked, until the registry confirms them gone or they return.
 	suspects:       HashMap<String, Suspect>,
+	/// mDNS candidates whose verification is running ([`VerifySlot`]):
+	/// one per id, at most [`MAX_CANDIDATES`] from discovery. Announcements
+	/// are unauthenticated, so without this bound spoofed ones could each hold
+	/// a connection for a probe timeout. Refresh rounds skip ids already being
+	/// verified and claim theirs outside the discovery cap; a round runs at
+	/// most one probe per table candidate (at most [`MAX_REMOTE_PEERS`] +
+	/// [`MAX_CANDIDATES`]), and rounds run one at a time.
+	verifying:      HashSet<String>,
+	/// Entries of [`Self::verifying`] discovery claimed.
+	discovering:    usize,
 	closed:         bool,
+}
+
+/// A claimed entry of [`State::verifying`], released when dropped (the
+/// verification finished, or its task was cancelled).
+struct VerifySlot {
+	node:      Arc<MeshNode>,
+	id:        String,
+	/// Counts toward the discovery cap.
+	discovery: bool,
+}
+
+impl Drop for VerifySlot {
+	fn drop(&mut self) {
+		let mut st = self.node.state.lock();
+		st.verifying.remove(&self.id);
+		if self.discovery {
+			st.discovering -= 1;
+		}
+	}
 }
 
 /// Registry checks in a row that must miss a suspect's entry before its
@@ -453,6 +482,8 @@ impl MeshNode {
 				static_specs:   Vec::new(),
 				static_learned: HashMap::new(),
 				suspects:       HashMap::new(),
+				verifying:      HashSet::new(),
+				discovering:    0,
 				closed:         false,
 			}),
 			instance_id,
@@ -617,22 +648,23 @@ impl MeshNode {
 		if let Err(err) = env.validate() {
 			return Ok(err.into());
 		}
-		let (endpoint, client) = {
-			let st = self.state.lock();
+		// Answers may overtake the acknowledgement only for tracked requests in
+		// flight. Marked under the route lookup's lock, so a departure settled
+		// after it is held for the acknowledgement.
+		let (endpoint, client, _inflight) = {
+			let mut st = self.state.lock();
 			let endpoint = st
 				.table
 				.route(to, st.local_on, st.lan_port.is_some())
 				.ok_or_else(|| TransportError::Unreachable(format!("no reachable mesh peer {to}")))?;
-			(endpoint, st.client.clone())
+			let inflight = expected.filter(|e| e.tracked && track.is_some()).map(|e| {
+				InflightGuard::new(self, &mut st, match e.op {
+					ReplyOp::Reply => Inflight::Message(to.to_owned(), env.msg_id.clone()),
+					ReplyOp::WatchEvent => Inflight::Watch(to.to_owned()),
+				})
+			});
+			(endpoint, st.client.clone(), inflight)
 		};
-		// Answers may overtake the acknowledgement only for tracked requests in
-		// flight.
-		let _inflight = expected.filter(|e| e.tracked && track.is_some()).map(|e| {
-			InflightGuard::new(self, match e.op {
-				ReplyOp::Reply => Inflight::Message(to.to_owned(), env.msg_id.clone()),
-				ReplyOp::WatchEvent => Inflight::Watch(to.to_owned()),
-			})
-		});
 		let result = client.request(&endpoint, &env, timeout).await;
 		let ok = match &result {
 			Ok(MeshResponse::Err { code: MeshErrorCode::Unauthorized, .. }) => false,
@@ -693,10 +725,36 @@ impl MeshNode {
 		);
 		self.emit(fx);
 		match registered {
-			Ok(()) => response,
+			Ok(()) => {
+				self.track_departed_target(&mut st, to);
+				response
+			},
 			// The key is another peer's tracked request: never reroute its
 			// answers.
 			Err(KeyTaken) => MeshResponse::error(MeshErrorCode::Internal, taken),
+		}
+	}
+
+	/// `to` acknowledged a request now tracked, but the table recorded its
+	/// departure while the ack was on its way, so that departure was settled
+	/// without this request: settle it now, as [`Self::settle_departed`]
+	/// would have. Absence from the table alone proves nothing (mDNS loss is
+	/// unauthenticated). Call with the state lock held.
+	fn track_departed_target(&self, st: &mut State, to: &str) {
+		if st.table.contains(to) {
+			return;
+		}
+		let Some(departed) = st.table.held_departure(to).cloned() else {
+			return;
+		};
+		if departed.unlisted {
+			st.suspects.entry(to.to_owned()).or_insert(Suspect {
+				departed,
+				misses: 0,
+				first_miss: None,
+			});
+		} else {
+			self.peer_left(st, &departed);
 		}
 	}
 
@@ -721,6 +779,10 @@ impl MeshNode {
 	/// check in time is dropped the same way. Call with the state lock held.
 	fn settle_departed(&self, st: &mut State) {
 		for departed in st.table.take_departed() {
+			// An ack still on its way settles against the recorded departure.
+			if st.replies.has_inflight(&departed.instance_id) {
+				st.table.hold_departure(departed.clone());
+			}
 			if !st.replies.tracks(&departed.instance_id, Instant::now()) {
 				continue;
 			}
@@ -1171,6 +1233,7 @@ impl MeshNode {
 			st.status = NodeStatus::OFF;
 			let dropped = st.replies.clear();
 			st.suspects.clear();
+			st.table.clear_held_departures();
 			self.emit(Effects { late: None, dropped });
 		}
 		for task in self.background.lock().drain(..) {
@@ -1489,8 +1552,15 @@ impl MeshNode {
 			fetches.spawn(async move { node.fetch_snapshot(&id).await });
 		}
 		for (id, addr) in candidates {
+			// One probe per id: a discovery-triggered one may be running.
+			let Some(slot) = self.claim_verification(&mut self.state.lock(), &id, false) else {
+				continue;
+			};
 			let node = self.arc();
-			fetches.spawn(async move { node.verify_candidate(&id, addr).await });
+			fetches.spawn(async move {
+				let _slot = slot;
+				node.verify_candidate(&id, addr).await;
+			});
 		}
 		while fetches.join_next().await.is_some() {}
 		let changed = {
@@ -1518,14 +1588,19 @@ impl MeshNode {
 					addr:     SocketAddr::new(peer.address, peer.port),
 					hostname: peer.hostname,
 				};
-				let candidate = self
-					.state
-					.lock()
-					.table
-					.mdns_up(&peer.instance_id, ep, now_ms());
-				if let Some(addr) = candidate {
-					let node = self.arc();
-					tokio::spawn(async move { node.verify_candidate(&peer.instance_id, addr).await });
+				// One verification per id at a time and at most
+				// `MAX_CANDIDATES` in all: a re-announce while one runs (or
+				// past the cap) waits for the next refresh round.
+				let claimed = {
+					let mut st = self.state.lock();
+					st.table
+						.mdns_up(&peer.instance_id, ep, now_ms())
+						.and_then(|addr| {
+							Some((addr, self.claim_verification(&mut st, &peer.instance_id, true)?))
+						})
+				};
+				if let Some((addr, slot)) = claimed {
+					tokio::spawn(async move { slot.node.verify_candidate(&slot.id, addr).await });
 				}
 			},
 			DiscoveryEvent::PeerDown { instance_id } => {
@@ -1534,6 +1609,22 @@ impl MeshNode {
 				}
 			},
 		}
+	}
+
+	/// Claims a [`State::verifying`] slot for `id`; `None` when one is taken
+	/// for it, or (`discovery`) when discovery holds [`MAX_CANDIDATES`].
+	/// Refresh claims stay outside that cap, so spoofed announcements cannot
+	/// starve refresh. Call with the state lock held; drop the slot without
+	/// it.
+	fn claim_verification(&self, st: &mut State, id: &str, discovery: bool) -> Option<VerifySlot> {
+		if st.verifying.contains(id) || (discovery && st.discovering >= MAX_CANDIDATES) {
+			return None;
+		}
+		st.verifying.insert(id.to_owned());
+		if discovery {
+			st.discovering += 1;
+		}
+		Some(VerifySlot { node: self.arc(), id: id.to_owned(), discovery })
 	}
 }
 
@@ -1593,15 +1684,23 @@ struct InflightGuard<'a> {
 }
 
 impl<'a> InflightGuard<'a> {
-	fn new(node: &'a MeshNode, inflight: Inflight) -> Self {
-		node.state.lock().replies.begin_inflight(&inflight);
+	/// Marks `inflight`; `st` is `node`'s locked state.
+	fn new(node: &'a MeshNode, st: &mut State, inflight: Inflight) -> Self {
+		st.replies.begin_inflight(&inflight);
 		Self { node, inflight }
 	}
 }
 
 impl Drop for InflightGuard<'_> {
 	fn drop(&mut self) {
-		self.node.state.lock().replies.end_inflight(&self.inflight);
+		let mut st = self.node.state.lock();
+		st.replies.end_inflight(&self.inflight);
+		let peer = match &self.inflight {
+			Inflight::Message(peer, _) | Inflight::Watch(peer) => peer,
+		};
+		if !st.replies.has_inflight(peer) {
+			st.table.release_departure(peer);
+		}
 	}
 }
 

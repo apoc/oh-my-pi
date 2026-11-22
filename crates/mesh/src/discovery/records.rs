@@ -1,7 +1,10 @@
 //! Socket-free mDNS bookkeeping: TXT encoding/parsing, peer filtering,
 //! address choice and change-only event emission.
 
-use std::{collections::HashMap, net::IpAddr};
+use std::{
+	collections::{HashMap, HashSet},
+	net::IpAddr,
+};
 
 use crate::{net::InterfaceAddr, protocol::is_instance_id};
 
@@ -236,6 +239,20 @@ impl PeerTracker {
 			.peers
 			.remove(&fullname.to_ascii_lowercase())
 			.map(|gone| DiscoveryEvent::PeerDown { instance_id: gone.instance_id })
+	}
+
+	/// Forgets every peer whose key (lower-cased fullname) is not in `seen`,
+	/// returning a `PeerDown` for each.
+	pub fn retain_seen(&mut self, seen: &HashSet<String>) -> Vec<DiscoveryEvent> {
+		let mut down = Vec::new();
+		self.peers.retain(|key, peer| {
+			let keep = seen.contains(key);
+			if !keep {
+				down.push(DiscoveryEvent::PeerDown { instance_id: peer.instance_id.clone() });
+			}
+			keep
+		});
+		down
 	}
 
 	/// Forgets every peer, returning a `PeerDown` for each.

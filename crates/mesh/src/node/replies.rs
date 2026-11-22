@@ -421,6 +421,12 @@ impl Replies {
 			.any(|e| !e.done && !e.answered && e.peer == peer && (e.expires_at >= now || e.waiting()))
 	}
 
+	/// Whether a tracked request to `peer` is in flight (sent, its
+	/// acknowledgement not yet tracked).
+	pub fn has_inflight(&self, peer: &str) -> bool {
+		self.inflight_watches.contains_key(peer) || self.inflight_msgs.iter().any(|(p, _)| p == peer)
+	}
+
 	/// `peer` left the mesh: every message to it still unanswered is
 	/// answered with `answer(msgId, thread)` through the usual routes (waiter,
 	/// held slot, late event) and ends; its watches are dropped. Messages it

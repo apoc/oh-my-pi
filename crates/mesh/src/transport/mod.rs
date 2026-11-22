@@ -281,22 +281,27 @@ async fn reply<S: Conn>(stream: &mut S, frame: &[u8]) {
 	.await;
 }
 
-/// How long a busy answer may take, including draining the peer's request.
-const BUSY_LINGER: Duration = Duration::from_secs(1);
+/// How long a refusal may take, including draining the peer's request.
+const REFUSE_LINGER: Duration = Duration::from_secs(1);
+/// Most request bytes a refusal drains: room for a request frame up to twice
+/// the cap, so a peer that sends one over-cap frame is fully read before we
+/// close.
+const REFUSE_DRAIN_LIMIT: usize = 2 * MAX_FRAME_BYTES;
 
-/// Answer [`STATUS_BUSY`], then drain (and discard) the peer's request until
-/// it half-closes or [`BUSY_LINGER`] passes: closing a socket with unread
-/// data sends a reset, which on some stacks (Windows) discards our answer
-/// before the peer reads it.
-async fn refuse_busy<S: Conn>(mut stream: S) {
-	let _ = tokio::time::timeout(BUSY_LINGER, async {
-		if write_frame(&mut stream, &[STATUS_BUSY], 1).await.is_err() {
+/// Answer `status` ([`STATUS_BUSY`] or [`STATUS_TOO_LARGE`]), then drain (and
+/// discard) the peer's request until it half-closes or [`REFUSE_LINGER`]
+/// passes: closing a socket with unread data sends a reset, which discards
+/// our answer before the peer reads it (on some stacks, Windows, always; on
+/// others, whenever the reset races the read).
+async fn refuse<S: Conn>(mut stream: S, status: u8) {
+	let _ = tokio::time::timeout(REFUSE_LINGER, async {
+		if write_frame(&mut stream, &[status], 1).await.is_err() {
 			return;
 		}
 		let _ = stream.shutdown().await;
 		let mut scratch = [0u8; 4096];
 		let mut drained = 0;
-		while drained < MAX_FRAME_BYTES {
+		while drained < REFUSE_DRAIN_LIMIT {
 			match stream.read(&mut scratch).await {
 				Ok(0) | Err(_) => break,
 				Ok(n) => drained += n,
@@ -373,7 +378,7 @@ impl Listener {
 			},
 			move |&(_, peer): &(TcpStream, SocketAddr)| ip_slots.acquire(peer.ip(), per_ip),
 			move |(stream, peer)| serve(stream, peer),
-			|(stream, _)| refuse_busy(stream),
+			|(stream, _)| refuse(stream, STATUS_BUSY),
 		));
 		Self { task }
 	}

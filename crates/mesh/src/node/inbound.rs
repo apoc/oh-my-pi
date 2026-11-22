@@ -26,7 +26,8 @@ pub const RATE_PER_IP_MINUTE: u32 = 180;
 pub const MAX_PENDING: usize = 256;
 /// How long the engine waits for the frontend's `respond`.
 pub const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
-/// Keys tracked per limiter before full buckets are forgotten.
+/// Keys tracked per limiter: full buckets are forgotten first, then the
+/// least recently used.
 const MAX_BUCKETS: usize = 1024;
 
 /// What to do with an envelope that passed transport auth.
@@ -77,10 +78,12 @@ pub fn admit(
 	if env.body == MeshRequest::Snapshot {
 		return Admission::Snapshot;
 	}
-	// Sender first: a sender over its own limit must not drain the IP budget
-	// shared with other instances behind the same address. Rotating ids are
-	// still caught by the IP bucket.
-	if !limits.by_sender.allow(env.from.instance_id.as_str(), now) {
+	// The sender's budget is checked first but spent last: a sender over its
+	// own limit must not drain the IP budget shared with other instances
+	// behind the same address, and ids rotated past the IP limit must not
+	// each take a sender bucket.
+	let sender = env.from.instance_id.as_str();
+	if !limits.by_sender.would_allow(sender, now) {
 		return Admission::Reject(MeshResponse::error(
 			MeshErrorCode::RateLimited,
 			format!("more than {RATE_PER_MINUTE} mesh requests per minute"),
@@ -94,6 +97,7 @@ pub fn admit(
 			format!("more than {RATE_PER_IP_MINUTE} mesh requests per minute from {ip}"),
 		));
 	}
+	limits.by_sender.allow(sender, now);
 	if let MeshRequest::Message { kind, .. } = &env.body
 		&& denied.contains(kind)
 	{
@@ -120,20 +124,37 @@ pub struct RateLimiter<K> {
 }
 
 impl Bucket {
-	/// Refill for the time since the last update (never for a clock going
-	/// back) and return the token count.
-	fn refill(&mut self, now: Instant, capacity: f64, per_sec: f64) -> f64 {
+	/// Token count at `now`: refilled for the time since the last update
+	/// (never for a clock going back).
+	fn level(&self, now: Instant, capacity: f64, per_sec: f64) -> f64 {
 		let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
-		self.tokens = elapsed.mul_add(per_sec, self.tokens).min(capacity);
+		elapsed.mul_add(per_sec, self.tokens).min(capacity)
+	}
+
+	/// Stores [`Self::level`] and returns it.
+	fn refill(&mut self, now: Instant, capacity: f64, per_sec: f64) -> f64 {
+		self.tokens = self.level(now, capacity, per_sec);
 		self.at = self.at.max(now);
 		self.tokens
 	}
 }
 
-impl<K: Hash + Eq> RateLimiter<K> {
+impl<K: Hash + Eq + Clone> RateLimiter<K> {
 	pub fn new(per_minute: u32) -> Self {
 		let capacity = f64::from(per_minute);
 		Self { capacity, per_sec: capacity / 60.0, buckets: HashMap::new() }
+	}
+
+	/// Whether [`Self::allow`] would grant `key` a token now, spending none.
+	pub fn would_allow<Q>(&self, key: &Q, now: Instant) -> bool
+	where
+		K: Borrow<Q>,
+		Q: Hash + Eq + ?Sized,
+	{
+		self
+			.buckets
+			.get(key)
+			.is_none_or(|bucket| bucket.level(now, self.capacity, self.per_sec) >= 1.0)
 	}
 
 	pub fn allow<Q>(&mut self, key: &Q, now: Instant) -> bool
@@ -144,9 +165,7 @@ impl<K: Hash + Eq> RateLimiter<K> {
 		let (capacity, per_sec) = (self.capacity, self.per_sec);
 		if !self.buckets.contains_key(key) {
 			if self.buckets.len() >= MAX_BUCKETS {
-				self
-					.buckets
-					.retain(|_, b| b.refill(now, capacity, per_sec) < capacity);
+				self.make_room(now);
 			}
 			self
 				.buckets
@@ -160,6 +179,26 @@ impl<K: Hash + Eq> RateLimiter<K> {
 		}
 		bucket.tokens -= 1.0;
 		true
+	}
+
+	/// Frees a slot below [`MAX_BUCKETS`]: forgets the full buckets (as
+	/// good as new), else the one updated longest ago.
+	fn make_room(&mut self, now: Instant) {
+		let (capacity, per_sec) = (self.capacity, self.per_sec);
+		self
+			.buckets
+			.retain(|_, b| b.level(now, capacity, per_sec) < capacity);
+		if self.buckets.len() < MAX_BUCKETS {
+			return;
+		}
+		let oldest = self
+			.buckets
+			.iter()
+			.min_by_key(|(_, b)| b.at)
+			.map(|(key, _)| key.clone());
+		if let Some(oldest) = oldest {
+			self.buckets.remove(&oldest);
+		}
 	}
 }
 
@@ -395,6 +434,59 @@ mod tests {
 			admit(&e, Some("10.0.0.8".parse().unwrap()), false, &open, &mut l, now),
 			Admission::Dispatch
 		);
+	}
+
+	#[test]
+	fn ids_rotated_past_the_ip_limit_take_no_sender_buckets() {
+		let now = Instant::now();
+		let open = HashSet::new();
+		let mut l = Limits::default();
+		let ip: IpAddr = "10.0.0.9".parse().unwrap();
+		let rotated = |i: u32| {
+			let mut e = env(OWN, 0, note());
+			e.from.instance_id = format!("{i:016x}");
+			e
+		};
+		for i in 0..RATE_PER_IP_MINUTE {
+			assert_eq!(admit(&rotated(i), Some(ip), false, &open, &mut l, now), Admission::Dispatch);
+		}
+		let known = rotated(0);
+		for i in RATE_PER_IP_MINUTE..RATE_PER_IP_MINUTE * 4 {
+			assert_eq!(
+				code(&admit(&rotated(i), Some(ip), false, &open, &mut l, now)),
+				Some(MeshErrorCode::RateLimited)
+			);
+			admit(&known, Some(ip), false, &open, &mut l, now);
+		}
+		assert_eq!(l.by_sender.buckets.len(), RATE_PER_IP_MINUTE as usize, "only admitted ids");
+		let left = l.by_sender.buckets[known.from.instance_id.as_str()].tokens;
+		assert!(
+			(left - f64::from(RATE_PER_MINUTE - 1)).abs() < f64::EPSILON,
+			"a request the IP limit refused spends none of its sender's budget (left {left})"
+		);
+	}
+
+	#[test]
+	fn limiter_tables_are_bounded_forgetting_full_then_oldest_buckets() {
+		let start = Instant::now();
+		let mut l = RateLimiter::<String>::new(60);
+		assert!(l.allow("full", start));
+		// Spent once each, at distinct times well within a refill.
+		let base = start + Duration::from_secs(2);
+		let at = |i: u64| base + Duration::from_micros(100 * i);
+		for i in 1..MAX_BUCKETS as u64 {
+			assert!(l.allow(&i.to_string(), at(i)));
+		}
+		assert_eq!(l.buckets.len(), MAX_BUCKETS);
+		let later = base + Duration::from_millis(200);
+		assert!(l.allow("new", later));
+		assert_eq!(l.buckets.len(), MAX_BUCKETS);
+		assert!(!l.buckets.contains_key("full"), "a refilled bucket is forgotten first");
+		assert!(l.buckets.contains_key("1"), "while one is full, no spent bucket is");
+		assert!(l.allow("newer", later + Duration::from_millis(100)));
+		assert_eq!(l.buckets.len(), MAX_BUCKETS, "a hard bound with no full bucket");
+		assert!(!l.buckets.contains_key("1"), "the least recently updated goes");
+		assert!(l.buckets.contains_key("2") && l.buckets.contains_key("new"));
 	}
 
 	#[test]

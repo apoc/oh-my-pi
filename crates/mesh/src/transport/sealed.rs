@@ -25,7 +25,8 @@ use parking_lot::Mutex;
 
 use super::{
 	Conn, InboundSink, Origin, OriginKind, REQUEST_READ_TIMEOUT, STATUS_MISDIRECTED, STATUS_OK,
-	STATUS_REJECTED, STATUS_TOO_LARGE, TransportError, dispatch, encode_response, exchange, reply,
+	STATUS_REJECTED, STATUS_TOO_LARGE, TransportError, dispatch, encode_response, exchange, refuse,
+	reply,
 };
 use crate::{
 	error::FrameError,
@@ -72,7 +73,7 @@ pub(super) async fn serve<S: Conn>(mut stream: S, peer: SocketAddr, server: Arc<
 		match read_frame_timeout(&mut stream, MAX_FRAME_BYTES, REQUEST_READ_TIMEOUT).await {
 			Ok(Some(frame)) => frame,
 			Err(FrameError::TooLarge { .. }) => {
-				return reply(&mut stream, &[STATUS_TOO_LARGE]).await;
+				return refuse(stream, STATUS_TOO_LARGE).await;
 			},
 			Ok(None) | Err(_) => return,
 		};

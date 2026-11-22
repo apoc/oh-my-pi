@@ -202,10 +202,13 @@ async fn pipe_served_by_another_process_is_misdirected() {
 	assert_eq!(err, TransportError::Misdirected);
 }
 
+/// The client cap answers before any connection: the endpoint is a closed
+/// listener, so an attempt to contact it would be `Unreachable`.
 #[tokio::test]
 async fn oversize_envelope_is_refused_client_side() {
-	let dir = tempfile::tempdir().unwrap();
-	let (_host, _reg, entry) = mesh_host(dir.path()).await;
+	let listener = lan().await;
+	let endpoint = remote(&listener);
+	listener.close().await;
 	let mut big = note("m1", ME);
 	// Under the text cap per field, over the envelope cap in total.
 	big.body = MeshRequest::Reply {
@@ -214,11 +217,17 @@ async fn oversize_envelope_is_refused_client_side() {
 		text:     "\u{e9}".repeat(MAX_TEXT_CHARS),
 		error:    Some("\u{e9}".repeat(MAX_TEXT_CHARS)),
 	};
-	let got = MeshClient::new(None)
-		.request(&Endpoint::Local(entry), &big, TIMEOUT)
+	let got = MeshClient::new(Some(keys(1)))
+		.request(&endpoint, &big, TIMEOUT)
 		.await
 		.unwrap();
-	assert_eq!(error_code(&got), MeshErrorCode::TooLarge);
+	assert_eq!(
+		got,
+		MeshResponse::error(
+			MeshErrorCode::TooLarge,
+			format!("mesh envelope exceeds {MAX_ENVELOPE_BYTES} bytes")
+		)
+	);
 }
 
 /// Row `too_large` -> `Ok(too_large)`: the host enforces the namespace's body
@@ -407,6 +416,29 @@ async fn oversize_frame_gets_status_without_reading_payload() {
 	let mut stream = TcpStream::connect(listener.addr()).await.unwrap();
 	let declared = u32::try_from(MAX_FRAME_BYTES + 1).unwrap();
 	tokio::io::AsyncWriteExt::write_all(&mut stream, &declared.to_be_bytes())
+		.await
+		.unwrap();
+	let reply = read_frame(&mut stream, 16).await.unwrap();
+	assert_eq!(reply.as_deref(), Some(&[STATUS_TOO_LARGE][..]));
+}
+
+/// A peer that really sends the oversized payload, after the server has
+/// already answered, still reads `too_large`: the server keeps draining
+/// instead of closing with unread data, which would reset the connection and
+/// discard its answer.
+#[tokio::test]
+async fn oversize_frame_with_payload_is_answered_too_large() {
+	let listener = lan().await;
+	let mut stream = TcpStream::connect(listener.addr()).await.unwrap();
+	let payload_len = 2 * MAX_FRAME_BYTES - 8192;
+	let declared = u32::try_from(payload_len).unwrap();
+	tokio::io::AsyncWriteExt::write_all(&mut stream, &declared.to_be_bytes())
+		.await
+		.unwrap();
+	// The server answers on the header alone; the payload follows late and is
+	// too big for the socket buffers, so an early close would fail the write.
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	tokio::io::AsyncWriteExt::write_all(&mut stream, &vec![0u8; payload_len])
 		.await
 		.unwrap();
 	let reply = read_frame(&mut stream, 16).await.unwrap();

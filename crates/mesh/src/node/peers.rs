@@ -278,6 +278,10 @@ pub struct PeerTable {
 	/// now answers with another id (`retain_static` from the static probe),
 	/// evicted mDNS candidates.
 	departed: Vec<Departed>,
+	/// Recorded departures of peers with a tracked request in flight, kept
+	/// for its acknowledgement ([`Self::hold_departure`]); a peer back in the
+	/// table loses its entry, so a later unrecorded removal proves nothing.
+	held:     HashMap<String, Departed>,
 }
 
 impl PeerTable {
@@ -289,6 +293,7 @@ impl PeerTable {
 			next_seq: 0,
 			last_rev: 0,
 			departed: Vec::new(),
+			held:     HashMap::new(),
 		}
 	}
 
@@ -322,6 +327,7 @@ impl PeerTable {
 			if !room {
 				return None;
 			}
+			self.held.remove(id);
 			self.next_seq += 1;
 			self
 				.peers
@@ -343,6 +349,26 @@ impl PeerTable {
 	/// Peers that left since the last call.
 	pub fn take_departed(&mut self) -> Vec<Departed> {
 		std::mem::take(&mut self.departed)
+	}
+
+	/// Keeps a recorded departure for an acknowledgement still on its way.
+	pub fn hold_departure(&mut self, departed: Departed) {
+		self.held.insert(departed.instance_id.clone(), departed);
+	}
+
+	/// The held departure of `id`, if it left (recorded) and has not returned.
+	pub fn held_departure(&self, id: &str) -> Option<&Departed> {
+		self.held.get(id)
+	}
+
+	/// Forgets `id`'s held departure (its last request in flight ended).
+	pub fn release_departure(&mut self, id: &str) {
+		self.held.remove(id);
+	}
+
+	/// Forgets every held departure.
+	pub fn clear_held_departures(&mut self) {
+		self.held.clear();
 	}
 
 	fn listed(&self, id: &str) -> bool {
@@ -532,7 +558,8 @@ impl PeerTable {
 	/// Learns a remote endpoint from an authenticated inbound message. Only
 	/// fills the gap when the peer has no other remote endpoint. A peer still
 	/// unverified asks for another snapshot fetch on every (rate-limited)
-	/// message, so a first fetch answered e.g. `unsupported` is retried.
+	/// message, so a first fetch answered e.g. `unsupported` is retried; a
+	/// changed address is a new route either way.
 	pub fn learn_contact(&mut self, id: &str, addr: SocketAddr, now_ms: u64) -> Change {
 		let Some(peer) = self.entry(id, Admit::Authenticated) else {
 			return Change::NONE;
@@ -544,9 +571,8 @@ impl PeerTable {
 		if peer.contact == Some(addr) {
 			return Change { changed: false, new_endpoint: !peer.verified() };
 		}
-		let first = peer.remote_addr().is_none() && peer.local.is_none();
 		peer.contact = Some(addr);
-		Change { changed: peer.verified(), new_endpoint: first || !peer.verified() }
+		Change { changed: peer.verified(), new_endpoint: true }
 	}
 
 	pub fn clear_remote(&mut self) -> bool {
@@ -1025,6 +1051,25 @@ mod tests {
 		assert!(t.refresh_ids().is_empty(), "unverified peers are not refreshed");
 		t.sweep(start + STALE_REMOVE_AFTER);
 		assert!(!t.contains(P), "aged out");
+	}
+
+	#[test]
+	fn verified_contact_moving_is_a_new_endpoint() {
+		let mut t = PeerTable::new(OWN);
+		t.learn_contact(P, sa("10.0.0.3:9"), 1);
+		assert!(t.snapshot_ok(P, snap(), 1));
+		assert_eq!(
+			t.learn_contact(P, sa("10.0.0.3:9"), 2),
+			Change::NONE,
+			"same address: nothing to refetch"
+		);
+		assert_eq!(
+			t.learn_contact(P, sa("10.0.0.4:9"), 3),
+			Change { changed: true, new_endpoint: true },
+			"moved: refetch the snapshot and the name over the new route"
+		);
+		assert_eq!(t.route(P, false, true), Some(re("10.0.0.4:9")));
+		assert_eq!(t.remote_ip(P), Some(sa("10.0.0.4:9").ip()), "its name is resolved again");
 	}
 
 	fn id(i: usize) -> String {

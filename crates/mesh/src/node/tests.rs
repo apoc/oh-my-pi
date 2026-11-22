@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::*;
+use super::{peers::STALE_REMOVE_AFTER, *};
 use crate::{
 	discovery::MdnsPeer,
 	net::ReverseDnsConfig,
@@ -69,11 +69,16 @@ impl FakeMdns {
 struct Opts {
 	same_machine:    fn(IpAddr) -> bool,
 	respond_timeout: Duration,
+	probe_timeout:   Duration,
 }
 
 impl Default for Opts {
 	fn default() -> Self {
-		Self { same_machine: |ip| ip.is_loopback(), respond_timeout: Duration::from_secs(30) }
+		Self {
+			same_machine:    |ip| ip.is_loopback(),
+			respond_timeout: Duration::from_secs(30),
+			probe_timeout:   Duration::from_secs(2),
+		}
 	}
 }
 
@@ -102,7 +107,7 @@ fn node_on(
 		local_poll:       Duration::from_secs(60),
 		snapshot_refresh: Duration::from_secs(60),
 		respond_timeout:  opts.respond_timeout,
-		probe_timeout:    Duration::from_secs(2),
+		probe_timeout:    opts.probe_timeout,
 	};
 	let opts = NodeOptions { host, host_name: "testhost".into() };
 	(MeshNode::with_seams(opts, tx, seams), rx)
@@ -354,6 +359,78 @@ async fn failed_mdns_candidate_is_retried_and_promoted_later() {
 	.await;
 	a.close().await;
 	b.close().await;
+}
+
+/// A LAN address that accepts connections and never answers: each probe to
+/// it holds its connection until the probe times out. Returns its port, the
+/// connections accepted so far, and the task holding them (abort it to close
+/// them all).
+async fn blackhole() -> (u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+	let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+		.await
+		.unwrap();
+	let port = listener.local_addr().unwrap().port();
+	let accepted = Arc::new(AtomicUsize::new(0));
+	let count = Arc::clone(&accepted);
+	let task = tokio::spawn(async move {
+		let mut held = Vec::new();
+		while let Ok((stream, _)) = listener.accept().await {
+			held.push(stream);
+			count.store(held.len(), Ordering::SeqCst);
+		}
+	});
+	(port, accepted, task)
+}
+
+#[tokio::test]
+async fn spoofed_mdns_announcements_verify_at_most_a_bounded_set_at_once() {
+	let dir = tempfile::tempdir().unwrap();
+	let mdns = Arc::new(FakeMdns::default());
+	let opts =
+		Opts { same_machine: |_| false, probe_timeout: Duration::from_secs(60), ..Opts::default() };
+	let (a, _rx) = node(A, dir.path(), &mdns, opts);
+	a.configure(cfg(MeshMode::Remote, Some(key()), vec![], "a"))
+		.await;
+	let (first_port, first, first_task) = blackhole().await;
+	let (port, accepted, task) = blackhole().await;
+
+	// A re-announce at a new address while the first verification runs
+	// starts no second one.
+	mdns.emit(mdns_peer(B, "127.0.0.1", first_port)).await;
+	eventually("B's verification connected", || first.load(Ordering::SeqCst) == 1).await;
+	mdns.emit(mdns_peer(B, "127.0.0.1", port)).await;
+	mdns.emit(mdns_peer(C, "127.0.0.1", port)).await;
+	eventually("C's verification connected", || accepted.load(Ordering::SeqCst) == 1).await;
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	assert_eq!(accepted.load(Ordering::SeqCst), 1, "B's re-announce verified nothing");
+	assert!(is_candidate(&a, B), "the new address waits for the next refresh");
+
+	// A refresh round skips ids whose verification is running: still one
+	// probe per id.
+	tokio::time::timeout(Duration::from_secs(5), a.refresh_all())
+		.await
+		.expect("nothing left to verify");
+	assert_eq!(accepted.load(Ordering::SeqCst), 1, "no second probe of B or C");
+	assert_eq!(first.load(Ordering::SeqCst), 1);
+	assert_eq!(a.state.lock().discovering, 2);
+
+	// A flood of ids: at most `MAX_CANDIDATES` verifications at once.
+	for i in 0..MAX_CANDIDATES * 3 {
+		mdns
+			.emit(mdns_peer(&format!("{i:016x}"), "127.0.0.1", port))
+			.await;
+	}
+	let cap = MAX_CANDIDATES - 1;
+	eventually("verifications up to the cap", || accepted.load(Ordering::SeqCst) == cap).await;
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	assert_eq!(accepted.load(Ordering::SeqCst), cap, "B's and C's slots included");
+	assert_eq!(a.state.lock().verifying.len(), MAX_CANDIDATES);
+
+	// Finished verifications free their slots.
+	first_task.abort();
+	task.abort();
+	eventually("every slot freed", || a.state.lock().verifying.is_empty()).await;
+	a.close().await;
 }
 
 /// Answers every inbound request on `rx` with `answer` (or never, when None);
@@ -1033,4 +1110,189 @@ async fn requests_to_a_peer_that_left_get_an_error_answer_but_a_flap_does_not() 
 	assert_no_tracking_event(&mut rx_a, "the answered request gets nothing more");
 	a.close().await;
 	b.close().await;
+}
+
+/// `msg_id`'s acknowledgement as B's frontend would send it.
+fn ack_of(msg_id: &str) -> MeshResponse {
+	MeshResponse::Ok(json!({ "accepted": true, "msgId": msg_id, "thread": "t1" }))
+}
+
+const TRACK_REPLY: Option<Expected> =
+	Some(Expected { op: ReplyOp::Reply, tracked: true, ttl: PENDING_TTL });
+
+/// An error answer the engine made up for `B`, last known as `name`, which
+/// left before answering `msg_id`.
+fn assert_departed_answer(env: &MeshEnvelope, msg_id: &str, name: &str) {
+	assert_eq!((env.from.instance_id.as_str(), env.from.display_name.as_str()), (B, name));
+	match &env.body {
+		MeshRequest::Reply { reply_to, error, .. } => {
+			assert_eq!(reply_to, msg_id);
+			assert!(
+				error
+					.as_deref()
+					.is_some_and(|e| e.contains("left the mesh")),
+				"{error:?}"
+			);
+		},
+		other => panic!("not a reply: {other:?}"),
+	}
+}
+
+/// A tracked message to `B` marked in flight, as `request` marks it.
+fn in_flight<'a>(a: &'a MeshNode, msg_id: &str) -> InflightGuard<'a> {
+	InflightGuard::new(a, &mut a.state.lock(), Inflight::Message(B.to_owned(), msg_id.to_owned()))
+}
+
+#[tokio::test]
+async fn ack_from_a_peer_that_left_the_remote_side_is_answered_with_its_departure() {
+	let dir = tempfile::tempdir().unwrap();
+	let (a, mut rx_a) = node(A, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+	a.state.lock().table.learn_contact(B, addr, now_ms());
+	let msg_id = random_hex(12);
+	let inflight = in_flight(&a, &msg_id);
+	// B goes stale and is swept (a recorded departure) while the ack is on its
+	// way.
+	{
+		let mut st = a.state.lock();
+		st.table.contact_failed(B, Instant::now());
+		st.table
+			.sweep(Instant::now() + STALE_REMOVE_AFTER + Duration::from_secs(1));
+		a.settle_departed(&mut st);
+	}
+	let resp = a.on_ack(B, &msg_id, TRACK_REPLY, tracked("t-gone", false), ack_of(&msg_id));
+	drop(inflight);
+	assert_eq!(err_code(&resp), None, "the ack itself is good");
+	let NodeEvent::Reply { ticket, envelope } = next_tracking_event(&mut rx_a).await else {
+		panic!("expected the departure answer");
+	};
+	assert_eq!(ticket, "t-gone");
+	// A contact-only peer has no snapshot: it is named by its id.
+	assert_departed_answer(&envelope, &msg_id, B);
+	assert!(a.state.lock().suspects.is_empty(), "the local side is off: nothing to confirm");
+	assert!(
+		a.state.lock().table.held_departure(B).is_none(),
+		"forgotten with its last request in flight"
+	);
+	a.close().await;
+}
+
+#[tokio::test]
+async fn mdns_loss_during_an_ack_settles_nothing() {
+	let dir = tempfile::tempdir().unwrap();
+	let (a, mut rx_a) = node(A, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+	{
+		let mut st = a.state.lock();
+		let ep = MdnsEndpoint { addr, hostname: "bee.local.".into() };
+		assert_eq!(st.table.mdns_up(B, ep, now_ms()), Some(addr));
+		st.table
+			.promote_mdns(B, addr, Arc::from(bee_snapshot()), now_ms());
+		assert!(st.table.contains(B));
+	}
+	// Tracked long before.
+	let old = random_hex(12);
+	a.on_ack(B, &old, TRACK_REPLY, tracked("t-old", false), ack_of(&old));
+	let msg_id = random_hex(12);
+	let inflight = in_flight(&a, &msg_id);
+	// Anyone on the LAN can send B's mDNS goodbye: B leaves the table without
+	// a recorded departure.
+	a.on_discovery(DiscoveryEvent::PeerDown { instance_id: B.to_owned() });
+	assert!(!a.state.lock().table.contains(B));
+	a.settle_departed(&mut a.state.lock());
+	let resp = a.on_ack(B, &msg_id, TRACK_REPLY, tracked("t-new", false), ack_of(&msg_id));
+	drop(inflight);
+	assert_eq!(err_code(&resp), None);
+	assert_no_tracking_event(&mut rx_a, "an unrecorded removal is no departure");
+	assert_eq!(a.state.lock().replies.len(), 2, "both requests stay tracked");
+	a.close().await;
+}
+
+#[tokio::test]
+async fn a_peer_back_after_its_departure_is_not_settled_by_a_later_mdns_loss() {
+	let dir = tempfile::tempdir().unwrap();
+	let (a, mut rx_a) = node(A, dir.path(), &Arc::new(FakeMdns::default()), Opts::default());
+	let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+	a.state.lock().table.learn_contact(B, addr, now_ms());
+	let msg_id = random_hex(12);
+	let inflight = in_flight(&a, &msg_id);
+	// A recorded departure while the request is in flight...
+	{
+		let mut st = a.state.lock();
+		st.table.contact_failed(B, Instant::now());
+		st.table
+			.sweep(Instant::now() + STALE_REMOVE_AFTER + Duration::from_secs(1));
+		a.settle_departed(&mut st);
+	}
+	// ...then B is back over mDNS, and a spoofable goodbye removes it again.
+	{
+		let mut st = a.state.lock();
+		let ep = MdnsEndpoint { addr, hostname: "bee.local.".into() };
+		assert_eq!(st.table.mdns_up(B, ep, now_ms()), Some(addr));
+		st.table
+			.promote_mdns(B, addr, Arc::from(bee_snapshot()), now_ms());
+	}
+	a.on_discovery(DiscoveryEvent::PeerDown { instance_id: B.to_owned() });
+	a.settle_departed(&mut a.state.lock());
+	let resp = a.on_ack(B, &msg_id, TRACK_REPLY, tracked("t-new", false), ack_of(&msg_id));
+	drop(inflight);
+	assert_eq!(err_code(&resp), None);
+	assert_no_tracking_event(&mut rx_a, "B came back: its old departure no longer counts");
+	assert_eq!(a.state.lock().replies.len(), 1, "the request stays tracked");
+	a.close().await;
+}
+
+#[tokio::test]
+async fn ack_from_a_peer_dropped_by_the_local_listing_settles_once_the_registry_confirms() {
+	let dir = tempfile::tempdir().unwrap();
+	let ((a, mut rx_a), (b, _rx_b)) = local_pair(dir.path()).await;
+
+	// Still listed: tracked as usual (then forgotten, so B's drop below
+	// settles nothing).
+	let present = random_hex(12);
+	a.on_ack(B, &present, TRACK_REPLY, tracked("t-present", false), ack_of(&present));
+	assert!(a.state.lock().suspects.is_empty(), "a listed peer is no suspect");
+	a.forget_pending(&["t-present".into()]);
+
+	// The listing drops B while a request is in flight, then its ack is tracked.
+	let msg_id = random_hex(12);
+	let inflight = in_flight(&a, &msg_id);
+	{
+		let mut st = a.state.lock();
+		st.table.set_local_listing(&[], now_ms());
+		a.settle_departed(&mut st);
+	}
+	let resp = a.on_ack(B, &msg_id, TRACK_REPLY, tracked("t-left", false), ack_of(&msg_id));
+	drop(inflight);
+	assert_eq!(err_code(&resp), None);
+	assert!(a.state.lock().suspects.contains_key(B), "confirmed against the registry first");
+	assert_no_tracking_event(&mut rx_a, "a listing flap answers nothing");
+	let wait = {
+		let a = Arc::clone(&a);
+		let id = msg_id.clone();
+		tokio::spawn(async move { a.await_reply(&id, Duration::from_secs(60)).await })
+	};
+	eventually("waiter registered", || a.state.lock().replies.is_waiting(&msg_id)).await;
+
+	b.close().await;
+	a.confirm_suspects(vec![B.to_owned()]).await;
+	{
+		let mut st = a.state.lock();
+		let suspect = st.suspects.get_mut(B).expect("B is a suspect");
+		let first = suspect.first_miss.expect("missed once");
+		suspect.first_miss = Some(
+			first
+				.checked_sub(a.seams.local_poll + LOCAL_PROBE_TIMEOUT)
+				.expect("clock far enough from its origin"),
+		);
+	}
+	a.confirm_suspects(vec![B.to_owned()]).await;
+	let got = tokio::time::timeout(Duration::from_secs(5), wait)
+		.await
+		.expect("answered long before the wait's timeout")
+		.unwrap()
+		.expect("an answer");
+	// No snapshot of B was fetched: it is named by its id.
+	assert_departed_answer(&got, &msg_id, B);
+	a.close().await;
 }
