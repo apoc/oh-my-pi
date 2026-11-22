@@ -25,8 +25,9 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstanceError {
 	/// Connecting failed, or the connection broke mid-exchange. `code` is the
-	/// errno-style code (`ENOENT`, `ECONNREFUSED`, `EMFILE`, …); only
-	/// `ENOENT` / `ECONNREFUSED` while connecting prove the endpoint dead.
+	/// errno-style code (`ENOENT`, `ECONNREFUSED`, `EMFILE`, …);
+	/// `ENOENT` / `ECONNREFUSED` while connecting suggest the endpoint is
+	/// dead; on Unix the listing confirms it from the endpoint's bind lock.
 	#[error("instance unreachable: {message}")]
 	Unreachable { code: &'static str, message: String },
 	/// The endpoint serves another instance: the host answered `misdirected`,

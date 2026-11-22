@@ -15,18 +15,20 @@
 //!   connect-only, without sending the token.
 //!
 //! Outcomes: an answer or `busy` means alive. Connecting gives `ENOENT` /
-//! `ECONNREFUSED`: dead, the entry is pruned if unchanged (same token and
-//! `createdAt`; a republished entry survives) along with its socket and bind
-//! lock. `misdirected`, a server running as another user, or (Windows) a pipe
+//! `ECONNREFUSED`: dead (on Unix only while no listener holds the endpoint's
+//! `.bind.lock`; a live listener with a full backlog refuses too, and is
+//! skipped), the entry is pruned if unchanged (same token and `createdAt`; a
+//! republished entry survives) along with its socket and bind lock.
+//! `misdirected`, a server running as another user, or (Windows) a pipe
 //! served by another pid: the entry is pruned, the endpoint left alone.
 //! Anything else (timeout, `EMFILE`, other `EACCES`, other answers): skipped,
 //! never pruned.
 //!
 //! Sweeps (Unix sockets live in the directory unless relocated): `*.tmp`
 //! older than [`STALE_TMP_AGE`]; a `<id>-<nonce>.sock` no entry references,
-//! only inside a private directory, while holding its `.bind.lock` (a binder
-//! holds it from bind to listen, and the lock must still be the file at its
-//! path) and only if connecting is refused; a `.bind.lock` without its
+//! only inside a private directory, once its `.bind.lock` can be taken (a
+//! listener holds it from bind for its whole life, and the lock must still be
+//! the file at its path); never by connecting; a `.bind.lock` without its
 //! socket, under the same lock, once older than [`STALE_TMP_AGE`]. A lock
 //! file the sweep had to create is removed again.
 
@@ -153,12 +155,23 @@ pub(crate) enum Verdict {
 	Skip,
 }
 
-/// Verdict for a failed connect.
-pub(crate) fn connect_verdict(failure: &ConnectFailure) -> Verdict {
+/// Verdict for a failed connect to `endpoint`.
+///
+/// `ENOENT` / `ECONNREFUSED` prove death only on Windows. On Unix a live
+/// listener whose accept backlog is full refuses too (macOS/BSD), so death
+/// is decided by its bind lock ([`omp_ipc::endpoint_is_live`]): free means
+/// dead, held or unknown means skip.
+pub(crate) fn connect_verdict(failure: &ConnectFailure, endpoint: &str) -> Verdict {
 	match failure {
 		ConnectFailure::Busy => Verdict::Busy,
 		ConnectFailure::WrongServer => Verdict::Misdirected,
 		ConnectFailure::Io(error) if matches!(error.code(), "ENOENT" | "ECONNREFUSED") => {
+			#[cfg(unix)]
+			if omp_ipc::endpoint_is_live(Path::new(endpoint)) != Some(false) {
+				return Verdict::Skip;
+			}
+			#[cfg(not(unix))]
+			let _ = endpoint;
 			Verdict::Dead
 		},
 		ConnectFailure::Io(_) => Verdict::Skip,
@@ -250,7 +263,7 @@ async fn check(entry: &InstanceEntry, request: Option<ProbeRequest>, timeout: Du
 	tokio::time::timeout(timeout, async {
 		let mut stream = match client::connect(entry, timeout / 2).await {
 			Ok(stream) => stream,
-			Err(failure) => return connect_verdict(&failure),
+			Err(failure) => return connect_verdict(&failure, &entry.endpoint),
 		};
 		let Some(request) = request else {
 			return Verdict::Connected;

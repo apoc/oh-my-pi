@@ -148,10 +148,12 @@ pub struct IpcServer {
 impl IpcServer {
 	/// Bind and listen.
 	///
-	/// Unix: creates the parent dir (0700) if missing; under an exclusive flock
-	/// on `<path>.bind.lock`, rejects EADDRINUSE when a live server answers,
-	/// otherwise replaces the stale socket file; the socket is chmod 0600 before
-	/// `listen()`. Windows: first pipe instance (exists → EADDRINUSE), remote
+	/// Unix: creates the parent dir (0700) if missing and takes an exclusive
+	/// flock on `<path>.bind.lock`, held for the listener's whole life. A lock
+	/// still held after up to 250 ms (a live server), or a server not taking
+	/// the lock that answers at the path, rejects EADDRINUSE; otherwise a stale
+	/// socket file is replaced. The socket is chmod 0600 before `listen()`.
+	/// Windows: first pipe instance (exists → EADDRINUSE), remote
 	/// clients rejected, DACL granting only the current user.
 	/// `onConnection` receives each accepted, peer-verified connection (not yet
 	/// started).
@@ -227,7 +229,7 @@ impl IpcServer {
 		let (task, callback) = {
 			let mut state = self.state.lock();
 			// Unlink while the listener is still open: no other process can
-			// have replaced the file, because its liveness probe still succeeds.
+			// have replaced the file, because this listener holds the bind lock.
 			if let Some(bound) = state.bound.take() {
 				omp_ipc::release(bound);
 			}

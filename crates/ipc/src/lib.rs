@@ -34,7 +34,9 @@ use unix as platform;
 use windows as platform;
 
 #[cfg(unix)]
-pub use self::unix::{BIND_LOCK_SUFFIX, bind_lock_path, sweep_stale, tighten_owned_dir};
+pub use self::unix::{
+	BIND_LOCK_SUFFIX, bind_lock_path, endpoint_is_live, sweep_stale, tighten_owned_dir,
+};
 #[cfg(all(unix, test))]
 use self::unix::{is_private_dir, is_same_file};
 pub use self::{

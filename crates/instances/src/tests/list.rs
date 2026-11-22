@@ -123,11 +123,25 @@ async fn prunes_dead_and_malformed_entries_and_keeps_live_foreign_or_unanswering
 
 #[test]
 fn only_a_refused_or_missing_endpoint_proves_death() {
+	let tmp = tempfile::tempdir().unwrap();
+	let endpoint = tmp.path().join("x.sock");
+	let endpoint = endpoint.to_str().unwrap();
 	let io = |code| ConnectFailure::Io(omp_ipc::IpcError::new(code, "test"));
-	assert!(matches!(connect_verdict(&io("ENOENT")), Verdict::Dead));
-	assert!(matches!(connect_verdict(&io("EMFILE")), Verdict::Skip));
-	assert!(matches!(connect_verdict(&ConnectFailure::Busy), Verdict::Busy));
-	assert!(matches!(connect_verdict(&ConnectFailure::WrongServer), Verdict::Misdirected));
+	assert!(matches!(connect_verdict(&io("ENOENT"), endpoint), Verdict::Dead));
+	assert!(matches!(connect_verdict(&io("ECONNREFUSED"), endpoint), Verdict::Dead));
+	assert!(matches!(connect_verdict(&io("EMFILE"), endpoint), Verdict::Skip));
+	assert!(matches!(connect_verdict(&ConnectFailure::Busy, endpoint), Verdict::Busy));
+	assert!(matches!(connect_verdict(&ConnectFailure::WrongServer, endpoint), Verdict::Misdirected));
+	// Unix: a held bind lock means a listener lives, whatever connect said.
+	#[cfg(unix)]
+	{
+		let lock = std::fs::File::create(format!("{endpoint}.bind.lock")).unwrap();
+		lock.lock().unwrap();
+		assert!(matches!(connect_verdict(&io("ECONNREFUSED"), endpoint), Verdict::Skip));
+		assert!(matches!(connect_verdict(&io("ENOENT"), endpoint), Verdict::Skip));
+		drop(lock);
+		assert!(matches!(connect_verdict(&io("ECONNREFUSED"), endpoint), Verdict::Dead));
+	}
 
 	assert!(matches!(exchange_verdict(Err(InstanceError::Remote("busy".into()))), Verdict::Busy));
 	assert!(matches!(exchange_verdict(Err(InstanceError::Misdirected)), Verdict::Misdirected));
@@ -135,6 +149,31 @@ fn only_a_refused_or_missing_endpoint_proves_death() {
 	// A connection that broke after connecting proves nothing.
 	let mid_exchange = InstanceError::Unreachable { code: "ENOENT", message: String::new() };
 	assert!(matches!(exchange_verdict(Err(mid_exchange)), Verdict::Skip));
+}
+
+/// A live listener can refuse connects (a full accept backlog on macOS/BSD):
+/// while its bind lock is held, its entry and socket survive a listing; once
+/// the lock is free the refusal proves death.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refusing_instance_keeps_its_entry_while_its_bind_lock_is_held() {
+	let tmp = tempfile::tempdir().unwrap();
+	let dir = tmp.path();
+	let stalled = dead_entry(dir, B, &["echo"]);
+	// A socket file nothing listens on: every connect is refused.
+	drop(std::os::unix::net::UnixListener::bind(&stalled.endpoint).unwrap());
+	let lock = std::fs::File::create(format!("{}.bind.lock", stalled.endpoint)).unwrap();
+	lock.lock().unwrap();
+	write_entry(dir, B, &entry_json(&stalled));
+
+	assert!(listed_ids(dir, "echo", None).await.is_empty(), "unanswered, so not listed");
+	assert!(entry_file(dir, B).exists(), "a live instance's entry was pruned");
+	assert!(Path::new(&stalled.endpoint).exists(), "a live instance's socket was swept");
+
+	drop(lock);
+	assert!(listed_ids(dir, "echo", None).await.is_empty());
+	assert!(!entry_file(dir, B).exists(), "a dead instance's entry was kept");
+	assert!(!Path::new(&stalled.endpoint).exists(), "a dead instance's socket was kept");
 }
 
 #[cfg(unix)]
@@ -301,8 +340,8 @@ async fn sweeps_orphan_sockets_and_locks_only_when_provably_dead() {
 	drop(UnixListener::bind(sock(B)).unwrap());
 	std::fs::write(lock(B), b"").unwrap();
 	age(&lock(B));
-	// Listening without an entry yet (between bind and the entry write): kept.
-	let _live = UnixListener::bind(sock(C)).unwrap();
+	// Listening (holding its bind lock) without an entry yet: kept.
+	let (_live, _live_bound) = omp_ipc::listen(sock(C).to_str().unwrap()).await.unwrap();
 	// Dead, but a binder holds the lock (between bind and listen): kept.
 	drop(UnixListener::bind(sock(D)).unwrap());
 	let held = std::fs::File::create(lock(D)).unwrap();
@@ -319,8 +358,14 @@ async fn sweeps_orphan_sockets_and_locks_only_when_provably_dead() {
 
 	assert!(listed_ids(dir, "echo", None).await.is_empty());
 	let name = |path: PathBuf| path.file_name().unwrap().to_str().unwrap().to_owned();
-	let mut expected =
-		vec![name(sock(C)), name(sock(D)), name(lock(D)), name(fresh), "other.sock".to_owned()];
+	let mut expected = vec![
+		name(sock(C)),
+		name(lock(C)),
+		name(sock(D)),
+		name(lock(D)),
+		name(fresh),
+		"other.sock".to_owned(),
+	];
 	expected.sort();
 	assert_eq!(names_in(dir), expected);
 	drop(held);
