@@ -871,6 +871,10 @@ export class Settings {
 	#layerGeneration = 0;
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
+	/** Observers of rebuilds of any layer {@link grantAuthority} reads ({@link onAuthorityLayersChange}). */
+	#authorityListeners = new Set<() => void>();
+	/** Weak forwarders of this instance's rebuilds to its overlays' {@link onAuthorityLayersChange} observers. */
+	#childAuthorityForwarders = new Set<() => void>();
 
 	/**
 	 * `projection`: a derived read-only view of another instance ({@link grantAuthority}), not a
@@ -1038,6 +1042,15 @@ export class Settings {
 			target.#applyParentChange(setting);
 		};
 		this.#childForwarders.add(forward);
+		const forwardAuthority = () => {
+			const target = ref.deref();
+			if (!target) {
+				this.#childAuthorityForwarders.delete(forwardAuthority);
+				return;
+			}
+			target.#notifyAuthorityListeners();
+		};
+		this.#childAuthorityForwarders.add(forwardAuthority);
 		return child;
 	}
 
@@ -1192,6 +1205,30 @@ export class Settings {
 		return () => {
 			this.#layerListeners.delete(listener);
 		};
+	}
+
+	/**
+	 * Calls `listener` synchronously after every rebuild of a layer {@link grantAuthority} reads:
+	 * this instance's own and every overlay parent's (forwarded weakly, as {@link overlay} children
+	 * are). Returns the unsubscribe.
+	 */
+	onAuthorityLayersChange(listener: () => void): () => void {
+		this.#authorityListeners.add(listener);
+		return () => {
+			this.#authorityListeners.delete(listener);
+		};
+	}
+
+	/** Tells this instance's and its overlays' {@link onAuthorityLayersChange} observers. */
+	#notifyAuthorityListeners(): void {
+		for (const listener of Array.from(this.#authorityListeners)) {
+			try {
+				listener();
+			} catch (error) {
+				logger.warn("Settings: authority-layer listener failed", { error: String(error) });
+			}
+		}
+		for (const forward of Array.from(this.#childAuthorityForwarders)) forward();
 	}
 
 	/** Replays `write` on the main instance behind this mirror and adopts the resulting state. */
@@ -4446,7 +4483,6 @@ export class Settings {
 	#rebuildMerged(): void {
 		this.#remerge();
 		this.#layerGeneration++;
-		if (this.#layerListeners.size === 0) return;
 		for (const listener of Array.from(this.#layerListeners)) {
 			try {
 				listener();
@@ -4454,6 +4490,7 @@ export class Settings {
 				logger.warn("Settings: layer-change listener failed", { error: String(error) });
 			}
 		}
+		this.#notifyAuthorityListeners();
 	}
 
 	/** Rebuilds the merged view from the own layers over the parent's current view. */

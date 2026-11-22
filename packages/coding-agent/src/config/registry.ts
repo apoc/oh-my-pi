@@ -299,6 +299,14 @@ export abstract class Derived<T> {
 		return cached.value as T;
 	}
 
+	/**
+	 * Registry plumbing behind {@link listen} and {@link effect}: calls `notify` synchronously
+	 * whenever this value may have changed in `settings`. Returns the unsubscribe.
+	 */
+	subscribe(settings: Settings, notify: () => void): () => void {
+		return settings.onEffectiveChange(this.sources, notify);
+	}
+
 	/** Derives a memoized value from this one. */
 	map<U>(fn: (value: T) => U): Derived<U> {
 		return new MappedValue(this, fn);
@@ -324,7 +332,7 @@ export abstract class Derived<T> {
 		let current = this.get(settings);
 		let queued = false;
 		let active = true;
-		const stop = settings.onEffectiveChange(sources, () => {
+		const stop = this.subscribe(settings, () => {
 			if (queued) return;
 			queued = true;
 			// One recompute per microtask, however many inputs a bulk reload touched.
@@ -414,6 +422,10 @@ class MappedValue<S, T> extends Derived<T> {
 	compute(inputs: readonly unknown[]): T {
 		return this.#fn(inputs[0] as S);
 	}
+
+	override subscribe(settings: Settings, notify: () => void): () => void {
+		return this.#source.subscribe(settings, notify);
+	}
 }
 
 class OperatorValue<T> extends Derived<T> {
@@ -435,13 +447,28 @@ class OperatorValue<T> extends Derived<T> {
 	compute(inputs: readonly unknown[]): T {
 		return inputs[0] as T;
 	}
+
+	/**
+	 * Also fires on rebuilds of the layers {@link Settings.grantAuthority} reads: while a project
+	 * layer shadows the source, an operator write leaves the merged value unchanged and would
+	 * otherwise notify nobody.
+	 */
+	override subscribe(settings: Settings, notify: () => void): () => void {
+		const stopSource = this.#source.subscribe(settings, notify);
+		const stopLayers = settings.onAuthorityLayersChange(notify);
+		return () => {
+			stopSource();
+			stopLayers();
+		};
+	}
 }
 
 /**
  * `source` as the operator configured it ({@link Settings.grantAuthority}: global, `--config` and
  * runtime layers, never a project layer), for settings a repository must not control because the
- * agent can write its settings files. Listeners and effects fire when the merged value changes, so
- * pair it with a settings-panel condition that hides the row while a project layer supplies it.
+ * agent can write its settings files. Listeners and effects also fire on operator-layer writes a
+ * project layer shadows. Pair it with a settings-panel condition that hides the row while a project
+ * layer supplies it, since the panel shows the merged value.
  */
 export function operatorValue<T>(source: Derived<T>): Derived<T> {
 	return new OperatorValue(source);
@@ -478,6 +505,13 @@ class CombinedValue<R extends Record<string, Derived<unknown>>, T> extends Deriv
 		const values: Record<string, unknown> = {};
 		for (let i = 0; i < this.#keys.length; i++) values[this.#keys[i]] = inputs[i];
 		return this.#fn(values as DerivedValues<R>);
+	}
+
+	override subscribe(settings: Settings, notify: () => void): () => void {
+		const stops = this.#parts.map(part => part.subscribe(settings, notify));
+		return () => {
+			for (const stop of stops) stop();
+		};
 	}
 }
 
@@ -943,7 +977,7 @@ class SettingEffect<T> implements EffectEntry {
 		// may visit that new entry too, but must not subscribe or apply it twice.
 		if (this.#stop) return;
 		let current = this.#value.get(settings);
-		this.#stop = settings.onEffectiveChange(this.#value.sources, () => {
+		this.#stop = this.#value.subscribe(settings, () => {
 			const next = this.#value.get(settings);
 			if (settingValuesEqual(next, current)) return;
 			current = next;
