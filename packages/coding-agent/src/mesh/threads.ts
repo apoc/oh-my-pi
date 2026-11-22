@@ -56,6 +56,27 @@ export interface MeshThreadHost {
 const THREAD_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 /** Remembered expired ids, so a late follow-up hears `thread_expired` rather than `unknown_thread`. */
 const MAX_EXPIRED_IDS = 4096;
+/** Unanswered (queued or running) turns one peer instance may hold across its threads. */
+export const MESH_MAX_UNANSWERED_PER_PEER = 8;
+/** Unanswered turns across all peers (instance ids are self-claimed, so the per-peer cap alone does not bound them). */
+export const MESH_MAX_UNANSWERED_TOTAL = 32;
+/** Turns one thread may hold; past it the peer starts a new thread (each turn rewrites the whole record). */
+export const MESH_MAX_TURNS_PER_THREAD = 32;
+/** Live thread records (answered ones included) one peer instance may hold; past it the oldest idle ones are evicted. */
+export const MESH_MAX_THREADS_PER_PEER = 64;
+/** Live thread records across all peers; past it the oldest idle ones are evicted. */
+export const MESH_MAX_THREADS_TOTAL = 512;
+
+/** A question refused by a store bound; `code` and `message` are safe to show the asking peer. */
+export class MeshThreadLimitError extends Error {
+	constructor(
+		readonly code: Extract<MeshErrorCode, "busy" | "bad_request" | "thread_expired">,
+		message: string,
+	) {
+		super(message);
+		this.name = "MeshThreadLimitError";
+	}
+}
 
 const peerSchema = type({
 	instanceId: "string",
@@ -94,6 +115,15 @@ function isValidMeshThreadId(id: string): boolean {
 function recordFileName(threadId: string): string {
 	// The prefix also prevents Windows device names (CON, NUL, etc.).
 	return `entry-${threadId}.json`;
+}
+
+function isTurnInFlight(turn: MeshThreadTurn): boolean {
+	return turn.status === "queued" || turn.status === "running";
+}
+
+/** Whether a turn of `record` still waits for its answer (such a thread never expires or gets evicted). */
+function isInFlight(record: MeshThreadRecord): boolean {
+	return record.turns.some(isTurnInFlight);
 }
 
 function digest(content: string | Uint8Array): string {
@@ -184,10 +214,16 @@ export class MeshThreadStore {
 			.sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
-	/** Start a thread with its first question (status `queued`). */
+	/**
+	 * Start a thread with its first question (status `queued`).
+	 * @throws {MeshThreadLimitError} `busy` when too many questions are unanswered; nothing is created.
+	 */
 	async create(kind: MeshThreadKind, peer: MeshSender, msgId: string, question: string): Promise<MeshThreadRecord> {
 		await this.#ready;
 		this.#sweep();
+		// No await between this check and the insert below: concurrent arrivals cannot slip past the cap.
+		this.#admit(peer.instanceId);
+		this.#makeRoom(peer.instanceId);
 		const now = Date.now();
 		const record: MeshThreadRecord = {
 			threadId: Snowflake.next(),
@@ -203,15 +239,78 @@ export class MeshThreadStore {
 		return record;
 	}
 
-	/** Queue a follow-up question on an existing thread; returns the new turn's index. */
+	/**
+	 * Queue a follow-up question on an existing thread; returns the new turn's index.
+	 * @throws {MeshThreadLimitError} `thread_expired` when the thread is no longer live, `bad_request` when it
+	 * is full, `busy` when too many questions are unanswered; the record is left unchanged.
+	 */
 	appendTurn(threadId: string, msgId: string, question: string): number {
 		const record = this.#records.get(threadId);
-		if (!record) throw new Error(`Unknown thread ${threadId}.`);
+		// A concurrent arrival may have evicted the thread (or a session switch dropped it) since the caller's lookup.
+		if (!record) throw new MeshThreadLimitError("thread_expired", `Thread ${threadId} expired.`);
+		if (record.turns.length >= MESH_MAX_TURNS_PER_THREAD) {
+			throw new MeshThreadLimitError(
+				"bad_request",
+				`Thread ${threadId} is full (${MESH_MAX_TURNS_PER_THREAD} turns); start a new thread.`,
+			);
+		}
+		this.#admit(record.peer.instanceId);
 		const now = Date.now();
 		record.turns.push({ msgId, question, status: "queued", createdAt: now, updatedAt: now });
 		record.updatedAt = now;
 		this.#persist(record);
 		return record.turns.length - 1;
+	}
+
+	/** Refuse a new unanswered turn from `peerInstanceId` while the per-peer or total cap is reached. */
+	#admit(peerInstanceId: string): void {
+		let total = 0;
+		let own = 0;
+		for (const record of this.#records.values()) {
+			for (const turn of record.turns) {
+				if (!isTurnInFlight(turn)) continue;
+				total++;
+				if (record.peer.instanceId === peerInstanceId) own++;
+			}
+		}
+		if (own >= MESH_MAX_UNANSWERED_PER_PEER) {
+			throw new MeshThreadLimitError(
+				"busy",
+				"Too many unanswered questions from this instance; wait for an answer.",
+			);
+		}
+		if (total >= MESH_MAX_UNANSWERED_TOTAL) {
+			throw new MeshThreadLimitError("busy", "Too many unanswered questions on this instance; try again later.");
+		}
+	}
+
+	/**
+	 * Make room for one more record: past the per-peer or total record cap the oldest records without an
+	 * unanswered turn are evicted (files removed). Nothing is evicted unless the cap can be met.
+	 * @throws {MeshThreadLimitError} `busy` when every record that would have to go still has a turn in flight.
+	 */
+	#makeRoom(peerInstanceId: string): void {
+		const idle = Array.from(this.#records.values())
+			.filter(record => !isInFlight(record))
+			.sort((a, b) => a.updatedAt - b.updatedAt);
+		let own = 0;
+		for (const record of this.#records.values()) if (record.peer.instanceId === peerInstanceId) own++;
+		const evict = new Set<MeshThreadRecord>();
+		for (const record of idle) {
+			if (own - evict.size < MESH_MAX_THREADS_PER_PEER) break;
+			if (record.peer.instanceId === peerInstanceId) evict.add(record);
+		}
+		if (own - evict.size >= MESH_MAX_THREADS_PER_PEER) {
+			throw new MeshThreadLimitError("busy", "Too many threads from this instance; wait for answers.");
+		}
+		for (const record of idle) {
+			if (this.#records.size - evict.size < MESH_MAX_THREADS_TOTAL) break;
+			evict.add(record);
+		}
+		if (this.#records.size - evict.size >= MESH_MAX_THREADS_TOTAL) {
+			throw new MeshThreadLimitError("busy", "Too many threads on this instance; try again later.");
+		}
+		for (const record of evict) this.#expire(record, true);
 	}
 
 	/** Patch a turn; a no-op once the thread expired (session switch / TTL). */
@@ -277,7 +376,7 @@ export class MeshThreadStore {
 	}
 
 	#isStale(record: MeshThreadRecord): boolean {
-		const busy = record.turns.some(turn => turn.status === "queued" || turn.status === "running");
+		const busy = isInFlight(record);
 		return !busy && Date.now() - record.updatedAt > this.#ttlMs();
 	}
 

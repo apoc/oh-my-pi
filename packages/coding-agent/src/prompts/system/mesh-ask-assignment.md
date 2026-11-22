@@ -3,16 +3,16 @@ Mesh peer `{{from}}` (host `{{host}}`) asks about this session.
 
 Earlier exchanges in this thread, oldest first:
 {{#each history}}
-<question>
+<mesh-question>
 {{question}}
-</question>
-<answer>
+</mesh-question>
+<mesh-answer>
 {{answer}}
-</answer>
+</mesh-answer>
 {{/each}}
 {{/if}}
 
 Answer this question:
-<question>
+<mesh-question>
 {{question}}
-</question>
+</mesh-question>

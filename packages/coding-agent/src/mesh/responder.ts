@@ -16,7 +16,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { runBtwTurn } from "../session/btw-turn";
-import { meshPeerText } from "./text";
+import { meshPeerField, meshPeerText } from "./text";
 import { getBundledAgent, parseAgent } from "../task/agents";
 import { runSubagentFollowUpTurn } from "../task/executor";
 import { runStructuredSubagent } from "../task/structured-subagent";
@@ -57,6 +57,38 @@ function replayHistory(record: MeshThreadRecord, turnIndex: number) {
 	}));
 }
 
+const ASSIGNMENT_TEMPLATES = { ask: meshAskAssignmentTemplate, task: meshTaskAssignmentTemplate } as const;
+
+/**
+ * Assignment of a fresh `kind` responder for `record`'s turn `turnIndex`, with the thread's earlier
+ * exchanges replayed. Sender fields stay on one line; every peer or answer text sits inside a
+ * `mesh-*` fence it cannot close.
+ */
+export function renderMeshAssignment(kind: "ask" | "task", record: MeshThreadRecord, turnIndex: number): string {
+	return prompt.render(ASSIGNMENT_TEMPLATES[kind], {
+		from: meshPeerField(record.peer.displayName),
+		host: meshPeerField(record.peer.host),
+		history: replayHistory(record, turnIndex),
+		question: meshPeerText(record.turns[turnIndex]!.question),
+	});
+}
+
+/** Turn `turnIndex` of `record` sent to its kept-alive responder. */
+export function renderMeshFollowup(record: MeshThreadRecord, turnIndex: number): string {
+	return prompt.render(meshFollowupTemplate, {
+		from: meshPeerField(record.peer.displayName),
+		question: meshPeerText(record.turns[turnIndex]!.question),
+	});
+}
+
+/** A `status` question from `record`'s peer, as the side-channel user prompt. */
+export function renderMeshStatusQuestion(record: MeshThreadRecord, question: string): string {
+	return prompt.render(meshStatusUserTemplate, {
+		from: meshPeerField(record.peer.displayName),
+		question: meshPeerText(question),
+	});
+}
+
 export class MeshResponder implements MeshAnswerer {
 	readonly #session: AgentSession;
 
@@ -77,7 +109,6 @@ export class MeshResponder implements MeshAnswerer {
 	}
 
 	async #answerStatus(record: MeshThreadRecord, turnIndex: number, signal: AbortSignal): Promise<MeshResponderResult> {
-		const from = meshPeerText(record.peer.displayName);
 		const { replyText } = await runBtwTurn(this.#session, {
 			question: record.turns[turnIndex]!.question,
 			history: meshThreadHistory(record, turnIndex).map(turn => ({
@@ -90,7 +121,7 @@ export class MeshResponder implements MeshAnswerer {
 			conversationKey: meshConversationKey(record, turnIndex),
 			onTextDelta: () => {},
 			signal,
-			renderQuestion: question => prompt.render(meshStatusUserTemplate, { from, question: meshPeerText(question) }),
+			renderQuestion: question => renderMeshStatusQuestion(record, question),
 		});
 		return { text: replyText };
 	}
@@ -122,10 +153,9 @@ export class MeshResponder implements MeshAnswerer {
 		const forkLeafId = sessionManager.getLeafId();
 		const result = await this.#spawn(
 			agent,
-			meshAskAssignmentTemplate,
+			renderMeshAssignment("ask", record, turnIndex),
 			"MeshAsk",
-			record,
-			turnIndex,
+			record.threadId,
 			signal,
 			sourceFile,
 		);
@@ -140,7 +170,13 @@ export class MeshResponder implements MeshAnswerer {
 			const text = await this.#continue(forkAgentId, agent, record, turnIndex, signal);
 			if (text !== undefined) return { text, responder: { forkAgentId } };
 		}
-		const result = await this.#spawn(agent, meshTaskAssignmentTemplate, "MeshTask", record, turnIndex, signal);
+		const result = await this.#spawn(
+			agent,
+			renderMeshAssignment("task", record, turnIndex),
+			"MeshTask",
+			record.threadId,
+			signal,
+		);
 		return { text: resultText(result), responder: { forkAgentId: result.id } };
 	}
 
@@ -161,38 +197,29 @@ export class MeshResponder implements MeshAnswerer {
 		const result = await runSubagentFollowUpTurn({
 			id,
 			agent,
-			message: prompt.render(meshFollowupTemplate, {
-				from: meshPeerText(record.peer.displayName),
-				question: meshPeerText(record.turns[turnIndex]!.question),
-			}),
+			message: renderMeshFollowup(record, turnIndex),
 			artifactsDir: this.#responderDir(record.threadId),
 			signal,
 		});
 		return resultText(result);
 	}
 
-	/** Spawn a responder for `record`'s turn `turnIndex`, assigned through `template` with the peer's text sanitized. */
+	/** Spawn a responder for thread `threadId` with its rendered `assignment`. */
 	async #spawn(
 		agent: AgentDefinition,
-		template: string,
+		assignment: string,
 		label: string,
-		record: MeshThreadRecord,
-		turnIndex: number,
+		threadId: string,
 		signal: AbortSignal,
 		forkSourceFile?: string,
 	): Promise<SingleResult> {
 		const toolSession = this.#session.toolSession;
 		if (!toolSession) throw new MeshPeerError("This instance cannot run mesh responders.");
-		const artifactsDir = this.#responderDir(record.threadId);
+		const artifactsDir = this.#responderDir(threadId);
 		const { result } = await runStructuredSubagent({
 			session: toolSession,
 			invocationKind: "task",
-			assignment: prompt.render(template, {
-				from: meshPeerText(record.peer.displayName),
-				host: meshPeerText(record.peer.host),
-				history: replayHistory(record, turnIndex),
-				question: meshPeerText(record.turns[turnIndex]!.question),
-			}),
+			assignment,
 			agentDefinition: agent,
 			// A peer-triggered read-only fork must not become a URL fetcher (localhost, LAN) or a web
 			// search proxy; the restrictions bind every scout it spawns, which stays confined to the source too.

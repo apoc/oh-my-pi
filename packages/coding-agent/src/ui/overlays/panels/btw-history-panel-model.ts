@@ -73,7 +73,7 @@ export interface BtwHistoryTexts {
 	readonly listLabel: string;
 }
 
-export const BTW_HISTORY_TEXTS: BtwHistoryTexts = {
+const BTW_HISTORY_TEXTS: BtwHistoryTexts = {
 	heading: "BTW history",
 	role: "omp.overlay.btwHistory",
 	emptyTitle: "No side questions yet",
@@ -105,7 +105,7 @@ export interface BtwHistoryOptions {
 		signal: AbortSignal,
 		images?: ImageContent[],
 	) => Promise<boolean>;
-	/** Read a clipboard image into the follow-up (terminals send an empty paste for one). */
+	/** Read a clipboard image into the follow-up (terminals send an empty paste for one); unset, the sheet takes no images. */
 	readonly onPasteImage?: () => Promise<unknown>;
 	/** Attach a pasted image (or video) path to the follow-up; what it cannot attach comes back as a paste. */
 	readonly onPasteImagePath?: (path: string) => Promise<void>;
@@ -127,6 +127,11 @@ export interface BtwHistoryOptions {
 	 * resolve true once accepted (the composer closes), false (or a throw) keeps the draft.
 	 */
 	readonly onStart?: (question: string, signal: AbortSignal) => Promise<boolean>;
+	/**
+	 * Show answers as plain wrapped text, never markdown, natively and in the terminal: for answers
+	 * written by someone else (a mesh peer), whose links must not be live.
+	 */
+	readonly plainAnswers?: boolean;
 	readonly inject?: BtwHistoryInject;
 	/** The inject key (`alt+i`). */
 	readonly injectKey?: string;
@@ -271,6 +276,11 @@ export class BtwHistoryModel implements DictationTarget {
 
 	get injectKey(): string {
 		return this.options.injectKey ?? "alt+i";
+	}
+
+	/** The composer's prompt: a new topic asks, a follow-up follows up. */
+	get composerPrompt(): string {
+		return this.composer?.recordId === undefined ? "Ask: " : "Follow up: ";
 	}
 
 	update(records: readonly BtwHistoryRecord[]): void {
@@ -508,10 +518,11 @@ export class BtwHistoryModel implements DictationTarget {
 		return true;
 	}
 
-	/** Attach an image to the follow-up; its `[Image #N, WxH]` marker to type, or undefined while none can take it (a new topic takes none). */
+	/** Attach an image to the follow-up; its `[Image #N, WxH]` marker to type, or undefined while none can take it (a new topic, or a host taking no images). */
 	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
 		const composer = this.composer;
-		if (!composer || composer.recordId === undefined || this.followUpPending) return undefined;
+		if (!composer || composer.recordId === undefined || this.followUpPending || !this.options.onPasteImage)
+			return undefined;
 		composer.images.push(image);
 		return formatVisionMarker("image", composer.images.length, dims);
 	}

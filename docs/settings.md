@@ -1048,13 +1048,13 @@ The `tree` segment (in no preset; add it yourself) shows where the session sits 
 
 ### Mesh
 
-[Mesh](./mesh.md) settings. Changes apply live to running hosts.
+[Mesh](./mesh.md) settings. Changes apply live to running hosts. `mesh.enabled`, `mesh.mode`, `mesh.key`, `mesh.port`, `mesh.peers` and the `mesh.inbound.*` policies are operator-only: they are read from global config, `--config` files and runtime overrides, never from a project's `.omp/config.yml`, and the settings panel hides their row while a project layer sets it.
 
 | Key                      | Type    | Default | Values                                                                                                                         |
 | ------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `mesh.enabled`           | boolean | `false` | Join the mesh (interactive, RPC and ACP hosts); enables `/mesh`, `mesh_peers`, `mesh_send` and `mesh://`.                      |
 | `mesh.mode`              | enum    | `local` | `local` (same PC, same user; no network listener), `remote` (LAN via mDNS; needs `mesh.key`), `both`.                          |
-| `mesh.key`               | string  | empty   | Credential: key derived from the key phrase by `/mesh` → `k` or `omp mesh set-key`. The phrase is never stored.                |
+| `mesh.key`               | string  | empty   | Credential: key derived from the key phrase by `/mesh` → `k` or `omp mesh set-key` (43-character unpadded base64url). The phrase is never stored; a phrase entered here is rejected. |
 | `mesh.displayName`       | string  | empty   | Name shown to peers; empty falls back to `collab.displayName`, then `user@host`.                                               |
 | `mesh.port`              | number  | `0`     | TCP port of the LAN listener, 0–65535; `0` picks a free port.                                                                  |
 | `mesh.peers`             | array   | `[]`    | `host:port` endpoints dialed directly when mDNS cannot reach them; never same-machine filtered.                                |

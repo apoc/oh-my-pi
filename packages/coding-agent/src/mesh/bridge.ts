@@ -9,7 +9,7 @@ import meshReplyTemplate from "../prompts/system/mesh-reply.md" with { type: "te
 import meshWatchEventTemplate from "../prompts/system/mesh-watch-event.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import type { CustomMessagePayload } from "../session/messages";
-import { meshPeerText } from "./text";
+import { meshPeerField, meshPeerJsonField, meshPeerText } from "./text";
 import type { MeshMessageKind, MeshSender, MeshWatchEvent } from "./wire";
 
 export const MESH_INCOMING_MESSAGE_TYPE = "mesh:incoming";
@@ -56,12 +56,16 @@ export async function deliverMeshMessage(target: MeshDeliveryTarget, message: Cu
 	await target.sendCustomMessage(message, { deliverAs: "aside" });
 }
 
+/**
+ * Inline sender fields of an envelope's header line; each stays on one line inside its backticks.
+ * The instance id also fills a JSON string in the reply instructions.
+ */
 function senderFields(from: MeshSender) {
 	return {
-		from: meshPeerText(from.displayName),
-		instanceId: meshPeerText(from.instanceId),
-		host: meshPeerText(from.host),
-		agent: meshPeerText(from.agentId),
+		from: meshPeerField(from.displayName),
+		instanceId: meshPeerJsonField(from.instanceId),
+		host: meshPeerField(from.host),
+		agent: meshPeerField(from.agentId),
 	};
 }
 
@@ -75,7 +79,7 @@ export function buildMeshIncomingMessage(args: {
 		customType: MESH_INCOMING_MESSAGE_TYPE,
 		content: prompt.render(meshIncomingTemplate, {
 			...senderFields(args.from),
-			msgId: meshPeerText(args.msgId),
+			msgId: meshPeerJsonField(args.msgId),
 			message: meshPeerText(args.text),
 		}),
 		display: true,
@@ -98,11 +102,11 @@ export function buildMeshReplyMessage(args: {
 		customType: MESH_REPLY_MESSAGE_TYPE,
 		content: prompt.render(meshReplyTemplate, {
 			...senderFields(args.from),
-			replyTo: meshPeerText(args.replyTo),
-			thread: args.thread ? meshPeerText(args.thread) : "",
+			replyTo: meshPeerField(args.replyTo),
+			thread: args.thread ? meshPeerJsonField(args.thread) : "",
 			message: meshPeerText(args.text),
 			error: args.error ? meshPeerText(args.error) : "",
-			originalAgent: args.originalAgent ? meshPeerText(args.originalAgent) : "",
+			originalAgent: args.originalAgent ? meshPeerField(args.originalAgent) : "",
 		}),
 		display: false,
 		details: {
@@ -130,10 +134,10 @@ export function buildMeshWatchEventMessage(args: {
 		customType: MESH_WATCH_MESSAGE_TYPE,
 		content: prompt.render(meshWatchEventTemplate, {
 			...senderFields(args.from),
-			watchId: meshPeerText(args.watchId),
-			event: args.event,
+			watchId: meshPeerField(args.watchId),
+			event: meshPeerField(args.event),
 			detail: args.detail ? meshPeerText(args.detail) : "",
-			originalAgent: args.originalAgent ? meshPeerText(args.originalAgent) : "",
+			originalAgent: args.originalAgent ? meshPeerField(args.originalAgent) : "",
 		}),
 		display: false,
 		details: {

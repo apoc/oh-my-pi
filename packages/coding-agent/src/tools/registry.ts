@@ -318,6 +318,8 @@ export interface ToolSession {
 	readonly forkSourceArtifactsDir?: string;
 	/** Confined forks: the source session file; every subagent the fork spawns is confined to it too. */
 	readonly forkSource?: string;
+	/** Confined forks: the source session's id, naming its `local://` root when that sits under the temp dir. */
+	readonly forkSourceSessionId?: string;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**

@@ -7,7 +7,23 @@ import type { MeshSender } from "../../../../src/mesh/wire";
 import { createTuiMeshUiHooks } from "../../../../src/modes/components/mesh/mesh-ui-hooks";
 import { UiHelpers } from "../../../../src/modes/utils/ui-helpers";
 import type { CustomMessage } from "../../../../src/session/transcript/messages";
+import type { TranscriptBlock } from "../../../../src/ui/shell";
 import { createInteractiveModeContext, renderTranscript } from "../../../helpers/interactive-mode-context";
+
+interface Described {
+	k: string;
+	p?: { text?: string };
+	c?: Described[];
+}
+
+function collect(node: Described, out: Described[] = []): Described[] {
+	out.push(node);
+	for (const child of node.c ?? []) collect(child, out);
+	return out;
+}
+
+/** A peer-supplied Markdown link: on a mesh card it must stay inert text. */
+const LINK_BODY = "see [docs](https://evil.example) now";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -78,23 +94,52 @@ describe("mesh transcript cards", () => {
 	});
 
 	it("strips terminal escapes and bidi controls from every peer string, rebuilt and live", () => {
-		const { ctx, helpers, rows } = context();
+		const { ctx, helpers } = context();
 		const sender = { instanceId: "i", agentId: "Main", displayName: `Eve${HOSTILE}`, host: `h${HOSTILE}` };
-		const [block] = helpers.addMessageToChat(
+		const nativeTree = (block: TranscriptBlock) =>
+			JSON.stringify(describeTree(block.node, corpusEnvironment("dark"), 120));
+		const [rebuilt] = helpers.addMessageToChat(
 			incoming({ kind: `k${HOSTILE}`, from: sender, message: `body ${HOSTILE}` }),
 		);
-		if (!block) throw new Error("the steer drew no block");
-		// The native card carries the same text: it must be clean in the tree, not only on screen.
-		const tree = JSON.stringify(describeTree(block.node, corpusEnvironment("dark"), 120));
-		expect(tree).not.toContain("\\u001b");
-		expect(tree).not.toContain("\u202e");
-		expect(tree).not.toContain("pwned");
+		if (!rebuilt) throw new Error("the steer drew no block");
 		createTuiMeshUiHooks(ctx).showIncoming(sender, { kind: "note", text: `live ${HOSTILE}`, thread: `t${HOSTILE}` });
-		const text = rows().join("\n");
-		expect(text).toContain("body red");
-		expect(text).toContain("live red");
-		expect(text).not.toContain("\x1b");
-		expect(text).not.toContain("\u202e");
-		expect(text).not.toContain("pwned");
+		const live = ctx.shell.transcript.blocks().at(-1);
+		if (!live || live === rebuilt) throw new Error("the live card drew no block");
+		// The native card carries the peer's text: it must be clean in the tree itself.
+		for (const [tree, body] of [
+			[nativeTree(rebuilt), "body red"],
+			[nativeTree(live), "live red"],
+		] as const) {
+			expect(tree).toContain(body);
+			expect(tree).not.toContain("\\u001b");
+			expect(tree).not.toContain("\u202e");
+			expect(tree).not.toContain("pwned");
+		}
+		// The thread tag is peer text too.
+		expect(nativeTree(live)).toContain("thread tred");
+	});
+
+	it("renders peer text as plain text, with no markdown or link node", () => {
+		const { helpers } = context();
+		const [block] = helpers.addMessageToChat(incoming({ kind: "note", from: PEER, message: LINK_BODY }));
+		if (!block) throw new Error("the note drew no block");
+		const all = collect(describeTree(block.node, corpusEnvironment("dark"), 120) as Described);
+		expect(all.some(node => node.k === "md")).toBe(false);
+		expect(all.some(node => node.k === "text" && node.p?.text === LINK_BODY)).toBe(true);
+	});
+
+	it("keeps markdown on IRC cards", () => {
+		const { helpers } = context();
+		const [block] = helpers.addMessageToChat({
+			role: "custom",
+			customType: "irc:incoming",
+			content: LINK_BODY,
+			details: { from: "Peer", message: LINK_BODY },
+			display: true,
+			timestamp: 1,
+		});
+		if (!block) throw new Error("the IRC message drew no block");
+		const all = collect(describeTree(block.node, corpusEnvironment("dark"), 120) as Described);
+		expect(all.find(node => node.k === "md")?.p?.text).toBe(LINK_BODY);
 	});
 });

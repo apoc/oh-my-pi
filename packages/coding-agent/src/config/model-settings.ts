@@ -97,7 +97,7 @@ export const cfgAuthUnpausedProviders = register({
 			"Turn providers we paused back on: login, token refresh and stored credentials work again. Each pause names the account risk you accept. Project settings cannot set this",
 		options: PAUSED_PROVIDER_CHOICES,
 		// The editor writes the global layer; hide it while a project layer supplies a (disregarded) list.
-		condition: "unpausedProvidersNotProject",
+		condition: "notProject",
 	},
 });
 

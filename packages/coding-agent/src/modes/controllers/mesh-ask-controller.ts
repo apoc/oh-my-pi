@@ -21,6 +21,7 @@ import type { OverlayHandle } from "../../ui/shell";
 import { disambiguateDisplayLabels } from "../../utils/render-utils";
 import { sanitizeErrorLine } from "../view-model/chrome/error-block";
 import { meshDisplayText } from "../view-model/overlays/mesh-display";
+import { stripBidiControls } from "@oh-my-pi/pi-utils";
 import type { MeshIncomingReply, MeshPeerView } from "../../mesh/engine";
 import {
 	describeMeshRefusal,
@@ -215,6 +216,8 @@ export class MeshAskController {
 					return conversation ? this.#send(conversation.peer, question, conversation) : Promise.resolve(false);
 				},
 				onStart: question => this.#send(peer, question),
+				// The answer is a peer's text: plain, so its links are never live.
+				plainAnswers: true,
 			},
 			handle => {
 				if (this.#dialog?.overlay === handle) this.#dialog = undefined;
@@ -407,8 +410,8 @@ export class MeshAskController {
 		this.#finishTurn(
 			conversation,
 			reply.error !== undefined
-				? { status: "error", error: reply.error }
-				: { status: "complete", answer: reply.text, error: undefined },
+				? { status: "error", error: stripBidiControls(reply.error) }
+				: { status: "complete", answer: stripBidiControls(reply.text), error: undefined },
 		);
 	}
 

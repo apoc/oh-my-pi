@@ -2697,6 +2697,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get forkSource() {
 				return sessionManager.getForkSource() ?? undefined;
 			},
+			get forkSourceSessionId() {
+				return sessionManager.getForkSourceSessionId() ?? undefined;
+			},
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
@@ -4680,7 +4683,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				securityEnabled: cfgSecurityEnabled.get(settings),
 				settingsApproval: toolSession.settingsApproval === true,
 				outReplies: outRepliesActive(settings, tuiTranscript),
-				crossInstanceAgents: cfgTaskCrossInstance.get(settings),
+				// A confined fork's agent:// refuses other instances; don't advertise them.
+				crossInstanceAgents: cfgTaskCrossInstance.get(settings) && !toolSession.forkSourceArtifactsDir,
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),

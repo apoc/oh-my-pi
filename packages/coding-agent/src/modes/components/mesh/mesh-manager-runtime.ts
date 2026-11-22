@@ -19,7 +19,14 @@ import type { MeshPeerView } from "../../../mesh/engine";
 import { MESH_USER_AGENT_ID } from "../../../mesh/outbound";
 import { formatMeshEndpoint } from "../../../mesh/peers";
 import { getMeshRuntime, type MeshRuntime, onMeshRuntimeChanged } from "../../../mesh/runtime";
-import { cfgMeshEnabled, cfgMeshKey, cfgMeshMode } from "../../../mesh/settings";
+import {
+	cfgMeshEnabled,
+	cfgMeshKey,
+	cfgMeshMode,
+	cfgOperatorMeshEnabled,
+	cfgOperatorMeshKey,
+	cfgOperatorMeshMode,
+} from "../../../mesh/settings";
 import type { MeshApprovalRequest } from "../../../mesh/approvals";
 import type { MeshThreadRecord } from "../../../mesh/threads";
 
@@ -103,9 +110,9 @@ export function subscribeMeshChanges(settings: ScopeLike, onChange: () => void):
 			follow(runtime);
 			onChange();
 		}),
-		cfgMeshEnabled.listen(settings, onChange),
-		cfgMeshMode.listen(settings, onChange),
-		cfgMeshKey.listen(settings, onChange),
+		cfgOperatorMeshEnabled.listen(settings, onChange),
+		cfgOperatorMeshMode.listen(settings, onChange),
+		cfgOperatorMeshKey.listen(settings, onChange),
 	];
 	return () => {
 		detachRuntime?.();
@@ -119,9 +126,9 @@ export function createMeshManagerRuntime(settings: ScopeLike): MeshManagerRuntim
 			const runtime = getMeshRuntime();
 			const status = runtime?.engine.status();
 			return {
-				enabled: cfgMeshEnabled.get(settings),
-				mode: cfgMeshMode.get(settings),
-				hasKey: cfgMeshKey.get(settings).length > 0,
+				enabled: cfgOperatorMeshEnabled.get(settings),
+				mode: cfgOperatorMeshMode.get(settings),
+				hasKey: cfgOperatorMeshKey.get(settings).length > 0,
 				self:
 					runtime && status
 						? {
@@ -190,8 +197,8 @@ export function createMeshManagerRuntime(settings: ScopeLike): MeshManagerRuntim
 
 /** `N local · M remote[ · K pending]`, or undefined while the mesh is off or not running. */
 export function meshPeerCountsText(settings: ScopeLike, runtime: MeshRuntime | undefined): string | undefined {
-	if (!runtime || !cfgMeshEnabled.get(settings)) return undefined;
-	const mode = cfgMeshMode.get(settings);
+	if (!runtime || !cfgOperatorMeshEnabled.get(settings)) return undefined;
+	const mode = cfgOperatorMeshMode.get(settings);
 	const counts = runtime.engine.peerCounts();
 	const parts: string[] = [];
 	if (meshModeHasSide(mode, "local")) parts.push(`${counts.local} local`);

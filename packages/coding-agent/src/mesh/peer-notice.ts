@@ -22,7 +22,7 @@ import type { CustomMessage } from "../session/messages";
 import { MESH_DISCOVERY_WINDOW_MS, isListedMeshPeer, meshPeerBrief } from "./peers";
 import { getMeshRuntime } from "./runtime";
 import { cfgMeshAnnouncePeers } from "./settings";
-import { meshPeerText } from "./text";
+import { meshPeerField } from "./text";
 
 export const MESH_PEERS_NOTICE_TYPE = "mesh:peers";
 
@@ -85,7 +85,7 @@ export function takeMeshPeersNotice(
 			midRun: boundary === "work",
 			added: described.map(meshPeerBrief),
 			more: added.length - described.length,
-			removed: removed.map(([id, name]) => meshPeerText(`${name} (${id})`)),
+			removed: removed.map(([id, name]) => meshPeerField(`${name} (${id})`)),
 		}),
 		details: {
 			added: added.map(peer => ({ id: peer.instanceId, name: peer.snapshot?.displayName ?? peer.instanceId })),

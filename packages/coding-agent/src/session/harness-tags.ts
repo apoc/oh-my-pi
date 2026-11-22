@@ -5,8 +5,12 @@
  * `system-interrupt`, …), opening or closing. The system prompt tells the model these
  * blocks are harness-authored, so untrusted text inside them must neither close them
  * nor forge new ones.
+ *
+ * Whitespace is allowed before and after the optional `/`, but the two runs are
+ * separated by the `/` so the lookahead backtracks linearly: peer text can be
+ * tens of thousands of spaces after a `<`.
  */
-const HARNESS_TAG_START_RE = /<(?=\s*\/?\s*(?:irc|mesh-[a-z][a-z-]*|system-[a-z][a-z-]*)(?![\w-]))/gi;
+const HARNESS_TAG_START_RE = /<(?=\s*(?:\/\s*)?(?:irc|mesh-[a-z][a-z-]*|system-[a-z][a-z-]*)(?![\w-]))/gi;
 
 /**
  * Keep agent- or job-authored text from closing the harness block it is

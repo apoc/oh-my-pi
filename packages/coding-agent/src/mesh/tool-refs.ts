@@ -5,7 +5,7 @@
 import { ToolError } from "../tools/tool-errors";
 import type { ToolSession } from "../tools";
 import { getMeshRuntime, type MeshRuntime } from "./runtime";
-import { cfgMeshEnabled } from "./settings";
+import { cfgOperatorMeshEnabled } from "./settings";
 
 type MeshToolSession = Pick<ToolSession, "settings" | "taskDepth" | "sessionManager">;
 
@@ -15,7 +15,7 @@ type MeshToolSession = Pick<ToolSession, "settings" | "taskDepth" | "sessionMana
  * mesh (print mode, SDK) never get them.
  */
 export function isMeshToolSession(session: MeshToolSession): boolean {
-	if (!cfgMeshEnabled.get(session.settings) || (session.taskDepth ?? 0) !== 0) return false;
+	if (!cfgOperatorMeshEnabled.get(session.settings) || (session.taskDepth ?? 0) !== 0) return false;
 	const bound = getMeshRuntime()?.session.sessionManager;
 	return bound !== undefined && bound === session.sessionManager;
 }

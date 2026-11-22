@@ -13,10 +13,6 @@ import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
-import { cfgContextFilesExtra } from "../session/context-settings";
-import { cfgTaskPerCallModelAllow } from "../task/settings";
-import { cfgToolsRestrictedFolders } from "../tools/settings";
-import { cfgAuthUnpausedProviders } from "./model-settings";
 import { nativeRendering } from "@oh-my-pi/pi-tui";
 import { terminalCapabilities } from "@oh-my-pi/pi-tui/driver/session";
 
@@ -39,12 +35,17 @@ const CONDITIONS: Record<string, () => boolean> = {
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),
 	planModeEnabled: whenSettings(s => cfgPlanEnabled.get(s)),
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),
-	// These editors write the global layer; hide them so a project-supplied list is never promoted to global.
-	contextFilesExtraNotProject: whenSettings(s => cfgContextFilesExtra.provenance(s) !== "project"),
-	restrictedFoldersNotProject: whenSettings(s => cfgToolsRestrictedFolders.provenance(s) !== "project"),
-	perCallModelAllowNotProject: whenSettings(s => cfgTaskPerCallModelAllow.provenance(s) !== "project"),
-	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),
 };
+
+/**
+ * Condition a row names. `notProject` is per setting: the row hides only while a project layer
+ * supplies that very setting. Use it for settings the panel editor writes to the global layer but
+ * a repository must not control, so a project-supplied value is never promoted to global.
+ */
+function resolveCondition(name: string, setting: AnySetting): () => boolean {
+	if (name === "notProject") return whenSettings(s => setting.provenance(s) !== "project");
+	return CONDITIONS[name];
+}
 
 /** Description suffix telling the panel user that an environment variable is in play. */
 function envNote(setting: AnySetting): string {
@@ -73,7 +74,7 @@ export function createSettingsHost(): SettingsHost {
 				ui: note ? { ...ui, description: `${ui.description}${note}` } : ui,
 				enumValues: setting.enumValues,
 				credential: setting.isCredential,
-				condition: ui.condition ? CONDITIONS[ui.condition] : undefined,
+				condition: ui.condition ? resolveCondition(ui.condition, setting) : undefined,
 			});
 		}
 	}

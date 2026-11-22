@@ -18,6 +18,7 @@ import meshSummaryUserTemplate from "../prompts/system/mesh-summary-user.md" wit
 import { cfgSecretsEnabled } from "../secrets/settings";
 import type { AgentSession } from "../session/agent-session";
 import { operatorTitleText } from "../session/messages";
+import { journalCompletion } from "../session/model-usage-journal";
 import { buildSessionMetadata } from "../session/session-metadata";
 import { cleanTinyMessage } from "../tiny/message-preproc";
 import { writeFileAtomically } from "../utils/atomic-file";
@@ -26,7 +27,7 @@ import {
 	selectBackgroundModels,
 	stripLeakedThinkingMarkup,
 } from "../utils/smol-completion";
-import { cfgMeshEnabled, cfgMeshSummary } from "./settings";
+import { cfgMeshSummary, cfgOperatorMeshEnabled } from "./settings";
 
 export interface MeshSummaryState {
 	text: string;
@@ -175,7 +176,7 @@ export class MeshSummaryGenerator {
 				if (event.type === "agent_end") this.#onTurnSettled();
 			}),
 			session.registerSessionChangeCallback(() => this.#reset()),
-			cfgMeshEnabled.listen(session.settings, onGateChange),
+			cfgOperatorMeshEnabled.listen(session.settings, onGateChange),
 			cfgMeshSummary.listen(session.settings, onGateChange),
 		];
 		const detach = () => {
@@ -200,7 +201,7 @@ export class MeshSummaryGenerator {
 	}
 
 	#enabled(session: AgentSession): boolean {
-		return cfgMeshEnabled.get(session.settings) && cfgMeshSummary.get(session.settings);
+		return cfgOperatorMeshEnabled.get(session.settings) && cfgMeshSummary.get(session.settings);
 	}
 
 	/** Forget the previous conversation's summary and load the current one's from disk. */
@@ -327,6 +328,9 @@ export class MeshSummaryGenerator {
 			}
 			this.#providerSessionId ??= Bun.randomUUIDv7();
 			const providerSessionId = this.#providerSessionId;
+			// Built before the request, owner snapshotted like every journalCompletion caller: a session
+			// switch mid-request drops the entry (the journal refuses a foreign session); it is never billed to the new session.
+			const journal = journalCompletion(session.sessionManager, { purpose: "mesh:summary", role: "smol" });
 			const text = await withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				completeWithBackgroundModels({
 					models,
@@ -339,7 +343,10 @@ export class MeshSummaryGenerator {
 					credentialSourceSessionId: session.sessionId,
 					metadataResolver: provider => buildSessionMetadata(providerSessionId, provider, registry.authStorage),
 					signal: controller.signal,
-					onResponse: response => session.costGate.record(response.usage.cost.total),
+					onResponse: response => {
+						session.costGate.record(response.usage.cost.total);
+						journal?.(response, input);
+					},
 					log: {
 						prefix: "mesh-summary",
 						context: { summarySessionId: providerSessionId },

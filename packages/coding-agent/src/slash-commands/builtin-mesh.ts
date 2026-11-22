@@ -3,7 +3,7 @@ import { meshDisplayText } from "../modes/view-model/overlays/mesh-display";
 import type { MeshPeerView } from "../mesh/engine";
 import { visibleMeshPeers } from "../mesh/peers";
 import { getMeshRuntime } from "../mesh/runtime";
-import { cfgMeshEnabled } from "../mesh/settings";
+import { cfgOperatorMeshEnabled } from "../mesh/settings";
 import { meshPeerCountsText } from "../modes/components/mesh/mesh-manager-runtime";
 import { buildArgumentCompletions } from "./builtin-completions";
 import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
@@ -75,7 +75,7 @@ export const BUILTIN_MESH_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		createArgumentCompletions: subcommands => buildMeshArgumentCompletions(subcommands),
 		getTuiAutocompleteDescription: runtime => {
-			if (!cfgMeshEnabled.get(runtime.ctx.settings)) return "Mesh: disabled (open and press e to enable)";
+			if (!cfgOperatorMeshEnabled.get(runtime.ctx.settings)) return "Mesh: disabled (open and press e to enable)";
 			const counts = meshPeerCountsText(runtime.ctx.settings, getMeshRuntime());
 			return counts === undefined ? "Mesh: not running" : `Mesh: ${counts}`;
 		},

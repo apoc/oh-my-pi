@@ -339,7 +339,7 @@ export class MeshOutbound {
 			const target = agentId === MAIN_AGENT_ID ? main : this.#resolveAgent(agentId);
 			if (target && target !== main && !target.isDisposed) {
 				try {
-					await deliverMeshMessage(target, lateMessage(reply, target));
+					await deliverMeshMessage(target, lateMessage(reply));
 					return;
 				} catch (error) {
 					logger.debug("mesh: subagent reply delivery failed; routing to Main", {
@@ -356,18 +356,14 @@ export class MeshOutbound {
 				});
 				return;
 			}
-			await deliverMeshMessage(main, lateMessage(reply, main, target === main ? undefined : agentId));
+			await deliverMeshMessage(main, lateMessage(reply, target === main ? undefined : agentId));
 		} catch (error) {
 			logger.warn("mesh: late reply delivery failed", { agentId, error: toError(error).message });
 		}
 	}
 }
 
-function lateMessage(
-	reply: MeshIncomingReply,
-	target: MeshDeliveryTarget,
-	originalAgent?: string,
-): CustomMessagePayload {
+function lateMessage(reply: MeshIncomingReply, originalAgent?: string): CustomMessagePayload {
 	return reply.op === "reply"
 		? buildMeshReplyMessage({
 				from: reply.from,

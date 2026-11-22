@@ -10,7 +10,7 @@
  * The terminal draws its own boxed sheet from the same model
  * (`styles/panels/btw-history-panel.ts`).
  */
-import { type JSXNode, untrack } from "@oh-my-pi/pi-tui";
+import { type JSXNode, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "../../../extensibility/inventory/display-text";
 import { sanitizeErrorLine } from "../../../modes/view-model/chrome/error-block";
@@ -19,7 +19,6 @@ import { getBtwLatestTurn } from "../../../session/btw-history-model";
 import "../../styles/panels/btw-history-panel";
 import { BtwInjectAnswer } from "./btw-answer";
 import {
-	BTW_HISTORY_TEXTS,
 	type BtwHistoryModel,
 	type BtwHistoryTexts,
 	DATE_FORMAT,
@@ -48,10 +47,7 @@ export function btwHistorySheet(model: BtwHistoryModel): SheetAttributes {
 }
 
 /** A status worth naming beside an answer natively; an answered question needs none. */
-export function btwStatusSpans(
-	status: BtwHistoryTurn["status"],
-	running = BTW_HISTORY_TEXTS.runningNative,
-): TspSpan[] | undefined {
+export function btwStatusSpans(status: BtwHistoryTurn["status"], running: string): TspSpan[] | undefined {
 	switch (status) {
 		case "running":
 			return [
@@ -127,6 +123,7 @@ function Turn(props: {
 	readonly block: InjectBlock | undefined;
 	readonly topicCreatedAt: number;
 	readonly texts: BtwHistoryTexts;
+	readonly plainAnswers: boolean;
 }): JSXNode {
 	const { turn, index, block, texts } = props;
 	// A follow-up asked on the topic's day needs only its time.
@@ -150,7 +147,11 @@ function Turn(props: {
 		answer = block ? (
 			<BtwInjectAnswer parts={block.parts} state={block.state} stream={stream} />
 		) : turn.answer.trim() ? (
-			<md text={sanitizeDisplayText(turn.answer)} stream={stream} />
+			props.plainAnswers ? (
+				<text text={sanitizeDisplayText(turn.answer)} wrap="word" />
+			) : (
+				<md text={sanitizeDisplayText(turn.answer)} stream={stream} />
+			)
 		) : (
 			<text role="omp.btw.pending" spans={[{ s: "dim", t: stream ? texts.pendingNative : "No answer text." }]} />
 		);
@@ -184,7 +185,7 @@ function Composer(props: { readonly model: BtwHistoryModel; readonly composer: F
 				text={composer.draft.text}
 				cursor={composer.draft.cursor}
 				placeholder={followUp ? model.texts.followUpPlaceholder : model.texts.startPlaceholder}
-				prompt={followUp ? "Follow up: " : "Ask: "}
+				prompt={model.composerPrompt}
 				sendable={false}
 				onEdit={event => {
 					const next = applyEdit(composer.draft, event);
@@ -213,6 +214,7 @@ function Thread(props: { readonly model: BtwHistoryModel; readonly record: BtwHi
 					block={model.injectBlock(record, turn, index)}
 					topicCreatedAt={record.createdAt}
 					texts={model.texts}
+					plainAnswers={model.options.plainAnswers === true}
 				/>
 			))}
 			{model.composer?.recordId !== undefined && <Composer model={model} composer={model.composer} />}
@@ -267,7 +269,8 @@ export function BtwHistoryPanel(props: { readonly model: BtwHistoryModel }): JSX
 		model.rev();
 		return untrack(() => {
 			const record = model.selected();
-			// A new topic's composer belongs to no record yet: it takes the reader's place.
+			// A new topic's composer belongs to no record yet: natively it takes the reader's place; the
+			// terminal keeps painting the thread and draws the composer itself.
 			const starting = model.composer?.recordId === undefined ? model.composer : undefined;
 			return (
 				<col
@@ -296,7 +299,7 @@ export function BtwHistoryPanel(props: { readonly model: BtwHistoryModel }): JSX
 								min={{ w: 0 }}
 								scroll={model.nativeScroll}
 							>
-								{starting ? (
+								{starting && nativeRendering() ? (
 									<Composer model={model} composer={starting} />
 								) : (
 									<Thread model={model} record={record} />

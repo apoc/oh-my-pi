@@ -433,7 +433,7 @@ export const cfgTaskPerCallModelAllow = register({
 		label: "Per-Call Model Allowlist",
 		editor: "json",
 		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
-		condition: "perCallModelAllowNotProject",
+		condition: "notProject",
 		description:
 			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.",
 	},

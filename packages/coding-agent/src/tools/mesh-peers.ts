@@ -6,7 +6,7 @@ import type { MeshEngine, MeshPeerView } from "../mesh/engine";
 import { formatMeshPeer, formatMeshPeerList, visibleMeshPeers } from "../mesh/peers";
 import { MAX_RANKED_PEERS, meshMatchText, type RankedMeshPeer, rankMeshPeers } from "../mesh/relevance";
 import { isMeshToolSession, requireMeshRuntime } from "../mesh/tool-refs";
-import { meshPeerText } from "../mesh/text";
+import { meshPeerField } from "../mesh/text";
 import meshPeersDescription from "../prompts/tools/mesh-peers.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
@@ -104,7 +104,7 @@ export class MeshPeersTool implements AgentTool<typeof meshPeersSchema, MeshPeer
 		const now = Date.now();
 		const blocks = ranked.map(({ peer, score, match }, index) => {
 			const text = meshMatchText(peer, match)?.replace(/\s+/g, " ").trim();
-			const quote = text ? `: ${meshPeerText(truncate(text, REASON_CHARS))}` : "";
+			const quote = text ? `: ${meshPeerField(truncate(text, REASON_CHARS))}` : "";
 			const reason = match === "none" ? "no field connects it to the need" : `matches ${match}${quote}`;
 			return `${index + 1}. score ${score.toFixed(2)} — ${reason}\n${formatMeshPeer(peer, now)}`;
 		});

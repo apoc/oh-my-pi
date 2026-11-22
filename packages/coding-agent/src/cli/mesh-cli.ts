@@ -14,7 +14,7 @@ import { sharedInstanceHost } from "../instances";
 import type { MeshPeerView } from "../mesh/engine";
 import { NativeMeshEngine } from "../mesh/native-engine";
 import { formatMeshEndpoint, MESH_DISCOVERY_WINDOW_MS } from "../mesh/peers";
-import { cfgMeshEnabled, cfgMeshKey, meshConfigFromSettings } from "../mesh/settings";
+import { cfgMeshKey, cfgOperatorMeshEnabled, meshConfigFromSettings } from "../mesh/settings";
 
 /** Summary line cap when stdout is not a terminal. */
 const SUMMARY_LINE_CHARS = 200;
@@ -40,8 +40,11 @@ export async function runMeshSetKeyCommand(): Promise<void> {
 			),
 		);
 	}
-	if (tty && (await promptHidden("Repeat key phrase: ")) !== phrase) {
-		throw new Error("Key phrases do not match; nothing stored.");
+	if (tty) {
+		// Compared by derived key, so the repeat is read exactly as the phrase is (NFC, trimmed); a repeat that
+		// derivation rejects is a mismatch.
+		const repeatKey = await meshDeriveKey(await promptHidden("Repeat key phrase: ")).catch(() => undefined);
+		if (repeatKey !== key) throw new Error("Key phrases do not match; nothing stored.");
 	}
 	const settings = await Settings.init();
 	cfgMeshKey.set(settings, key);
@@ -65,7 +68,7 @@ export async function runMeshListCommand(args: MeshListCommandArgs): Promise<voi
 			console.log(JSON.stringify({ status, peers }, null, 2));
 			return;
 		}
-		if (!cfgMeshEnabled.get(settings)) {
+		if (!cfgOperatorMeshEnabled.get(settings)) {
 			console.log(chalk.dim("mesh.enabled is off: this instance does not join the mesh, listing anyway."));
 		}
 		if (status.error) console.log(chalk.yellow(`engine: ${meshDisplayText(status.error)}`));

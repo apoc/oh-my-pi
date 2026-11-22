@@ -65,8 +65,8 @@ function paintIrcCard(node: UiNode, cx: PaintContext): Block {
 	let line = `${theme.fg("accent", theme.symbols.symbol("tool.irc"))} ${theme.fg("accent", title)}`;
 	if (meta.length > 0) line += ` ${theme.fg("dim", meta.join(" · "))}`;
 	const rows = [line];
-	const md = children.find(child => child.kind === "md");
-	if (md) rows.push(...bodyRows(cx, (md.props() as { text?: string }).text ?? "", props.term?.expanded === true));
+	const body = children.find(child => child.kind === "md" || child.kind === "text");
+	if (body) rows.push(...bodyRows(cx, (body.props() as { text?: string }).text ?? "", props.term?.expanded === true));
 	return { rows: rows.map(row => truncate(row, cx.width)) };
 }
 

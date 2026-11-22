@@ -89,8 +89,32 @@ function peersByProject(peers: MeshPeer[], own: string | undefined): string {
 }
 
 function crossInstanceEnabled(context?: ResolveContext): boolean {
+	// A confined fork reads only its source's artifacts: no other instance's agents.
+	if (context?.session?.forkSourceArtifactsDir) return false;
 	const settings = context?.session?.settings ?? context?.settings;
 	return settings !== undefined && cfgTaskCrossInstance.get(settings);
+}
+
+/**
+ * The registry whose agents `agent://<id>` answers for beyond published outputs.
+ * A confined fork gets none: every registered agent (other responder threads
+ * included) lives outside its source's artifacts.
+ */
+function visibleRegistry(context?: ResolveContext): AgentRegistryApi | undefined {
+	if (context?.session?.forkSourceArtifactsDir) return undefined;
+	return context?.agentRegistry ?? AgentRegistry.global();
+}
+
+/**
+ * Artifacts dirs a confined fork reads `agent://` outputs from: its source's, then its own (its
+ * scouts publish there, and their full output is linked from task results). `undefined` for any
+ * other caller.
+ */
+function forkOutputDirs(context?: ResolveContext): string[] | undefined {
+	const forkDir = context?.session?.forkSourceArtifactsDir ?? context?.forkSourceArtifactsDir;
+	if (!forkDir) return undefined;
+	const ownDir = context?.session?.getArtifactsDir?.() ?? context?.sessionFile?.slice(0, -6);
+	return ownDir && ownDir !== forkDir ? [forkDir, ownDir] : [forkDir];
 }
 
 function decodeSegment(segment: string): string {
@@ -330,7 +354,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
 		if (outputId === "all" || hasPathExtraction(url)) return null;
 		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
-		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
+		const registry = visibleRegistry(context);
+		if (registry && isSuperseded(registry, outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
 		const foundPath = (await this.#findOutput(dirs, outputId)).foundPath;
@@ -431,7 +456,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const crossInstance = crossInstanceEnabled(context);
 		if (crossInstance && outputId === "peers") return this.#resolvePeers(url);
-		const registry = context?.agentRegistry ?? AgentRegistry.global();
+		const registry = visibleRegistry(context);
 		const pid = crossInstance ? pidTarget(url) : undefined;
 		if (pid && !pid.local) return this.#resolvePeer(url, pid);
 		return this.#resolveOutput(url, {
@@ -662,9 +687,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
-		// A confined fork reads its source's agent outputs in place, nothing else.
-		const forkDir = context?.session?.forkSourceArtifactsDir;
-		if (forkDir) return [forkDir];
+		// A confined fork reads its source's agent outputs in place, plus its own scouts'.
+		const forkDirs = forkOutputDirs(context);
+		if (forkDirs) return forkDirs;
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;
@@ -712,9 +737,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		return { foundPath, jsonPath, anyDirExists, availableIds };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
+		const forkDirs = forkOutputDirs(context);
+		for (const dir of forkDirs ?? artifactsDirsFromRegistry()) {
 			let files: string[];
 			try {
 				files = await fs.readdir(dir);

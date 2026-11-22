@@ -18,12 +18,12 @@ import { MeshResponder } from "./responder";
 import { getMeshRuntime, type MeshRuntime, setMeshRuntime } from "./runtime";
 import {
 	cfgMeshDisplayName,
-	cfgMeshEnabled,
 	cfgMeshInboundPolicy,
-	cfgMeshKey,
-	cfgMeshMode,
-	cfgMeshPeers,
-	cfgMeshPort,
+	cfgOperatorMeshEnabled,
+	cfgOperatorMeshKey,
+	cfgOperatorMeshMode,
+	cfgOperatorMeshPeers,
+	cfgOperatorMeshPort,
 	meshConfigFromSettings,
 } from "./settings";
 import { type MeshIdentity, startMeshSnapshotPublisher } from "./snapshot";
@@ -120,11 +120,11 @@ class MeshHost implements MeshHostHandle {
 		const settings = this.#session.settings;
 		const reconcile = () => this.#enqueue(() => this.#reconcile());
 		this.#unlisten = [
-			cfgMeshEnabled.listen(settings, reconcile),
-			cfgMeshMode.listen(settings, reconcile),
-			cfgMeshKey.listen(settings, reconcile),
-			cfgMeshPort.listen(settings, reconcile),
-			cfgMeshPeers.listen(settings, reconcile),
+			cfgOperatorMeshEnabled.listen(settings, reconcile),
+			cfgOperatorMeshMode.listen(settings, reconcile),
+			cfgOperatorMeshKey.listen(settings, reconcile),
+			cfgOperatorMeshPort.listen(settings, reconcile),
+			cfgOperatorMeshPeers.listen(settings, reconcile),
 			cfgMeshDisplayName.listen(settings, reconcile),
 			cfgCollabDisplayName.listen(settings, reconcile),
 			// The engine refuses `deny` kinds itself (`MeshConfig.deniedKinds`).
@@ -145,7 +145,7 @@ class MeshHost implements MeshHostHandle {
 
 	async #reconcile(): Promise<void> {
 		const settings = this.#session.settings;
-		if (this.#disposed || !cfgMeshEnabled.get(settings)) {
+		if (this.#disposed || !cfgOperatorMeshEnabled.get(settings)) {
 			await this.#stop();
 			return;
 		}

@@ -5,7 +5,7 @@ import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgLspEnabled } from "../lsp/settings";
-import { cfgMeshEnabled } from "../mesh/settings";
+import { cfgOperatorMeshEnabled } from "../mesh/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -362,7 +362,7 @@ export const cfgToolsRestrictedFolders = register({
 		editor: "json",
 		description:
 			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
-		condition: "restrictedFoldersNotProject",
+		condition: "notProject",
 	},
 	validate: raw => {
 		if (raw === undefined) return;
@@ -1353,7 +1353,7 @@ export const cfgBuiltinToolGates = combine({
 	grep: cfgGrepEnabled,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
-	mesh: cfgMeshEnabled,
+	mesh: cfgOperatorMeshEnabled,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

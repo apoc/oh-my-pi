@@ -5,10 +5,19 @@
 import * as os from "node:os";
 import type { MeshConfig } from "@oh-my-pi/pi-natives";
 import { cfgCollabDisplayName } from "../collab/settings";
-import { type Derived, register, type ScopeLike } from "../config/registry";
+import { type Derived, operatorValue, register, type ScopeLike } from "../config/registry";
 import type { MeshMessageKind } from "./wire";
 
 export type MeshInboundPolicy = "allow" | "ask" | "deny";
+
+/**
+ * A derived mesh key: 32 bytes as canonical unpadded base64url (`MeshKeys::load` in
+ * `crates/mesh/src/keys.rs`), so the last of its 43 characters carries 2 zero padding bits.
+ */
+const MESH_KEY_PATTERN = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+
+/** Closing sentence of the description of every operator-only setting. */
+const OPERATOR_ONLY = "Project settings cannot set this.";
 
 const INBOUND_OPTIONS = [
 	{ value: "allow", label: "Allow", description: "Accept without asking" },
@@ -24,9 +33,10 @@ export const cfgMeshEnabled = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		// Operator-only (read via the `cfgOperatorMesh*` values); the row hides while a project layer supplies it.
+		condition: "notProject",
 		label: "Enable Mesh",
-		description:
-			"Discover other omp instances and exchange status/ask/steer messages with their main agents (mesh_peers, mesh_send, /mesh)",
+		description: `Discover other omp instances and exchange status/ask/steer messages with their main agents (mesh_peers, mesh_send, /mesh). ${OPERATOR_ONLY}`,
 	},
 });
 
@@ -38,8 +48,9 @@ export const cfgMeshMode = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Mode",
-		description: "Which instances the mesh reaches",
+		description: `Which instances the mesh reaches. ${OPERATOR_ONLY}`,
 		options: [
 			{ value: "local", label: "Local", description: "Same PC, same user; no network listener" },
 			{ value: "remote", label: "Remote", description: "Other machines on the LAN (mDNS); needs a key phrase" },
@@ -53,12 +64,20 @@ export const cfgMeshKey = register({
 	type: "string",
 	default: "",
 	credential: true,
+	validate: raw => {
+		if (raw === undefined || raw === "") return;
+		if (typeof raw !== "string" || !MESH_KEY_PATTERN.test(raw)) {
+			throw new Error(
+				"mesh.key must be the derived key, not the key phrase: remove `mesh.key` from your config file, then set the phrase via /mesh or `omp mesh set-key`",
+			);
+		}
+	},
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Mesh Key",
-		description:
-			"Key derived from the mesh key phrase (set it via /mesh or `omp mesh set-key`; the phrase is never stored)",
+		description: `Key derived from the mesh key phrase (set it via /mesh or \`omp mesh set-key\`; the phrase is never stored). ${OPERATOR_ONLY}`,
 		secret: true,
 	},
 });
@@ -88,8 +107,9 @@ export const cfgMeshPort = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "LAN Port",
-		description: "TCP port of the LAN listener; 0 picks a free port",
+		description: `TCP port of the LAN listener; 0 picks a free port. ${OPERATOR_ONLY}`,
 	},
 });
 
@@ -106,8 +126,9 @@ export const cfgMeshPeers = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Static Peers",
-		description: "host:port endpoints dialed directly when mDNS cannot reach them",
+		description: `host:port endpoints dialed directly when mDNS cannot reach them. ${OPERATOR_ONLY}`,
 		editor: "json",
 	},
 });
@@ -132,8 +153,9 @@ export const cfgMeshInboundStatus = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Inbound Status",
-		description: "Status questions answered from the main context without tools",
+		description: `Status questions answered from the main context without tools. ${OPERATOR_ONLY}`,
 		options: INBOUND_OPTIONS,
 	},
 });
@@ -146,8 +168,9 @@ export const cfgMeshInboundAsk = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Inbound Ask",
-		description: "Questions answered by a read-only fork of the main session",
+		description: `Questions answered by a read-only fork of the main session. ${OPERATOR_ONLY}`,
 		options: INBOUND_OPTIONS,
 	},
 });
@@ -160,8 +183,9 @@ export const cfgMeshInboundSteer = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Inbound Steer",
-		description: "Messages injected into the main agent's own conversation",
+		description: `Messages injected into the main agent's own conversation. ${OPERATOR_ONLY}`,
 		options: INBOUND_OPTIONS,
 	},
 });
@@ -174,8 +198,9 @@ export const cfgMeshInboundTask = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Inbound Task",
-		description: "Remote task delegation: a subagent with write tools runs in this project",
+		description: `Remote task delegation: a subagent with write tools runs in this project. ${OPERATOR_ONLY}`,
 		options: INBOUND_OPTIONS,
 	},
 });
@@ -188,19 +213,38 @@ export const cfgMeshInboundNote = register({
 	ui: {
 		tab: "interaction",
 		group: "Mesh",
+		condition: "notProject",
 		label: "Inbound Notes",
-		description: "Human notes shown in this TUI (never sent to the agent)",
+		description: `Human notes shown in this TUI (never sent to the agent). ${OPERATOR_ONLY}`,
 		options: INBOUND_OPTIONS,
 	},
 });
 
-/** `mesh.inbound.<kind>` per message kind. */
+/*
+ * The ten settings above that carry `condition: "notProject"` are ones a repository must
+ * not control: a project layer could otherwise enable the mesh with a key it knows and accept
+ * remote tasks (LAN code execution). Read them only through the operator values below; writes
+ * (`/mesh`, `omp mesh set-key`) go to the global layer.
+ */
+
+/** `mesh.enabled` from operator layers only; whether the mesh runs. */
+export const cfgOperatorMeshEnabled = operatorValue(cfgMeshEnabled);
+/** `mesh.mode` from operator layers only. */
+export const cfgOperatorMeshMode = operatorValue(cfgMeshMode);
+/** `mesh.key` from operator layers only. */
+export const cfgOperatorMeshKey = operatorValue(cfgMeshKey);
+/** `mesh.port` from operator layers only. */
+export const cfgOperatorMeshPort = operatorValue(cfgMeshPort);
+/** `mesh.peers` from operator layers only. */
+export const cfgOperatorMeshPeers = operatorValue(cfgMeshPeers);
+
+/** `mesh.inbound.<kind>` per message kind, from operator layers only. */
 export const cfgMeshInboundPolicy: Record<MeshMessageKind, Derived<MeshInboundPolicy>> = {
-	status: cfgMeshInboundStatus,
-	ask: cfgMeshInboundAsk,
-	steer: cfgMeshInboundSteer,
-	task: cfgMeshInboundTask,
-	note: cfgMeshInboundNote,
+	status: operatorValue(cfgMeshInboundStatus),
+	ask: operatorValue(cfgMeshInboundAsk),
+	steer: operatorValue(cfgMeshInboundSteer),
+	task: operatorValue(cfgMeshInboundTask),
+	note: operatorValue(cfgMeshInboundNote),
 };
 
 export const cfgMeshMaxConcurrentAsks = register({
@@ -268,17 +312,17 @@ function resolveMeshDisplayName(settings: ScopeLike): string {
 	}
 }
 
-/** Engine configuration for the current `mesh.*` settings (mesh assumed enabled). */
+/** Engine configuration for the operator's `mesh.*` settings (mesh assumed enabled). */
 export function meshConfigFromSettings(settings: ScopeLike): MeshConfig {
-	const key = cfgMeshKey.get(settings).trim();
+	const key = cfgOperatorMeshKey.get(settings).trim();
 	const deniedKinds = (Object.keys(cfgMeshInboundPolicy) as MeshMessageKind[]).filter(
 		kind => cfgMeshInboundPolicy[kind].get(settings) === "deny",
 	);
 	return {
-		mode: cfgMeshMode.get(settings),
+		mode: cfgOperatorMeshMode.get(settings),
 		key: key || undefined,
-		lanPort: cfgMeshPort.get(settings),
-		staticPeers: [...cfgMeshPeers.get(settings)],
+		lanPort: cfgOperatorMeshPort.get(settings),
+		staticPeers: [...cfgOperatorMeshPeers.get(settings)],
 		displayName: resolveMeshDisplayName(settings),
 		deniedKinds,
 	};

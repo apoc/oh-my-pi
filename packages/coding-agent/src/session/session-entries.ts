@@ -110,6 +110,12 @@ export interface SessionHeader {
 	 * source: `history://`, `agent://`, and inherited `local://` spills read them from there.
 	 */
 	forkSource?: string;
+	/**
+	 * Session id of {@link forkSource}. A source on a long Windows artifacts path
+	 * keeps its `local://` root under `%TEMP%/omp-local/<id>`; the fork needs the
+	 * id to find it. Absent on headers written before it was recorded.
+	 */
+	forkSourceSessionId?: string;
 }
 
 export interface NewSessionOptions {

@@ -81,6 +81,15 @@ function reply(text: string): ai.AssistantMessage {
 	} as never;
 }
 
+/** The fields of a journaled `model_usage` entry the tests read. */
+interface JournaledUsage {
+	purpose: string;
+	role?: string;
+	stopReason: string;
+	usage: { cost: { total: number } };
+	completion?: { prompt?: string; reply?: string };
+}
+
 /** The slice of AgentSession the generator reads, driven by the test. */
 class FakeSession {
 	readonly settings = Settings.isolated({ "mesh.enabled": true, "mesh.summary": true });
@@ -94,17 +103,25 @@ class FakeSession {
 	readonly sessionId = "provider-session";
 	readonly isDisposed = false;
 	readonly isStreaming = false;
-	readonly obfuscator = undefined;
+	obfuscator: { obfuscate(text: string): string } | undefined = undefined;
 	spent = 0;
 	readonly costGate = { check: () => undefined, record: (cost: number) => (this.spent += cost) };
 	messages: AgentMessage[] = [];
 	#id: string;
 	#artifactsDir: string;
+	/** Entries the journal accepted. Like the real manager, appendModelUsage ignores an owner that is not the current session. */
+	readonly usage: { owner: { sessionId: string; parentId: string | null }; entry: JournaledUsage }[] = [];
 	readonly sessionManager = {
 		getSessionId: () => this.#id,
 		getSessionName: () => undefined,
 		getCwd: () => this.#artifactsDir,
 		getArtifactsDir: () => this.#artifactsDir,
+		getLeafId: () => `leaf-of-${this.#id}`,
+		appendModelUsage: (entry: JournaledUsage, owner: { sessionId: string; parentId: string | null }) => {
+			if (owner.sessionId !== this.#id) return undefined;
+			this.usage.push({ owner, entry });
+			return `usage-${this.usage.length}`;
+		},
 	};
 	#listeners = new Set<AgentSessionEventListener>();
 	#changeCallbacks = new Set<() => void>();
@@ -249,6 +266,99 @@ describe("MeshSummaryGenerator", () => {
 		const secondInput = JSON.stringify(completeSimple.mock.calls[1]?.[1].messages);
 		expect(secondInput).toContain("Now add jitter to the backoff");
 		expect(session.spent).toBeCloseTo(0.02);
+		detach();
+	});
+
+	it("journals summary spend to the session it was generated for", async () => {
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => reply("Fixing the retry queue.") as never);
+		const session = new FakeSession("session-a", tempDir.join("a"));
+		const generator = new MeshSummaryGenerator({ minTurns: 1 });
+		const detach = generator.attach(session.asSession);
+
+		const summary = nextSummary(generator);
+		session.userTurn("Fix the retry queue dropping jobs", Date.now());
+		await summary;
+
+		expect(session.spent).toBeCloseTo(0.01);
+		expect(session.usage).toHaveLength(1);
+		expect(session.usage[0]?.owner).toEqual({ sessionId: "session-a", parentId: "leaf-of-session-a" });
+		expect(session.usage[0]?.entry).toMatchObject({
+			purpose: "mesh:summary",
+			role: "smol",
+			usage: { cost: { total: 0.01 } },
+			completion: { reply: "Fixing the retry queue." },
+		});
+		detach();
+	});
+
+	it("never journals a request that outlived a session switch to the session switched to", async () => {
+		const pending = Promise.withResolvers<ai.AssistantMessage>();
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(ai, "completeSimple").mockImplementation(() => {
+			started.resolve();
+			return pending.promise as never;
+		});
+		const session = new FakeSession("session-a", tempDir.join("a"));
+		const generator = new MeshSummaryGenerator({ minTurns: 1 });
+		const detach = generator.attach(session.asSession);
+
+		session.userTurn("Fix the retry queue dropping jobs", Date.now());
+		await started.promise;
+		session.switchTo("session-b", tempDir.join("b"));
+		pending.resolve(reply("Fixing the retry queue."));
+		await generator.settled();
+
+		expect(session.spent).toBeCloseTo(0.01);
+		expect(session.usage).toEqual([]);
+		detach();
+	});
+
+	it("journals every billed attempt, a failed one included, in order", async () => {
+		const overloaded = {
+			stopReason: "error",
+			errorStatus: 529,
+			errorMessage: "Anthropic stream error (overloaded_error): Overloaded",
+			content: [],
+			usage: { cost: { total: 0.005 } },
+		} as never;
+		const completeSimple = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementationOnce(async () => overloaded)
+			.mockImplementation(async () => reply("Fixing the retry queue.") as never);
+		const session = new FakeSession("session-a", tempDir.join("a"));
+		const generator = new MeshSummaryGenerator({ minTurns: 1 });
+		const detach = generator.attach(session.asSession);
+
+		const summary = nextSummary(generator);
+		session.userTurn("Fix the retry queue dropping jobs", Date.now());
+		expect((await summary)?.text).toBe("Fixing the retry queue.");
+
+		expect(completeSimple).toHaveBeenCalledTimes(2);
+		expect(session.usage.map(({ entry }) => entry.stopReason)).toEqual(["error", "stop"]);
+		expect(session.usage.map(({ entry }) => entry.usage.cost.total)).toEqual([0.005, 0.01]);
+		expect(session.spent).toBeCloseTo(0.015);
+		detach();
+	});
+
+	it("journals the obfuscated prompt, never the raw secret", async () => {
+		const completeSimple = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(async () => reply("Rotating the deploy key.") as never);
+		const session = new FakeSession("session-a", tempDir.join("a"));
+		session.obfuscator = { obfuscate: text => text.replaceAll("sk-live-hunter2", "<<SECRET_1>>") };
+		const generator = new MeshSummaryGenerator({ minTurns: 1 });
+		const detach = generator.attach(session.asSession);
+
+		const summary = nextSummary(generator);
+		session.userTurn("Rotate the deploy key sk-live-hunter2", Date.now());
+		await summary;
+
+		const sent = JSON.stringify(completeSimple.mock.calls[0]?.[1].messages);
+		expect(sent).toContain("<<SECRET_1>>");
+		expect(sent).not.toContain("sk-live-hunter2");
+		const journaled = session.usage[0]?.entry.completion?.prompt;
+		expect(journaled).toContain("<<SECRET_1>>");
+		expect(journaled).not.toContain("sk-live-hunter2");
 		detach();
 	});
 

@@ -24,7 +24,7 @@ import {
 	cfgMeshThreadTtlHours,
 	type MeshInboundPolicy,
 } from "./settings";
-import { type MeshThreadRecord, MeshThreadStore } from "./threads";
+import { MeshThreadLimitError, type MeshThreadRecord, MeshThreadStore } from "./threads";
 import {
 	boundMeshText,
 	type MeshEnvelope,
@@ -217,17 +217,23 @@ export class MeshFrontend {
 
 		let record: MeshThreadRecord;
 		let turnIndex: number;
-		if (body.thread !== undefined) {
-			const lookup = await this.threads.lookup(body.thread, from.instanceId);
-			if (!lookup.ok) return meshError(lookup.code, lookup.message);
-			if (lookup.record.kind !== kind) {
-				return meshError("bad_request", `Thread ${body.thread} is a ${lookup.record.kind} thread.`);
+		try {
+			if (body.thread !== undefined) {
+				const lookup = await this.threads.lookup(body.thread, from.instanceId);
+				if (!lookup.ok) return meshError(lookup.code, lookup.message);
+				if (lookup.record.kind !== kind) {
+					return meshError("bad_request", `Thread ${body.thread} is a ${lookup.record.kind} thread.`);
+				}
+				record = lookup.record;
+				turnIndex = this.threads.appendTurn(record.threadId, msgId, text);
+			} else {
+				record = await this.threads.create(kind, from, msgId, text);
+				turnIndex = 0;
 			}
-			record = lookup.record;
-			turnIndex = this.threads.appendTurn(record.threadId, msgId, text);
-		} else {
-			record = await this.threads.create(kind, from, msgId, text);
-			turnIndex = 0;
+		} catch (error) {
+			// The store bounds unanswered questions and turns per thread; a refusal leaves no record behind.
+			if (error instanceof MeshThreadLimitError) return meshError(error.code, error.message);
+			throw error;
 		}
 		// The answer comes from a responder fork, so the main transcript would otherwise never show it.
 		if (this.#ui?.hasUI) this.#ui.showIncoming(from, { kind, text, thread: record.threadId });

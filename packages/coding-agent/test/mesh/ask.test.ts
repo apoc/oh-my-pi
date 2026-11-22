@@ -117,12 +117,13 @@ function harness(peers: MeshPeerView[] = PEERS) {
 		setCollapsedText: (text: string) => (draft = text),
 	};
 	const shell = new Shell();
+	const statuses: string[] = [];
 	const ctx = {
 		shell,
 		present: (factory: unknown) => cards.push(factory),
 		composer,
 		toolOutputExpanded: false,
-		showStatus: () => {},
+		showStatus: (message: string) => statuses.push(message),
 		showError: (message: string) => errors.push(message),
 		showHookInput: async () => inputs.shift(),
 		keybindings: KeybindingsManager.inMemory(),
@@ -147,6 +148,8 @@ function harness(peers: MeshPeerView[] = PEERS) {
 		shell,
 		cards,
 		errors,
+		statuses,
+		ctx,
 		inputs,
 		draft: () => draft,
 		controller,
@@ -181,6 +184,51 @@ describe("/mesh ask conversations", () => {
 		await until(() => h.screen().includes("a fact checker"));
 		expect(h.screen()).not.toContain("Waiting for the agent");
 		expect(h.cards).toHaveLength(0);
+	});
+
+	it("shows a peer's answer as plain text, never as a markdown link", async () => {
+		const h = harness();
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 where?")).toBe(true);
+		h.engine.answer("msg-1", {
+			op: "reply",
+			replyTo: "msg-1",
+			thread: "thread-1",
+			text: "see [docs](https://evil.example)",
+			from: ARBITER,
+		});
+		await until(() => h.screen().includes("see "));
+		expect(h.screen()).toContain("[docs](https://evil.example)");
+	});
+
+	it("strips bidi controls from a peer's answer before the panel shows it", async () => {
+		const h = harness();
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 where?")).toBe(true);
+		h.engine.answer("msg-1", {
+			op: "reply",
+			replyTo: "msg-1",
+			thread: "thread-1",
+			text: "safe\u202Eevil",
+			from: ARBITER,
+		});
+		await until(() => h.screen().includes("safe"));
+		expect(h.screen()).toContain("safeevil");
+		expect(h.screen()).not.toContain("\u202E");
+	});
+
+	it("strips bidi controls from a peer's error text", async () => {
+		const h = harness();
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 where?")).toBe(true);
+		h.engine.answer("msg-1", {
+			op: "reply",
+			replyTo: "msg-1",
+			thread: "thread-1",
+			text: "",
+			error: "refused\u202Eby peer",
+			from: ARBITER,
+		});
+		await until(() => h.screen().includes("refused"));
+		expect(h.screen()).toContain("refusedby peer");
+		expect(h.screen()).not.toContain("\u202E");
 	});
 
 	it("keeps an answer that overtakes its acknowledgement in the opened dialog", async () => {
@@ -242,6 +290,17 @@ describe("/mesh ask conversations", () => {
 		await until(() => h.screen().includes("late fact"));
 		expect(h.screen()).not.toContain("Stopped waiting");
 		expect(h.cards).toHaveLength(1);
+	});
+
+	it("refuses a pasted image in a follow-up and says so", async () => {
+		const h = harness();
+		expect(await h.controller.handleCommand("b93faeff1b87b3c5 first?")).toBe(true);
+		h.engine.answer("msg-1", { op: "reply", replyTo: "msg-1", thread: "thread-1", text: "done", from: ARBITER });
+		await until(() => h.screen().includes("done"));
+		h.press("f");
+		h.ctx.promptPasteTarget?.attachImage({ type: "image", data: "", mimeType: "image/png" });
+		expect(h.statuses).toEqual(["Image paste is not supported in this prompt"]);
+		expect(h.screen()).not.toContain("[Image #1");
 	});
 
 	it("refuses a blocked peer without sending and keeps the draft", async () => {

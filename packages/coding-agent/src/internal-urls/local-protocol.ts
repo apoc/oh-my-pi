@@ -432,7 +432,8 @@ async function readOptionsFor(
 	const sourceDir = context?.session?.forkSourceArtifactsDir;
 	if (!sourceDir || !extractRelativePath(url)) return opts;
 	if ((await locateLocalTarget(url, opts, false)) !== null) return opts;
-	const sourceOpts: LocalProtocolOptions = { getArtifactsDir: () => sourceDir };
+	const sourceId = context?.session?.forkSourceSessionId ?? null;
+	const sourceOpts: LocalProtocolOptions = { getArtifactsDir: () => sourceDir, getSessionId: () => sourceId };
 	return (await locateLocalTarget(url, sourceOpts, false)) !== null ? sourceOpts : opts;
 }
 

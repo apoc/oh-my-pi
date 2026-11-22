@@ -23,12 +23,12 @@ import {
 	visibleMeshPeers,
 } from "../mesh/peers";
 import { getMeshRuntime } from "../mesh/runtime";
-import { cfgMeshEnabled } from "../mesh/settings";
+import { cfgOperatorMeshEnabled } from "../mesh/settings";
 import { isMeshToolSession, requireMeshRuntime } from "../mesh/tool-refs";
 import type { MeshRequest, MeshResponse } from "../mesh/wire";
 import meshPromptDoc from "../prompts/internal-urls/mesh.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { meshPeerText } from "../mesh/text";
+import { meshPeerField, meshPeerText } from "../mesh/text";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -48,6 +48,11 @@ function formatTime(ms: unknown): string {
 
 function text(value: unknown): string {
 	return typeof value === "string" ? meshPeerText(value) : "";
+}
+
+/** A peer-supplied single-line value (thread id, kind, status): folded to one line. */
+function field(value: unknown): string {
+	return typeof value === "string" ? meshPeerField(value) : "";
 }
 
 function resource(
@@ -80,7 +85,7 @@ function renderThreadList(peer: MeshPeerView, data: unknown): string {
 	const lines = [`# Threads asked of ${label}`, ""];
 	for (const thread of threads) {
 		lines.push(
-			`- \`${text(thread.thread)}\` ${text(thread.kind)} · ${typeof thread.turns === "number" ? thread.turns : "?"} turns · ${text(thread.status) || "?"} · updated ${formatTime(thread.updatedAt)}`,
+			`- \`${field(thread.thread)}\` ${field(thread.kind)} · ${typeof thread.turns === "number" ? thread.turns : "?"} turns · ${field(thread.status) || "?"} · updated ${formatTime(thread.updatedAt)}`,
 		);
 	}
 	lines.push("", `Read one with mesh://${peer.instanceId}/threads/<id>.`);
@@ -90,11 +95,11 @@ function renderThreadList(peer: MeshPeerView, data: unknown): string {
 function renderThread(peer: MeshPeerView, data: unknown): string {
 	if (!isRecord(data)) return "Peer returned no thread.\n";
 	const turns = Array.isArray(data.turns) ? data.turns.filter(isRecord) : [];
-	const lines = [`# Thread ${text(data.thread)} (${text(data.kind)}) with ${meshPeerLabel(peer)}`];
+	const lines = [`# Thread ${field(data.thread)} (${field(data.kind)}) with ${meshPeerLabel(peer)}`];
 	turns.forEach((turn, index) => {
 		lines.push(
 			"",
-			`## Turn ${index + 1} · ${text(turn.status)} · ${formatTime(turn.createdAt)}`,
+			`## Turn ${index + 1} · ${field(turn.status)} · ${formatTime(turn.createdAt)}`,
 			"",
 			"**Question**",
 			"",
@@ -123,7 +128,7 @@ export class MeshProtocolHandler implements ProtocolHandler {
 		const allowed = context.session
 			? isMeshToolSession(context.session)
 			: context.sessionId !== undefined &&
-				cfgMeshEnabled.get(runtime.session.settings) &&
+				cfgOperatorMeshEnabled.get(runtime.session.settings) &&
 				context.sessionId === runtime.session.sessionManager.getSessionId();
 		if (!allowed) return [];
 		const engine = runtime.engine;

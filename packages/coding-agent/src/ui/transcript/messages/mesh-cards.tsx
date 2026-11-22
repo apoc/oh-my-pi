@@ -27,7 +27,7 @@ export interface MeshMessageCard {
 }
 
 /** The IRC-style card of one mesh message. */
-export function meshMessage(card: MeshMessageCard): IrcMessage {
+function meshMessage(card: MeshMessageCard): IrcMessage {
 	const name = meshDisplayText(card.peer?.displayName) || meshDisplayText(card.peer?.instanceId) || "?";
 	const peer = meshSenderLabel(name, meshDisplayText(card.peer?.host)).trim() || "?";
 	const tags = [meshDisplayText(card.kind)];
@@ -39,20 +39,19 @@ export function meshMessage(card: MeshMessageCard): IrcMessage {
 		title: theme => `MESH ${theme.symbols.symbol(glyph)} ${peer}`,
 		role: `omp.mesh.${card.direction}`,
 		body: meshDisplayBlock(card.text),
+		plain: true,
 		timestamp: card.timestamp,
 		tags,
 	};
 }
 
 /** One mesh message as a card. `expanded` is the transcript's expand state. */
-export function MeshCard(props: { readonly card: MeshMessageCard; readonly expanded?: () => boolean }): JSXNode {
-	return (
-		<IrcMessageCard message={meshMessage(props.card)} {...(props.expanded ? { expanded: props.expanded } : {})} />
-	);
+export function MeshCard(props: { readonly card: MeshMessageCard; readonly expanded: () => boolean }): JSXNode {
+	return <IrcMessageCard message={meshMessage(props.card)} expanded={props.expanded} />;
 }
 
 /** `details` of a persisted `mesh:incoming` custom message. */
-export interface MeshIncomingDetails {
+interface MeshIncomingDetails {
 	readonly kind?: string;
 	readonly from?: { displayName?: string; instanceId?: string; host?: string };
 	readonly message?: string;

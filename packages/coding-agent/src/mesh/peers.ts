@@ -1,11 +1,12 @@
 /**
  * Peer addressing and plain-text peer listings shared by the mesh tools and `mesh://`. Every
- * peer-supplied string is harness-tag escaped: listings land in the agent's context.
+ * peer-supplied string is harness-tag escaped: listings land in the agent's context. Single-line
+ * values (names, ids, session, cwd, branch, model) are also folded to one line.
  */
 import { formatAge, truncate } from "@oh-my-pi/pi-utils";
 import type { MeshEngine, MeshPeerView } from "./engine";
 import type { MeshSendTarget } from "./outbound";
-import { meshPeerText } from "./text";
+import { meshPeerField, meshPeerText } from "./text";
 import type { MeshSnapshot } from "./wire";
 
 type MeshPeerResolution = { ok: true; peer: MeshPeerView } | { ok: false; message: string };
@@ -31,10 +32,10 @@ export function visibleMeshPeers(engine: Pick<MeshEngine, "peers">): MeshPeerVie
 	return engine.peers().filter(isListedMeshPeer);
 }
 
-/** `displayName (instanceId)`, or the bare id before the first snapshot; harness-tag escaped. */
+/** `displayName (instanceId)`, or the bare id before the first snapshot; one harness-tag escaped line. */
 export function meshPeerLabel(peer: MeshPeerView): string {
 	const name = peer.snapshot?.displayName;
-	return meshPeerText(name ? `${name} (${peer.instanceId})` : peer.instanceId);
+	return meshPeerField(name ? `${name} (${peer.instanceId})` : peer.instanceId);
 }
 
 /** `local`, or `remote <ip>:<port> · <dns name | hostname>` (IPv6 bracketed; address omitted when unknown). */
@@ -107,7 +108,7 @@ export function resolveMeshSendTarget(
 }
 
 function flag(label: string, value: string | null | undefined): string | undefined {
-	return value ? `${label}: ${meshPeerText(value)}` : undefined;
+	return value ? `${label}: ${meshPeerField(value)}` : undefined;
 }
 
 /** The branch a peer works on, or its short head commit when detached. */
@@ -121,11 +122,11 @@ export function formatMeshPeer(peer: MeshPeerView, now: number = Date.now()): st
 	const states: string[] = [peer.state];
 	if (snapshot) states.push(snapshot.busy ? "busy" : "idle");
 	if (peer.blocked) states.push("blocked");
-	const name = snapshot ? meshPeerText(snapshot.displayName) : "(no snapshot yet)";
-	const lines = [`${meshPeerText(peer.instanceId)} · ${name} [${states.join(", ")}]`];
+	const name = snapshot ? meshPeerField(snapshot.displayName) : "(no snapshot yet)";
+	const lines = [`${meshPeerField(peer.instanceId)} · ${name} [${states.join(", ")}]`];
 	const seen = formatAge(Math.max(0, now - peer.lastSeen) / 1000) || "just now";
 	lines.push(
-		[flag("session", snapshot?.sessionName), `endpoint: ${meshPeerText(formatMeshEndpoint(peer))}`, `seen ${seen}`]
+		[flag("session", snapshot?.sessionName), `endpoint: ${meshPeerField(formatMeshEndpoint(peer))}`, `seen ${seen}`]
 			.filter(Boolean)
 			.join(" · "),
 	);
@@ -140,7 +141,7 @@ export function formatMeshPeer(peer: MeshPeerView, now: number = Date.now()): st
 				.filter(Boolean)
 				.join(" · "),
 		);
-		if (snapshot.summary) lines.push(`summary: ${meshPeerText(snapshot.summary.text)}`);
+		if (snapshot.summary) lines.push(`summary: ${meshPeerField(snapshot.summary.text)}`);
 	}
 	return lines.map((line, index) => (index === 0 ? line : `  ${line}`)).join("\n");
 }
@@ -163,7 +164,7 @@ export function meshPeerBrief(peer: MeshPeerView): string {
 		.filter(Boolean)
 		.join(" · ");
 	const summary = snapshot?.summary?.text;
-	return summary ? `${line}\n  summary: ${meshPeerText(truncate(summary, BRIEF_SUMMARY_CHARS))}` : line;
+	return summary ? `${line}\n  summary: ${meshPeerField(truncate(summary, BRIEF_SUMMARY_CHARS))}` : line;
 }
 
 /** Every listed peer ({@link isListedMeshPeer}), one block each; `mesh_peers` without a query and `mesh://`. */

@@ -246,8 +246,9 @@ defineRolePainter("col", "omp.btw.sheet", (node, cx): Block => {
 			);
 		if (composer.notice && available >= 3)
 			composerLines.push(theme.fg(model.followUpPending ? "dim" : "warning", truncate(composer.notice, inner)));
-		const prompt = composer.recordId === undefined ? "Ask: " : "Follow up: ";
-		composerLines.push(composerLine(theme, prompt, composer.draft.text, composer.draft.cursor, inner, caretGlyph));
+		composerLines.push(
+			composerLine(theme, model.composerPrompt, composer.draft.text, composer.draft.cursor, inner, caretGlyph),
+		);
 	}
 	let bodyHeight = Math.max(composer ? 0 : 1, height - chrome - composerLines.length);
 	const showDetail = wide || model.focus === "answer";

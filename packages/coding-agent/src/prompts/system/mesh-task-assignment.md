@@ -5,16 +5,16 @@ Your final message is sent to the peer verbatim: report what you did, what chang
 
 Earlier exchanges in this thread, oldest first:
 {{#each history}}
-<request>
+<mesh-request>
 {{question}}
-</request>
-<report>
+</mesh-request>
+<mesh-report>
 {{answer}}
-</report>
+</mesh-report>
 {{/each}}
 {{/if}}
 
 Task:
-<request>
+<mesh-request>
 {{question}}
-</request>
+</mesh-request>

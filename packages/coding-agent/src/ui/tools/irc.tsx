@@ -33,6 +33,8 @@ export interface IrcMessage {
 	readonly role?: string;
 	/** Dim tags after the heading, ahead of the kind's own. */
 	readonly tags?: readonly string[];
+	/** Render the body as plain text, never Markdown: for untrusted (peer) text whose links must not be live. */
+	readonly plain?: boolean;
 }
 
 /** A card's heading with the given preset's directional glyph. */
@@ -76,7 +78,7 @@ export function IrcMessageCard(props: { readonly message: IrcMessage; readonly e
 					<text spans={[{ s: "dim", t: "ago" }]} />
 				</row>
 			) : undefined}
-			{body.trim() ? <md text={body} /> : undefined}
+			{body.trim() ? card.plain ? <text text={body} wrap="word" /> : <md text={body} /> : undefined}
 		</card>
 	);
 }

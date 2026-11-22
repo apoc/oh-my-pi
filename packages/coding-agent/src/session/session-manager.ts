@@ -35,6 +35,7 @@ import { type AiuCall, callAiu } from "./aiu-billing";
 import type { SessionTreePosition } from "../modes/view-model/status-line/host";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
+import { readSessionHeaderIdSync } from "./session-header-id";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { resolveLocalRoot } from "../internal-urls/local-root";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
@@ -2247,7 +2248,9 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 			taskPromptCacheKey: options?.taskPromptCacheKey,
-			...(options?.forkSource ? { forkSource: options.forkSource } : {}),
+			...(options?.forkSource
+				? { forkSource: options.forkSource, forkSourceSessionId: readSessionHeaderIdSync(options.forkSource) }
+				: {}),
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,
@@ -3478,10 +3481,26 @@ export class SessionManager {
 		return artifactsDirectoryFor(this.#header?.forkSource);
 	}
 
+	/**
+	 * Session id of a confined fork's source; null for ordinary sessions. Headers that predate
+	 * the field read it from the source session's header.
+	 */
+	getForkSourceSessionId(): string | null {
+		const header = this.#header;
+		if (!header?.forkSource) return null;
+		if (header.forkSourceSessionId === undefined) {
+			const sourceId = readSessionHeaderIdSync(header.forkSource);
+			if (sourceId) header.forkSourceSessionId = sourceId;
+		}
+		return header.forkSourceSessionId ?? null;
+	}
+
 	/** `local://` root of a confined fork's source, whose spills the fork reads in place. */
 	#forkSourceLocalRoot(): string | undefined {
 		const sourceDir = this.getForkSourceArtifactsDir();
-		return sourceDir ? resolveLocalRoot({ getArtifactsDir: () => sourceDir }) : undefined;
+		if (!sourceDir) return undefined;
+		const sourceId = this.getForkSourceSessionId();
+		return resolveLocalRoot({ getArtifactsDir: () => sourceDir, getSessionId: () => sourceId });
 	}
 
 	adoptArtifactManager(manager: ArtifactManagerApi): void {
@@ -4558,6 +4577,7 @@ export class SessionManager {
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		if (options?.confined) {
 			manager.#header.forkSource = path.resolve(sourcePath);
+			if (sourceHeader?.id) manager.#header.forkSourceSessionId = sourceHeader.id;
 			SessionManager.#neutralizeSessionInits(history);
 		}
 		manager.#sessionName = manager.#header.title;

@@ -34,6 +34,8 @@ export interface MeshSender {
 	agentId: string;
 	displayName: string;
 	host: string;
+	/** Sender's LAN listener port, when its remote side is on. */
+	lanPort?: number;
 }
 
 export type MeshRequest =

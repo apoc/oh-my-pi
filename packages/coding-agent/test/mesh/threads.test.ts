@@ -3,7 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	MESH_MAX_THREADS_PER_PEER,
+	MESH_MAX_THREADS_TOTAL,
+	MESH_MAX_TURNS_PER_THREAD,
+	MESH_MAX_UNANSWERED_PER_PEER,
+	MESH_MAX_UNANSWERED_TOTAL,
 	type MeshThreadHost,
+	MeshThreadLimitError,
 	type MeshThreadRecord,
 	MeshThreadStore,
 	meshConversationKey,
@@ -130,6 +136,134 @@ describe("MeshThreadStore", () => {
 		host.sessionId = "session-other";
 		const foreign = new MeshThreadStore(host, { ttlMs: () => HOUR_MS });
 		expect(await foreign.lookup(record.threadId, alice.instanceId)).toMatchObject({ code: "unknown_thread" });
+	});
+});
+
+describe("MeshThreadStore bounds", () => {
+	const peerN = (n: number): MeshSender => ({ ...alice, instanceId: `inst-${n}` });
+	const refusal = async (attempt: () => unknown): Promise<MeshThreadLimitError> => {
+		try {
+			await attempt();
+		} catch (error) {
+			if (error instanceof MeshThreadLimitError) return error;
+			throw error;
+		}
+		throw new Error("expected the store to refuse");
+	};
+	const files = async (dir: string): Promise<string[]> => fs.readdir(path.join(dir, "mesh-threads")).catch(() => []);
+
+	it("refuses a peer's unanswered question past the per-peer cap, creating no record or file, until one completes", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-threads-"));
+		tempDirs.push(dir);
+		const host = new FakeHost();
+		host.artifactsDir = dir;
+		const store = new MeshThreadStore(host, { ttlMs: () => HOUR_MS });
+		const first = await store.create("ask", alice, "m0", "q0");
+		for (let i = 1; i < MESH_MAX_UNANSWERED_PER_PEER; i++) await store.create("ask", alice, `m${i}`, `q${i}`);
+		await store.flush();
+		const before = await files(dir);
+		expect(before).toHaveLength(MESH_MAX_UNANSWERED_PER_PEER);
+
+		expect((await refusal(() => store.create("ask", alice, "mx", "qx"))).code).toBe("busy");
+		// A follow-up on an existing thread is an unanswered question too, and leaves the record as it was.
+		expect((await refusal(() => store.appendTurn(first.threadId, "mx", "qx"))).code).toBe("busy");
+		expect(first.turns).toHaveLength(1);
+		await store.flush();
+		expect(await files(dir)).toEqual(before);
+		expect(await store.list(alice.instanceId)).toHaveLength(MESH_MAX_UNANSWERED_PER_PEER);
+
+		// Another instance is not held up by alice's backlog.
+		await store.create("ask", bob, "mb", "qb");
+		store.updateTurn(first.threadId, 0, { status: "complete", answer: "a" });
+		await store.create("ask", alice, "my", "qy");
+	});
+
+	it("refuses past the total cap across peers", async () => {
+		const store = new MeshThreadStore(new FakeHost(), { ttlMs: () => HOUR_MS });
+		for (let i = 0; i < MESH_MAX_UNANSWERED_TOTAL; i++) await store.create("status", peerN(i), `m${i}`, `q${i}`);
+		const refused = await refusal(() => store.create("status", peerN(1000), "mx", "qx"));
+		expect(refused.code).toBe("busy");
+		expect(await store.list(peerN(1000).instanceId)).toEqual([]);
+	});
+
+	it("evicts a peer's oldest answered threads past the per-peer record cap, removing their files, and never a busy one", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-threads-"));
+		tempDirs.push(dir);
+		const host = new FakeHost();
+		host.artifactsDir = dir;
+		const store = new MeshThreadStore(host, { ttlMs: () => HOUR_MS });
+		const records: MeshThreadRecord[] = [];
+		for (let i = 0; i < MESH_MAX_THREADS_PER_PEER; i++) {
+			const record = await store.create("status", alice, `m${i}`, `q${i}`);
+			// The oldest stays in flight; the rest are answered.
+			if (i > 0) store.updateTurn(record.threadId, 0, { status: "complete", answer: "a" });
+			records.push(record);
+		}
+		await store.create("status", bob, "mb", "qb");
+		await store.flush();
+		expect(await files(dir)).toHaveLength(MESH_MAX_THREADS_PER_PEER + 1);
+
+		const extra = await store.create("status", alice, "mx", "qx");
+		await store.flush();
+		const alive = (await store.list(alice.instanceId)).map(record => record.threadId);
+		expect(alive).toHaveLength(MESH_MAX_THREADS_PER_PEER);
+		expect(alive).toContain(records[0]!.threadId); // busy: kept although oldest
+		expect(alive).toContain(extra.threadId);
+		expect(alive).not.toContain(records[1]!.threadId); // oldest answered: evicted
+		expect(alive).toContain(records[2]!.threadId);
+		expect(await store.lookup(records[1]!.threadId, alice.instanceId)).toMatchObject({ code: "thread_expired" });
+		expect(await files(dir)).not.toContain(`entry-${records[1]!.threadId}.json`);
+		expect(await files(dir)).toHaveLength(MESH_MAX_THREADS_PER_PEER + 1);
+		// Another peer's record is not touched by alice's eviction.
+		expect(await store.list(bob.instanceId)).toHaveLength(1);
+	});
+
+	it("evicts the oldest answered threads past the total record cap, removing their files", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-threads-"));
+		tempDirs.push(dir);
+		const host = new FakeHost();
+		host.artifactsDir = dir;
+		const store = new MeshThreadStore(host, { ttlMs: () => HOUR_MS });
+		const records: MeshThreadRecord[] = [];
+		for (let i = 0; i < MESH_MAX_THREADS_TOTAL; i++) {
+			const record = await store.create("status", peerN(i), `m${i}`, `q${i}`);
+			store.updateTurn(record.threadId, 0, { status: "complete", answer: "a" });
+			records.push(record);
+		}
+		await store.flush();
+		expect(await files(dir)).toHaveLength(MESH_MAX_THREADS_TOTAL);
+
+		const extra = await store.create("status", peerN(100000), "mx", "qx");
+		await store.flush();
+		expect(await store.lookup(records[0]!.threadId, peerN(0).instanceId)).toMatchObject({ code: "thread_expired" });
+		expect((await store.lookup(records[1]!.threadId, peerN(1).instanceId)).ok).toBe(true);
+		expect((await store.lookup(extra.threadId, peerN(100000).instanceId)).ok).toBe(true);
+		const names = await files(dir);
+		expect(names).toHaveLength(MESH_MAX_THREADS_TOTAL);
+		expect(names).not.toContain(`entry-${records[0]!.threadId}.json`);
+	});
+
+	it("refuses a follow-up past the turn cap and leaves the record unchanged", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mesh-threads-"));
+		tempDirs.push(dir);
+		const host = new FakeHost();
+		host.artifactsDir = dir;
+		const store = new MeshThreadStore(host, { ttlMs: () => HOUR_MS });
+		const record = await store.create("status", alice, "m0", "q0");
+		store.updateTurn(record.threadId, 0, { status: "complete", answer: "a" });
+		for (let i = 1; i < MESH_MAX_TURNS_PER_THREAD; i++) {
+			expect(store.appendTurn(record.threadId, `m${i}`, `q${i}`)).toBe(i);
+			store.updateTurn(record.threadId, i, { status: "complete", answer: "a" });
+		}
+		await store.flush();
+		const onDisk = await fs.readFile(path.join(dir, "mesh-threads", `entry-${record.threadId}.json`), "utf8");
+
+		const refused = await refusal(() => store.appendTurn(record.threadId, "mx", "qx"));
+		expect(refused.code).toBe("bad_request");
+		expect(refused.message).toContain("full");
+		expect(record.turns).toHaveLength(MESH_MAX_TURNS_PER_THREAD);
+		await store.flush();
+		expect(await fs.readFile(path.join(dir, "mesh-threads", `entry-${record.threadId}.json`), "utf8")).toBe(onDisk);
 	});
 });
 

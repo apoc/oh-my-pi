@@ -1,6 +1,6 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { describe, expect, it, vi } from "bun:test";
-import { createRoot, resolveChildren, type UiNode } from "@oh-my-pi/pi-tui";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { createRoot, resolveChildren, setNativeRenderingForTest, type UiNode } from "@oh-my-pi/pi-tui";
 import { decodeMouse } from "@oh-my-pi/pi-tui/driver/input/mouse";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import type { BtwHistoryRecord } from "../../../../src/session/btw-history-model";
@@ -229,6 +229,8 @@ function sheetModel(extra: Partial<BtwHistoryOptions> = {}): BtwHistoryModel {
 	});
 }
 
+afterEach(() => setNativeRenderingForTest(false));
+
 describe("BtwHistoryModel with host texts and new topics", () => {
 	it("starts a new topic from an empty sheet with custom texts, natively and in text", async () => {
 		const accepted = Promise.withResolvers<boolean>();
@@ -294,14 +296,42 @@ describe("BtwHistoryModel with host texts and new topics", () => {
 	});
 
 	it("offers New question beside the answer's actions while a topic is shown", () => {
+		setNativeRenderingForTest(true);
 		const model = sheetModel({ records: [rec("a")], onStart: async () => true });
 		expect(keys(model)).toContain("start");
-		expect(model.attachImage({ type: "image", data: "", mimeType: "image/png" })).toBeUndefined();
 		model.key(keyEvent("n"));
-		// The new topic's composer takes the reader's place.
+		// Natively the new topic's composer takes the reader's place.
 		const nodes = keys(model);
 		expect(nodes).toContain("composer");
 		expect(nodes).not.toContain("thread");
+	});
+
+	it("keeps painting the selected topic in the terminal while a new topic is written", () => {
+		const model = sheetModel({
+			records: [rec("a", { question: "What is up", answer: "Everything is fine here." })],
+			onStart: async () => true,
+		});
+		expect(screenText(model)).toContain("Everything is fine here.");
+		model.key(keyEvent("n"));
+		const screen = screenText(model);
+		expect(screen).toContain("What is up");
+		expect(screen).toContain("Everything is fine here.");
+		expect(screen).toContain("Ask: ");
+	});
+
+	it("attaches images only to a follow-up of a host that takes them", () => {
+		const image = { type: "image" as const, data: "", mimeType: "image/png" };
+		const meshStyle = sheetModel({ records: [rec("a")], canFollowUp: () => true, onFollowUp: async () => true });
+		expect(meshStyle.openFollowUp("a")).toBe(true);
+		expect(meshStyle.attachImage(image)).toBeUndefined();
+		const btwStyle = sheetModel({
+			records: [rec("a")],
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			onPasteImage: async () => {},
+		});
+		expect(btwStyle.openFollowUp("a")).toBe(true);
+		expect(btwStyle.attachImage(image)).toBe("[Image #1]");
 	});
 
 	it("keeps the /btw empty state and offers no new topic without onStart", () => {
@@ -329,5 +359,32 @@ describe("BtwHistoryModel with host texts and new topics", () => {
 		expect(screen).toContain("Waiting · ");
 		expect(screen).toContain("Waiting for the agent…");
 		expect(nativeNodes(model).find(node => node.key === "stop")?.props.title).toStartWith("Stop waiting");
+	});
+});
+
+describe("BtwHistoryModel plainAnswers", () => {
+	const LINK = "see [docs](https://evil.example) now";
+	const open = (plainAnswers?: boolean) =>
+		sheetModel({ records: [rec("a", { question: "q", answer: LINK })], plainAnswers });
+	/** The answer column's content node (the next node in tree order). */
+	const answerContent = (model: BtwHistoryModel) => {
+		const nodes = nativeNodes(model);
+		return nodes[nodes.findIndex(node => node.key === "answer") + 1];
+	};
+
+	it("renders a link-bearing answer as plain text natively and keeps the question markdown", () => {
+		const model = open(true);
+		expect(answerContent(model)).toMatchObject({ kind: "text", props: { text: LINK } });
+		expect(nativeNodes(model).some(node => node.kind === "md" && node.props.text === "q")).toBe(true);
+	});
+
+	it("renders a link-bearing answer as plain text in the terminal", () => {
+		expect(screenText(open(true))).toContain(LINK);
+	});
+
+	it("keeps markdown answers by default", () => {
+		const model = open();
+		expect(answerContent(model)?.kind).toBe("md");
+		expect(screenText(model)).not.toContain(LINK);
 	});
 });

@@ -1058,4 +1058,30 @@ describe("system prompt tool inventory", () => {
 		expect(await advertises(["read", "bash"], [{ name: "mesh_peers", summary: "Lists mesh peers." }])).toBe(true);
 		expect(await advertises(["read", "bash", "mesh_peers"], [])).toBe(true);
 	});
+
+	it("names no empty mesh_peers reference when only mesh_send is present", async () => {
+		const render = async (toolNames: string[]) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames,
+				tools: TOOLS,
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			});
+			const text = systemPrompt.join("\n\n");
+			const start = text.indexOf("# Mesh Peers");
+			const end = text.indexOf("⁂ Workflow", start);
+			expect(start).toBeGreaterThan(-1);
+			expect(end).toBeGreaterThan(start);
+			return text.slice(start, end);
+		};
+		const withoutPeers = await render(["read", "bash", "mesh_send"]);
+		expect(withoutPeers).not.toContain("``");
+		expect(withoutPeers).not.toContain("lists them");
+		expect(withoutPeers).toContain("`mesh-peers` notices");
+		const withPeers = await render(["read", "bash", "mesh_send", "mesh_peers"]);
+		expect(withPeers).toContain("`mesh_peers` lists them");
+	});
 });

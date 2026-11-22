@@ -57,7 +57,7 @@ interface BtwRequest {
 }
 
 /** Model options a side-conversation sheet supplies; the rest come from the interactive context. */
-export type BtwSheetOptions = Omit<
+type BtwSheetOptions = Omit<
 	BtwHistoryOptions,
 	"spaceHoldKeys" | "spaceHold" | "injectKey" | "terminalRows" | "escapeHides"
 >;
@@ -102,12 +102,13 @@ export function showBtwHistorySheet(
 			},
 		},
 	);
-	// Image pastes (Ctrl+V, dropped paths) attach to the follow-up being written.
+	// Image pastes (Ctrl+V, dropped paths) attach to the follow-up being written; a composer that takes none says so.
 	ctx.promptPasteTarget = {
 		node: handle.node,
 		attachImage: image => {
 			const marker = model.attachImage(image);
 			if (marker) model.paste(marker);
+			else if (model.composer) ctx.showStatus("Image paste is not supported in this prompt");
 		},
 		setText: text => model.setDraft({ text, cursor: text.length }),
 	};
